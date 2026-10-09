@@ -271,7 +271,7 @@ def _tick_to_seconds(points: list[tuple[int, float]], tick: int, ticks_per_beat:
     return seconds
 
 
-def build_score(path: Path, track: str | int | None, transpose: int) -> VocalScore:
+def build_score(path: Path, track: str | int | None, transpose: int, legato: float = 0.0) -> VocalScore:
     midi = mido.MidiFile(path)
     track_index = find_track(midi, track)
     track_name = _track_names(midi)[track_index]
@@ -295,22 +295,31 @@ def build_score(path: Path, track: str | int | None, transpose: int) -> VocalSco
     cursor_tick = 0
     for start, end, pitch in raw:
         if start > cursor_tick:
-            rest_seconds = _tick_to_seconds(tempos, start, midi.ticks_per_beat) - _tick_to_seconds(
-                tempos, cursor_tick, midi.ticks_per_beat
-            )
-            if rest_seconds > 0:
-                notes.append(
-                    ScoreNote(
-                        note_id,
-                        None,
-                        cursor_tick / midi.ticks_per_beat,
-                        (start - cursor_tick) / midi.ticks_per_beat,
-                        _tick_to_seconds(tempos, cursor_tick, midi.ticks_per_beat),
-                        rest_seconds,
-                        True,
-                    )
+            gap_beats = (start - cursor_tick) / midi.ticks_per_beat
+            if legato and gap_beats <= legato and notes and not notes[-1].is_rest:
+                # legato: the previous note runs on into this one instead of a silent gap
+                previous = notes[-1]
+                previous.beats += gap_beats
+                previous.seconds = (
+                    _tick_to_seconds(tempos, start, midi.ticks_per_beat) - previous.start_seconds
                 )
-                note_id += 1
+            else:
+                rest_seconds = _tick_to_seconds(tempos, start, midi.ticks_per_beat) - _tick_to_seconds(
+                    tempos, cursor_tick, midi.ticks_per_beat
+                )
+                if rest_seconds > 0:
+                    notes.append(
+                        ScoreNote(
+                            note_id,
+                            None,
+                            cursor_tick / midi.ticks_per_beat,
+                            (start - cursor_tick) / midi.ticks_per_beat,
+                            _tick_to_seconds(tempos, cursor_tick, midi.ticks_per_beat),
+                            rest_seconds,
+                            True,
+                        )
+                    )
+                    note_id += 1
         key = pitch + transpose
         if not 0 <= key <= 127:
             raise SingingError(
@@ -349,7 +358,23 @@ def build_score(path: Path, track: str | int | None, transpose: int) -> VocalSco
     )
 
 
+_FLAT_MAJOR_TONICS = {1, 3, 5, 6, 8, 10}  # Db Eb F Ab Bb Gb
+
+
+def _score_prefers_flats(score: VocalScore) -> bool:
+    """Spell the score like the chords: a flat key (e.g. C minor -> Eb major) reads Eb, not D#."""
+    from collections import Counter
+
+    from chordsmith.theory import SCALES
+
+    totals: Counter[int] = Counter(note.key % 12 for note in score.notes if note.key is not None)
+    major = SCALES["major"]
+    tonic = max(range(12), key=lambda t: (sum(totals[(t + i) % 12] for i in major), -t))
+    return tonic in _FLAT_MAJOR_TONICS
+
+
 def _score_payload(score: VocalScore) -> dict:
+    flats = _score_prefers_flats(score)
     return {
         "score_id": score.score_id,
         "source": score.source,
@@ -363,7 +388,7 @@ def _score_payload(score: VocalScore) -> dict:
                 "note_id": note.note_id,
                 "kind": "rest" if note.is_rest else "note",
                 "pitch": note.key,
-                "name": midi_note_name(note.key) if note.key is not None else None,
+                "name": midi_note_name(note.key, flats) if note.key is not None else None,
                 "start_beat": round(note.start_beat, 4),
                 "beats": round(note.beats, 4),
                 "start_seconds": round(note.start_seconds, 4),
@@ -400,46 +425,9 @@ def build_mapping(
     wordless = lyrics is None or lyrics.strip() == ""
     warnings: list[str] = []
     sung = [note for note in score.notes if not note.is_rest]
-    syllables: list[str] = []
-    phonemes_per_note: dict[int, list[str]] = {}
-    english = False
-    if not wordless:
-        if language == "en":
-            if not diffsinger.available():
-                raise SingingError(
-                    "English lyrics need the DiffSinger voicebank (see docs/singing.md) and "
-                    "CHORDSMITH_DIFFSINGER_VOICE. Use wordless mode or Japanese kana for VOICEVOX."
-                )
-            english = True
-            syllables = diffsinger.split_syllables(lyrics)
-            if len(syllables) > len(sung):
-                warnings.append(
-                    f"{len(syllables) - len(sung)} extra syllables were not used "
-                    f"(the melody has {len(sung)} notes)."
-                )
-                syllables = syllables[: len(sung)]
-            if len(syllables) < len(sung):
-                warnings.append(
-                    f"{len(sung) - len(syllables)} notes had no syllable and were turned into rests "
-                    "(no words were invented)."
-                )
-            bank = diffsinger.get_voicebank()
-            phones_per_token, _ = diffsinger.phonemize_tokens(bank, syllables)
-            for note, phones in zip(sung, phones_per_token, strict=True):
-                phonemes_per_note[note.note_id] = phones
-        else:
-            syllables = _parse_syllables(lyrics, language)
-            if len(syllables) > len(sung):
-                warnings.append(
-                    f"{len(syllables) - len(sung)} extra syllables were not used "
-                    f"(the melody has {len(sung)} notes)."
-                )
-            if len(syllables) < len(sung):
-                warnings.append(
-                    f"{len(sung) - len(syllables)} notes had no syllable and were turned into rests "
-                    "(no words were invented)."
-                )
 
+    # Holds are applied first: the notes a hold consumes never get their own text or phonemes,
+    # so syllables and sounds stay aligned on the notes that remain.
     holds = holds or {}
     held_seconds: dict[int, float] = {}
     skipped: set[int] = set()
@@ -457,25 +445,57 @@ def build_mapping(
                         note.seconds for note in sung if note.note_id == target
                     )
                     skipped.add(target)
+    remaining = [note for note in sung if note.note_id not in skipped]
+
+    syllables: list[str] = []
+    phonemes_per_note: dict[int, list[str]] = {}
+    english = False
+    if not wordless:
+        if language == "en":
+            if not diffsinger.available():
+                raise SingingError(
+                    "English lyrics need the DiffSinger voicebank (see docs/singing.md) and "
+                    "CHORDSMITH_DIFFSINGER_VOICE. Use wordless mode or Japanese kana for VOICEVOX."
+                )
+            english = True
+            syllables = diffsinger.split_syllables(lyrics)
+        else:
+            syllables = _parse_syllables(lyrics, language)
+        if len(syllables) > len(remaining):
+            warnings.append(
+                f"{len(syllables) - len(remaining)} extra syllables were not used "
+                f"(the melody has {len(remaining)} singable notes)."
+            )
+            syllables = syllables[: len(remaining)]
+        if len(syllables) < len(remaining):
+            warnings.append(
+                f"{len(remaining) - len(syllables)} notes had no syllable and were turned into rests "
+                "(no words were invented)."
+            )
+        if english and syllables:
+            bank = diffsinger.get_voicebank()
+            phones_per_token, _ = diffsinger.phonemize_tokens(bank, syllables)
+            # intentional short zip: notes beyond the syllable list become rests
+            for note, phones in zip(remaining, phones_per_token, strict=False):
+                phonemes_per_note[note.note_id] = phones
+    syllable_by_note = {
+        note.note_id: syllables[index] for index, note in enumerate(remaining) if index < len(syllables)
+    }
 
     mapping_notes: list[MappingNote] = []
-    syllable_iter = iter(syllables)
     for note in score.notes:
         if note.is_rest:
             mapping_notes.append(MappingNote(note.note_id, None, note.start_seconds, note.seconds, "", True))
             continue
         if note.note_id in skipped:
             continue
-        phonemes: list[str] | None = None
         if wordless:
             lyric = WORDLESS_LYRIC
-        elif english:
-            lyric = next(syllable_iter, "")
-            phonemes = phonemes_per_note.get(note.note_id)
-            if lyric == "":
-                phonemes = None  # no syllable: this note becomes a rest
         else:
-            lyric = next(syllable_iter, "")
+            lyric = syllable_by_note.get(note.note_id, "")
+        phonemes = phonemes_per_note.get(note.note_id)
+        if not wordless and lyric == "":
+            phonemes = None  # no syllable: this note becomes a rest
         is_rest = not wordless and lyric == ""
         seconds = note.seconds + held_seconds.get(note.note_id, 0.0)
         mapping_notes.append(
@@ -550,7 +570,11 @@ class SoftSettings(BaseModel):
         1.0, ge=0.5, le=2.0, description="DiffSinger only: singing speed factor (1.0 = original)."
     )
     gender: float = Field(
-        -1.0, ge=-1.0, le=1.0, description="DiffSinger only: formant/gender shift (0 = neutral)."
+        0.0,
+        ge=-1.0,
+        le=1.0,
+        description="DiffSinger only: formant/gender shift, 0 = the voicebank's own character "
+        "(positive shifts up, negative down; large values sound unnatural).",
     )
     expr: float = Field(
         1.0, ge=0.0, le=1.0, description="DiffSinger only: pitch expressiveness (1.0 = natural)."
@@ -796,8 +820,8 @@ def _peak_db(path: Path) -> float:
     return float(match.group(1))
 
 
-def _mix_filters(vocal_volume: float, backing_volume: float, reverb: bool, output_gain_db: float) -> str:
-    vocal = f"[1:a]volume={vocal_volume:.3f}"
+def _mix_filters(vocal_gain: float, backing_volume: float, reverb: bool, output_gain_db: float) -> str:
+    vocal = f"[1:a]volume={vocal_gain:.4f}"
     if reverb:
         vocal += ",aecho=0.8:0.9:60:0.25"
     filters = (
@@ -808,9 +832,52 @@ def _mix_filters(vocal_volume: float, backing_volume: float, reverb: bool, outpu
     return filters + "[m]"
 
 
+def gated_rms_db(path: Path, gate: float = 0.004) -> float:
+    """RMS level (dBFS) of the samples above a small gate: active loudness, not silence.
+
+    Pure Python so mixing works without extra audio libraries; every fourth sample is enough
+    for a level estimate.
+    """
+    import array
+    import math
+
+    with wave.open(str(path), "rb") as handle:
+        if handle.getsampwidth() != 2:
+            raise SingingError("Mixing expects 16-bit audio files.")
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    samples = samples[::4]
+    total = 0.0
+    count = 0
+    for sample in samples:
+        value = sample / 32768.0
+        if abs(value) >= gate:
+            total += value * value
+            count += 1
+    if count == 0:
+        return -120.0
+    return 20.0 * math.log10(math.sqrt(total / count))
+
+
 def mix_tracks(
-    backing: Path, vocal: Path, target: Path, *, vocal_volume: float, backing_volume: float, reverb: bool
+    backing: Path,
+    vocal: Path,
+    target: Path,
+    *,
+    vocal_level_db: float = 6.0,
+    backing_volume: float = 1.0,
+    reverb: bool = False,
 ) -> dict:
+    """Mix the vocal into the backing, balancing levels by measurement.
+
+    ``vocal_level_db`` is the target level of the vocal *above the band*, measured over the
+    active (sung) parts of both stems, so quiet backings and loud vocals are corrected instead
+    of being multiplied blindly. The mix is turned down if it would clip.
+    """
+    backing_db = gated_rms_db(backing)
+    vocal_db = gated_rms_db(vocal)
+    vocal_gain_db = (backing_db + vocal_level_db) - vocal_db
+    vocal_gain = 10.0 ** (vocal_gain_db / 20.0)
     _ffmpeg(
         [
             "-y",
@@ -819,7 +886,7 @@ def mix_tracks(
             "-i",
             str(vocal),
             "-filter_complex",
-            _mix_filters(vocal_volume, backing_volume, reverb, 0.0),
+            _mix_filters(vocal_gain, backing_volume, reverb, 0.0),
             "-map",
             "[m]",
             "-ar",
@@ -839,7 +906,7 @@ def mix_tracks(
                 "-i",
                 str(vocal),
                 "-filter_complex",
-                _mix_filters(vocal_volume, backing_volume, reverb, correction),
+                _mix_filters(vocal_gain, backing_volume, reverb, correction),
                 "-map",
                 "[m]",
                 "-ar",
@@ -855,6 +922,10 @@ def mix_tracks(
         "clipping": peak > -0.1,
         "gain_correction_db": correction,
         "duration_seconds": round(duration, 3),
+        "backing_rms_db": round(backing_db, 1),
+        "vocal_rms_db": round(vocal_db, 1),
+        "vocal_gain_db": round(vocal_gain_db, 1),
+        "vocal_to_backing_db": round(vocal_gain_db + vocal_db - backing_db, 1),
     }
 
 
@@ -992,14 +1063,26 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             int,
             Field(ge=-24, le=24, description="Semitones for the vocal line (default -12: soft register)."),
         ] = DEFAULT_TRANSPOSE,
+        legato: Annotated[
+            float,
+            Field(
+                ge=0.0,
+                le=2.0,
+                description="Close gaps between notes shorter than this many beats, so syllables "
+                "connect (0 = off; 0.25 joins typical instrument articulations and keeps words "
+                "together).",
+            ),
+        ] = 0.0,
     ) -> dict[str, Any]:
         """Prepare a monophonic vocal score from a MIDI melody track, with rests and frame timings.
 
-        The source file is never changed. Fails if the track has overlapping notes.
+        The source file is never changed. Fails if the track has overlapping notes. Use ``legato``
+        to close the tiny gaps an instrumental melody leaves between notes, so the voice does not
+        stop and start inside words.
         """
         store = _get_store()
         assert store is not None
-        score = build_score(store.existing_path(filename), track, transpose)
+        score = build_score(store.existing_path(filename), track, transpose, legato)
         with _registry.lock:
             _registry.scores[score.score_id] = score
         return _score_payload(score)
@@ -1020,7 +1103,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         ] = "ja",
         holds: Annotated[
             dict[int, int] | None,
-            Field(description='Optional holds: {"<note_id>": how many following notes it is held over.'),
+            Field(
+                description='Optional holds: {"<note_id>": how many following notes it is held over}. '
+                "The held note keeps its pitch for the whole length; use '+' instead when the "
+                "syllable should move across changing pitches."
+            ),
         ] = None,
     ) -> dict[str, Any]:
         """Attach one token per note (or 'う' on every note in wordless mode).
@@ -1085,9 +1172,21 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             str | int | None,
             Field(description="Track to leave out of the backing (default: the same melody track)."),
         ] = None,
-        vocal_volume: Annotated[float, Field(ge=0.0, le=2.0, description="Vocal level.")] = 0.9,
-        backing_volume: Annotated[float, Field(ge=0.0, le=2.0, description="Backing level.")] = 0.55,
-        reverb: Annotated[bool, Field(description="Gentle reverb on the vocal.")] = True,
+        vocal_level_db: Annotated[
+            float,
+            Field(
+                ge=-12.0,
+                le=18.0,
+                description="How loud the vocal sits above the backing, in dB, measured over the "
+                "sung parts (default 6: clearly on top but not overpowering).",
+            ),
+        ] = 6.0,
+        backing_volume: Annotated[
+            float, Field(ge=0.0, le=2.0, description="Backing trim (1.0 = the rendered level).")
+        ] = 1.0,
+        reverb: Annotated[
+            bool, Field(description="Gentle reverb on the vocal (off by default: clarity first).")
+        ] = False,
         output_filename: Annotated[
             str | None, Field(description="Name for the mix (default: <source>_mix).")
         ] = None,
@@ -1095,7 +1194,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     ) -> dict[str, Any]:
         """Render the backing without the guide track, mix in the vocal, and check for clipping.
 
-        The mix is gently corrected down if it would clip, so exports stay clean.
+        Levels are balanced by measurement: the vocal is placed ``vocal_level_db`` above the
+        backing's active level, so quiet backings and loud vocals are corrected instead of being
+        multiplied blindly. The mix is gently turned down if it would clip.
         """
         store = _get_store()
         assert store is not None
@@ -1119,7 +1220,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             backing_wav,
             vocal_path,
             target,
-            vocal_volume=vocal_volume,
+            vocal_level_db=vocal_level_db,
             backing_volume=backing_volume,
             reverb=reverb,
         )
@@ -1131,7 +1232,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             "source": source_path.name,
             "vocal": vocal_path.name,
             "backing": backing_wav.name,
-            "levels": {"vocal": vocal_volume, "backing": backing_volume},
+            "levels": {"vocal_level_db": vocal_level_db, "backing_volume": backing_volume},
             "guide_removed": _track_names(midi)[track_index],
             **info,
         }

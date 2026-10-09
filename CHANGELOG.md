@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `legato` option on `prepare_vocal_score`: closes gaps between notes shorter than the given
+  number of beats, so syllables connect instead of being broken apart by instrumental
+  articulations (recommended: `0.25`).
+- `/healthz` reports the running version (useful when auditing which build is deployed).
+- Closing consonants may use up to half of a note (was 40%), so dense codas stay intelligible.
+
+### Fixed
+
+- **Mixing balances levels by measurement.** `mix_song_with_vocals` measures the active level
+  (gated RMS) of both stems and places the vocal `vocal_level_db` (default 6 dB) above the
+  backing, instead of multiplying each stem blindly. Reverb defaults to off for clarity, and the
+  result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db` and `vocal_to_backing_db`.
+- **English lyric mapping no longer crashes on fewer syllables than notes** (the extra notes
+  become rests with a warning), and phonemes are assigned to the notes that remain after holds,
+  so text and sounds stay aligned.
+- **`+` now carries only the vowel** onto the next note (a slur: "gold +" sings "g-old", not
+  "gold gold").
+- **DiffSinger `gender` defaults to 0** (the voicebank's own character) instead of the extreme
+  −1 shift.
+- **Vocal scores spell notes to match the key** (Eb/Ab/Bb in flat keys, like the chord tools,
+  instead of D#/G#/A#).
+
 Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
 (jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene

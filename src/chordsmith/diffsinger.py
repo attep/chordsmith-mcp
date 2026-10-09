@@ -204,20 +204,20 @@ def phonemize_tokens(bank: _Voicebank, tokens: list[str]) -> tuple[list[list[str
     """Map syllable tokens to phonemes per note; refuses unknown words by name."""
     result: list[list[str]] = []
     unknown: list[str] = []
-    previous: list[str] = []
+    previous_vowel: str | None = None
     for token in tokens:
         if token == "+":
-            if not previous:
-                raise DiffSingerError("'+' needs a preceding note with lyrics.")
-            result.append(list(previous))
+            if previous_vowel is None:
+                raise DiffSingerError("'+' needs a preceding syllable with a vowel.")
+            result.append([previous_vowel])  # a slur carries the vowel onto the new pitch
             continue
         if token == "-":
             result.append(["SP"])
-            previous = []
+            previous_vowel = None
             continue
         if token == "br":
             result.append(["AP"])
-            previous = []
+            previous_vowel = None
             continue
         try:
             phones = bank.phonemize(token)
@@ -225,7 +225,8 @@ def phonemize_tokens(bank: _Voicebank, tokens: list[str]) -> tuple[list[list[str
             unknown.append(token)
             continue
         result.append(phones)
-        previous = phones
+        vowels = [p for p in phones if bank.is_vowel(p) and p not in ("SP", "AP")]
+        previous_vowel = vowels[-1] if vowels else None
     if unknown:
         raise DiffSingerError(
             "These words are not in the voicebank's English dictionary or CMUdict: "
@@ -296,7 +297,8 @@ def plan_timeline(
         coda_total = 0
         if coda:
             wanted_coda = int(round(sum(weights[vowel_position + 1 + k] for k in range(len(coda)))))
-            coda_total = min(max(len(coda), wanted_coda), max(len(coda), int(note_frames * 0.4)))
+            # up to half the note goes to closing consonants, so dense codas stay intelligible
+            coda_total = min(max(len(coda), wanted_coda), max(len(coda), int(note_frames * 0.5)))
         vowel_frames = max(1, note_frames - coda_total)
 
         cursor = sum(entry["frames"] for entry in timeline)

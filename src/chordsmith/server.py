@@ -88,8 +88,8 @@ Seed = Annotated[
 
 @mcp.custom_route("/healthz", methods=["GET"])
 async def health_check(_request: Request) -> Response:
-    """Liveness probe for container platforms."""
-    return JSONResponse({"status": "ok"})
+    """Liveness probe for container platforms (includes the running version)."""
+    return JSONResponse({"status": "ok", "version": __version__})
 
 
 @mcp.custom_route("/files/{filename}", methods=["GET"])

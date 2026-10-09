@@ -26,12 +26,15 @@ backing. Two engines are supported:
    every note), pass Japanese kana (`う う う`), or English words/syllables with `language: "en"`
    (`so- di- um gold`; `+` continues the previous note, `-` is a pause, `br` a breath). English
    tokens are phonemized here as a dry run; unknown words are refused by name. Mismatches produce
-   warnings; words are never dropped or invented. `holds` merges a note into the following ones.
+   warnings; words are never dropped or invented. `holds` merges a note into the following ones
+   (one sustained pitch; use `+` when a syllable should move across changing pitches — it carries
+   only the vowel, so "gold +" sings "g-old" on the new note, not "gold gold").
 3. `render_singing` starts a background job and returns immediately; `get_singing_job` reports
    `queued`, `running`, `done` (with the vocal file) or `failed` (with the error). Repeating the
    same request reuses the finished job instead of rendering twice.
-4. `mix_song_with_vocals` renders the backing **without the guide track**, mixes the vocal in at
-   soft levels with gentle reverb, and corrects the gain if the mix would clip.
+4. `mix_song_with_vocals` renders the backing **without the guide track** and balances levels by
+   measurement: the vocal is placed `vocal_level_db` (default 6 dB) above the backing's active
+   level, reverb is off by default, and the mix is turned down if it would clip.
 5. `export_vocal_song` returns the mix as WAV and MP3, the vocal alone, and the untouched MIDI —
    as base64 or as signed, expiring links (the same mechanism as `get_midi_file`).
 
@@ -64,7 +67,7 @@ Then, in your AI app:
 | Tool | What it does |
 |---|---|
 | `list_singing_voices` | Voices with language, licence note and supported soft controls |
-| `prepare_vocal_score` | Melody MIDI track → vocal score (score id, notes, rests, frames) |
+| `prepare_vocal_score` | Melody MIDI track → vocal score (score id, notes, rests, frames; `legato` closes small gaps) |
 | `map_vocal_lyrics` | Score → lyrics mapping (wordless or kana), with warnings |
 | `render_singing` | Mapping + voice → background job (job id) |
 | `get_singing_job` | Job status; when done, the vocal file, sample rate, length, offset |
@@ -110,8 +113,9 @@ Voices: `diffsinger:hanami/root`, `diffsinger:hanami/fragrance` and `diffsinger:
 voice.
 
 **Settings** (inside `settings`): `velocity` (0.5–2.0, singing speed), `gender` (−1..1 formant
-shift), `expr` (0–1 pitch expressiveness), `steps` (diffusion steps, default 20) and `depth`
-(≤ 0.6). `energy` works as output gain; `breathiness` is refused (this voicebank has none).
+shift; **default 0** keeps the voicebank's own character — large values sound unnatural),
+`expr` (0–1 pitch expressiveness), `steps` (diffusion steps, default 20) and `depth` (≤ 0.6).
+`energy` works as output gain; `breathiness` is refused (this voicebank has none).
 Rendering takes tens of seconds on CPU for a full song — it runs in the same background job flow
 as VOICEVOX.
 
@@ -120,12 +124,29 @@ License (any creative use including commercial, credit required); the bundled AI
 is CC BY-NC-SA 4.0 (**non-commercial**) — get written permission or swap the vocoder before a
 commercial release. Always check each voicebank's own terms.
 
+## Writing lyrics that stay clear
+
+An instrumental melody leaves 30–50 ms gaps between notes; sung literally, those gaps break words
+apart ("so-di ... um"). Practical guidance, drawn from listening tests:
+
+- **Join the notes**: pass `legato: 0.25` to `prepare_vocal_score` so gaps shorter than a quarter
+  beat are closed and syllables connect. Leading silence is kept.
+- **Fewer syllables, deliberate alignment**: put stressed syllables on the longer notes, and use
+  `+` to carry a vowel across several notes (melisma) instead of cramming new text onto every
+  instrumental note. `holds` sustains one pitch; `+` follows the melody.
+- **Simplify short notes**: avoid dense consonant clusters ("streets", "lights") when a note only
+  lasts a quarter second; spell a word differently or give it a longer note.
+- **Clarity first, softness later**: mix with the default `vocal_level_db: 6` and reverb **off**
+  to judge diction, then add reverb or lower the vocal if the song needs it.
+
 ## Mixing and export
 
-`mix_song_with_vocals` defaults: vocal `0.9`, backing `0.55`, gentle reverb on. The guide track
-(usually `Melody`) is left out of the backing by default. The mix is measured with ffmpeg
-(`volumedetect`) and, if the peak would clip, re-rendered with a corrective gain so exports stay
-clean (`clipping: false`). Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original
+`mix_song_with_vocals` measures the active level (gated RMS) of both stems and places the vocal
+`vocal_level_db` dB above the band (default `6`); `backing_volume` trims the backing (default
+`1.0`) and `reverb` is **off** by default. The guide track (usually `Melody`) is left out of the
+backing by default. The result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db` and
+`vocal_to_backing_db` so the balance is visible, and the mix is turned down if the peak would
+clip (`clipping: false`). Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original
 `.mid`, all via base64 or signed links.
 
 ## Settings
@@ -140,7 +161,9 @@ clean (`clipping: false`). Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and t
 - One note at a time: `prepare_vocal_score` fails on overlapping notes (pick a monophonic track).
 - VOICEVOX sings Japanese kana or a wordless hum; English words need the DiffSinger voicebank.
 - English phonemization uses the voicebank's own dictionary first, then CMUdict; words that are
-  in neither are refused by name (never silently skipped).
+  in neither are refused by name (never silently skipped). Extra syllables are reported and
+  ignored, missing ones become rests — the mapping never crashes on a length mismatch.
+- Score note names follow the key: flat keys read Eb/Ab/Bb, matching the chord tools.
 - Scores, mappings and jobs live in memory and expire after 24 hours.
 - Voicebanks are never committed or built into the image (there is a test that enforces this).
 - VOICEVOX engine is LGPL-3.0 and every character has its own terms of use. DiffSinger voicebanks

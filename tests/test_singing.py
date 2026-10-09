@@ -350,21 +350,52 @@ def _full_audio_ready() -> bool:
     )
 
 
+def _write_constant_wav(path, amplitude: int, seconds: float = 1.0, rate: int = 44100) -> None:
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(amplitude.to_bytes(2, "little") * round(seconds * rate))
+
+
+def test_gated_rms_db(tmp_path):
+    loud = tmp_path / "loud.wav"
+    quiet = tmp_path / "quiet.wav"
+    _write_constant_wav(loud, 32767)
+    _write_constant_wav(quiet, 3277)
+    assert abs(singing.gated_rms_db(loud) - 0.0) < 0.1
+    assert abs(singing.gated_rms_db(quiet) + 20.0) < 0.2
+    silence = tmp_path / "silence.wav"
+    _write_constant_wav(silence, 0)
+    assert singing.gated_rms_db(silence) == -120.0
+
+
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
 def test_mix_corrects_clipping(tmp_path):
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
-    for path in (backing, vocal):
-        with wave.open(str(path), "wb") as handle:
-            handle.setnchannels(1)
-            handle.setsampwidth(2)
-            handle.setframerate(44100)
-            handle.writeframes((30000).to_bytes(2, "little") * 44100)
+    _write_constant_wav(backing, 30000)
+    _write_constant_wav(vocal, 30000)
     target = tmp_path / "mix.wav"
-    info = singing.mix_tracks(backing, vocal, target, vocal_volume=0.9, backing_volume=0.55, reverb=True)
+    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, reverb=True)
     assert info["clipping"] is False
     assert info["peak_db"] <= -0.1
     assert abs(info["duration_seconds"] - 1.0) < 0.05
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_balances_levels_by_measurement(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 3000)
+    _write_constant_wav(vocal, 24000)
+    target = tmp_path / "mix.wav"
+    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0)
+    expected_gain = singing.gated_rms_db(backing) + 6.0 - singing.gated_rms_db(vocal)
+    assert abs(info["vocal_gain_db"] - expected_gain) <= 0.2  # the loud vocal is turned down
+    assert info["vocal_gain_db"] < 0
+    assert abs(info["vocal_to_backing_db"] - 6.0) <= 0.2
+    assert info["clipping"] is False
 
 
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
@@ -534,3 +565,90 @@ def test_voicebank_never_enters_the_repo():
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8").lower()
     assert "voicebank" not in dockerfile
     assert "dsconfig" not in dockerfile
+
+
+# ------------------------------------------------------------------ audit fixes
+
+
+async def _make_melody(store, notes, name="melody", tempo=120):
+    store.ensure_root()
+    await _call("create_chord_progression", {"chords": ["C"], "filename": name, "tempo": tempo})
+    result = await _call("add_track", {"filename": f"{name}.mid", "track_name": "Melody", "notes": notes})
+    return result.structuredContent["filename"]
+
+
+def test_gender_defaults_to_neutral():
+    assert singing.SoftSettings().gender == 0.0  # Hanami's own character, not an extreme shift
+
+
+async def test_legato_closes_small_gaps(store):
+    notes = [
+        {"pitch": "C5", "start_beat": 0.0, "beats": 0.5},
+        {"pitch": "D5", "start_beat": 0.55, "beats": 0.5},
+        {"pitch": "E5", "start_beat": 1.10, "beats": 0.5},
+    ]
+    song = await _make_melody(store, notes, name="legato")
+    plain = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    assert [note["kind"] for note in plain["notes"]] == ["note", "rest", "note", "rest", "note"]
+
+    joined = (
+        await _call("prepare_vocal_score", {"filename": song, "track": "Melody", "legato": 0.25})
+    ).structuredContent
+    assert [note["kind"] for note in joined["notes"]] == ["note", "note", "note"]
+    assert joined["notes"][0]["seconds"] > plain["notes"][0]["seconds"]  # runs into the next note
+
+
+async def test_score_spells_flats_in_flat_keys(store):
+    notes = [
+        {"pitch": pitch, "start_beat": index, "beats": 1}
+        for index, pitch in enumerate(["C5", "Eb5", "F5", "G5", "Ab5", "Bb5"])
+    ]
+    song = await _make_melody(store, notes, name="flat_key")
+    score = (
+        await _call("prepare_vocal_score", {"filename": song, "track": "Melody", "transpose": 0})
+    ).structuredContent
+    names = [note["name"] for note in score["notes"] if note["kind"] == "note"]
+    assert names == ["C5", "Eb5", "F5", "G5", "Ab5", "Bb5"]  # not D#5/G#5/A#5
+
+
+@needs_voicebank
+def test_plus_carries_only_the_vowel():
+    bank = diffsinger.get_voicebank()
+    phones, _ = diffsinger.phonemize_tokens(bank, ["gold", "+", "+"])
+    assert phones == [["g", "ow", "l", "d"], ["ow"], ["ow"]]
+
+
+@needs_voicebank
+async def test_english_fewer_syllables_becomes_rests_not_a_crash(store, fake_engine):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    mapping = (
+        await _call("map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "sodium", "language": "en"})
+    ).structuredContent
+    sung = [note for note in mapping["notes"] if note["kind"] == "note"]
+    assert len(sung) == 1
+    assert sung[0]["phonemes"] == ["s", "ow", "d", "iy", "ah", "m"]
+    assert any("had no syllable" in warning for warning in mapping["warnings"])
+    assert sum(1 for note in mapping["notes"] if note["kind"] == "rest") >= 3
+
+
+@needs_voicebank
+async def test_holds_keep_lyrics_and_phonemes_aligned(store, fake_engine):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    first_note_id = next(note["note_id"] for note in score["notes"] if note["kind"] == "note")
+    mapping = (
+        await _call(
+            "map_vocal_lyrics",
+            {
+                "score_id": score["score_id"],
+                "lyrics": "so- di- um gold",
+                "language": "en",
+                "holds": {str(first_note_id): 1},
+            },
+        )
+    ).structuredContent
+    sung = [note for note in mapping["notes"] if note["kind"] == "note"]
+    # note 0 holds over note 1; the remaining notes get so, di, um (gold is unused)
+    assert [note["lyric"] for note in sung] == ["so", "di", "um"]
+    assert [note["phonemes"] for note in sung] == [["s", "ow"], ["d", "iy"], ["ah", "m"]]
