@@ -68,10 +68,14 @@ Then, in your AI app:
 
 ## Voices and soft controls
 
-`list_singing_voices` asks the engine. The Docker engine image bundles one **song model**:
-波音リツ ノーマル (`voicevox:6000`). Other styles may be listed by the engine but fail at render
-with "style not found" until their song models are available — ChordSmith rejects the voice
-instead of substituting another one.
+`list_singing_voices` asks the engine. VOICEVOX styles come in two kinds: `sing` styles (like
+波音リツ ノーマル, `voicevox:6000`) can both prepare the frame query and synthesize, while
+`frame_decode` styles (most voices) can only synthesize. For a decode-only voice ChordSmith
+prepares the query with the engine's teacher style and synthesizes with the chosen voice's
+timbre, so the whole list is usable — including the whisper styles that suit the soft brief:
+四国めたん ヒソヒソ (`voicevox:3037`), ずんだもん ヒソヒソ (`voicevox:3038`) and
+満別花丸 ささやき (`voicevox:3071`). `list_singing_voices` marks each voice with `style_type`
+and `query_via_teacher`; the job result reports `query_voice_id` when a teacher was used.
 
 Soft controls (VOICEVOX):
 

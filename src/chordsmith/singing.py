@@ -490,6 +490,30 @@ def parse_voice_id(voice_id: str, singers: list[dict] | None = None) -> int:
     return speaker
 
 
+def _style_types(singers: list[dict]) -> dict[int, str]:
+    return {style["id"]: style.get("type", "sing") for singer in singers for style in singer["styles"]}
+
+
+def resolve_speakers(voice_id: str, singers: list[dict]) -> tuple[int, int]:
+    """Return (query speaker, synthesis speaker) for a voice.
+
+    VOICEVOX splits singing styles: only ``sing``/``singing_teacher`` styles can prepare the
+    frame query, while ``frame_decode`` styles (most voices, including the whisper styles) can
+    only synthesize. For a decode-only voice the query is prepared by the engine's teacher style
+    and the audio is synthesized with the chosen voice's timbre.
+    """
+    speaker = parse_voice_id(voice_id, singers)
+    types = _style_types(singers)
+    if types.get(speaker, "sing") in ("sing", "singing_teacher"):
+        return speaker, speaker
+    teacher = next(
+        (sid for sid, style_type in types.items() if style_type in ("sing", "singing_teacher")), None
+    )
+    if teacher is None:
+        raise SingingError("The engine offers no singing_teacher style to prepare the score.")
+    return teacher, speaker
+
+
 def _settings_dict(settings: SoftSettings | None) -> dict:
     data = (settings or SoftSettings()).model_dump(exclude_none=True)
     for unsupported in ("breathiness", "vibrato"):
@@ -501,7 +525,9 @@ def _settings_dict(settings: SoftSettings | None) -> dict:
     return data
 
 
-def _run_job(job: SingingJob, mapping: VocalMapping, score: VocalScore, speaker: int) -> None:
+def _run_job(
+    job: SingingJob, mapping: VocalMapping, score: VocalScore, query_speaker: int, synth_speaker: int
+) -> None:
     job.status = "running"
     try:
         client = get_client()
@@ -510,14 +536,14 @@ def _run_job(job: SingingJob, mapping: VocalMapping, score: VocalScore, speaker:
                 {"key": note.key, "frame_length": note.frames, "lyric": note.lyric} for note in mapping.notes
             ]
         }
-        query = client.sing_frame_audio_query(payload, speaker)
+        query = client.sing_frame_audio_query(payload, query_speaker)
         energy = float(job.settings.get("energy", 1.0))
         if energy != 1.0:
             query["volumeScale"] = float(query.get("volumeScale", 1.0)) * energy
         cap = job.settings.get("volume_cap")
         if cap is not None:
             query["volume"] = [min(float(v), float(cap)) for v in query.get("volume", [])]
-        data = client.frame_synthesis(query, speaker)
+        data = client.frame_synthesis(query, synth_speaker)
         store = _get_store()
         assert store is not None
         path = store.new_path(None, f"{Path(score.source).stem}_vocal", extension=".wav")
@@ -535,6 +561,7 @@ def _run_job(job: SingingJob, mapping: VocalMapping, score: VocalScore, speaker:
             "start_offset_seconds": 0.0,
             "mapping_id": mapping.mapping_id,
             "voice_id": job.voice_id,
+            "query_voice_id": f"voicevox:{query_speaker}",
         }
         job.status = "done"
     except Exception as exc:  # the job must fail loudly, never render twice
@@ -553,7 +580,7 @@ def start_job(
         for job in _registry.jobs.values():
             if job.cache_key == cache_key and job.status in ("queued", "running", "done"):
                 return job, True
-    speaker = parse_voice_id(voice_id, get_client().singers())
+    query_speaker, synth_speaker = resolve_speakers(voice_id, get_client().singers())
     job = SingingJob(
         job_id=f"job_{uuid.uuid4().hex[:10]}",
         status="queued",
@@ -565,7 +592,9 @@ def start_job(
     )
     with _registry.lock:
         _registry.jobs[job.job_id] = job
-    thread = threading.Thread(target=_run_job, args=(job, mapping, score, speaker), daemon=True)
+    thread = threading.Thread(
+        target=_run_job, args=(job, mapping, score, query_speaker, synth_speaker), daemon=True
+    )
     thread.start()
     return job, False
 
@@ -700,22 +729,27 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         """List the singing voices an engine offers, with languages, licence notes and soft controls.
 
         The VOICEVOX adapter sings Japanese kana (or a wordless hum) and supports the 'energy' and
-        'volume_cap' soft controls.
+        'volume_cap' soft controls. Decode-only voices (including the whisper styles) are prepared
+        by the engine's teacher style and sung in the chosen voice's timbre.
         """
         _registry.prune()
         if engine not in ("voicevox", "all"):
             raise SingingError(f"Unknown engine '{engine}'.")
         client = get_client()
         singers = client.singers()
+        types = _style_types(singers)
         voices = []
         for singer in singers:
             for style in singer["styles"]:
+                style_type = types.get(style["id"], "sing")
                 voices.append(
                     {
                         "voice_id": f"voicevox:{style['id']}",
                         "name": f"{singer['name']} / {style['name']}",
                         "engine": "voicevox",
                         "language": "ja",
+                        "style_type": style_type,
+                        "query_via_teacher": style_type not in ("sing", "singing_teacher"),
                         "licence": VOICEVOX_LICENCE,
                         "soft_controls": {
                             "energy": True,

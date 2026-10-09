@@ -41,11 +41,22 @@ class FakeVoicevox:
         self.base_url = "http://fake"
         self.renders = 0
         self.last_query: dict | None = None
+        self.query_speakers: list[int] = []
+        self.synth_speakers: list[int] = []
 
     def singers(self):
-        return [{"name": "テスト", "styles": [{"id": 6000, "name": "ノーマル"}]}]
+        return [
+            {
+                "name": "テスト",
+                "styles": [
+                    {"id": 6000, "name": "ノーマル", "type": "sing"},
+                    {"id": 3014, "name": "ノーマル", "type": "frame_decode"},
+                ],
+            }
+        ]
 
     def sing_frame_audio_query(self, score, speaker, timeout=300):
+        self.query_speakers.append(speaker)
         total = sum(note["frame_length"] for note in score["notes"])
         return {
             "f0": [440.0] * total,
@@ -59,6 +70,7 @@ class FakeVoicevox:
     def frame_synthesis(self, query, speaker, timeout=600):
         self.renders += 1
         self.last_query = query
+        self.synth_speakers.append(speaker)
         return _tone_wav(len(query["f0"]))
 
 
@@ -214,6 +226,8 @@ async def test_render_job_lifecycle_and_reuse(store, fake_engine):
     assert job["duration_seconds"] > 0
     assert job["start_offset_seconds"] == 0.0
     assert fake_engine.renders == 1
+    assert fake_engine.query_speakers == [6000]
+    assert fake_engine.synth_speakers == [6000]
     assert all(v <= 0.6 for v in fake_engine.last_query["volume"])
 
     again = await _call(
@@ -223,6 +237,23 @@ async def test_render_job_lifecycle_and_reuse(store, fake_engine):
     assert again.structuredContent["reused"] is True
     assert again.structuredContent["job_id"] == started.structuredContent["job_id"]
     assert fake_engine.renders == 1  # a retry never renders twice
+
+
+async def test_decode_only_voice_is_queried_by_the_teacher(store, fake_engine):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    mapping = (await _call("map_vocal_lyrics", {"score_id": score["score_id"]})).structuredContent
+
+    started = await _call(
+        "render_singing", {"mapping_id": mapping["mapping_id"], "voice_id": "voicevox:3014"}
+    )
+    assert not started.isError
+    job = await _wait_for_job(started.structuredContent["job_id"])
+    assert job["status"] == "done"
+    assert job["voice_id"] == "voicevox:3014"
+    assert job["query_voice_id"] == "voicevox:6000"  # teacher prepares the frame query
+    assert fake_engine.query_speakers == [6000]
+    assert fake_engine.synth_speakers == [3014]  # the chosen voice's timbre sings
 
 
 async def test_unknown_voice_and_unsupported_controls_are_rejected(store, fake_engine):
@@ -252,6 +283,9 @@ async def test_list_singing_voices(fake_engine):
     assert voices[0]["language"] == "ja"
     assert voices[0]["soft_controls"]["energy"] is True
     assert voices[0]["soft_controls"]["breathiness"] is False
+    assert voices[0]["query_via_teacher"] is False
+    assert voices[1]["voice_id"] == "voicevox:3014"
+    assert voices[1]["query_via_teacher"] is True
 
 
 # ------------------------------------------------------------------ mixing
