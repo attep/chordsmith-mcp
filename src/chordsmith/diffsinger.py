@@ -243,22 +243,27 @@ def frame_at(seconds: float) -> int:
 
 
 def distribute(total: int, weights: list[float]) -> list[int]:
-    """Split integer frames proportional to weights, each part at least one frame."""
-    weights_arr = np.asarray(weights, dtype=np.float64)
-    if len(weights_arr) == 0:
+    """Split integer frames proportional to weights, each part at least one frame.
+
+    Pure Python on purpose: the timeline planner runs (and is tested) without the onnxruntime
+    extra installed.
+    """
+    if not weights:
         return []
-    total = max(total, len(weights_arr))
-    share = weights_arr / weights_arr.sum() * total
-    frames = np.maximum(1, np.floor(share).astype(int))
-    while frames.sum() < total:
-        frames[int(np.argmax(share - frames))] += 1
-    while frames.sum() > total:
-        index = int(np.argmax(frames - share))
+    total = max(total, len(weights))
+    weight_sum = sum(weights) or 1.0
+    share = [weight / weight_sum * total for weight in weights]
+    frames = [max(1, int(portion)) for portion in share]
+    while sum(frames) < total:
+        index = max(range(len(frames)), key=lambda i: share[i] - frames[i])
+        frames[index] += 1
+    while sum(frames) > total:
+        index = max(range(len(frames)), key=lambda i: frames[i] - share[i])
         if frames[index] > 1:
             frames[index] -= 1
         else:
             break
-    return frames.tolist()
+    return frames
 
 
 def plan_timeline(
