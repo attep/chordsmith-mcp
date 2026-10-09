@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import random
 import time
 import wave
 from urllib.parse import parse_qs, urlparse
@@ -273,6 +274,57 @@ def test_humanize_is_deterministic_and_in_range(tmp_path):
     midi = mido.MidiFile(tmp_path / "h42.mid")
     velocities = [m.velocity for t in midi.tracks for m in t if m.type == "note_on"]
     assert velocities and all(1 <= v <= 127 for v in velocities)
+
+
+def test_humanize_clamped_to_chord_window():
+    from chordsmith.midi_writer import NoteEvent, _humanize_events
+
+    events = [
+        NoteEvent(start=1919, duration=10, note=60, velocity=90),
+        NoteEvent(start=1920, duration=10, note=64, velocity=90),
+        NoteEvent(start=5, duration=10, note=67, velocity=90),
+    ]
+    humanize = Humanize(timing_ms=50, velocity_range=0, seed=1)
+    _humanize_events(events, humanize, 120, random.Random(1), 0, 1920)
+    assert 0 <= events[0].start < 1920
+    assert 0 <= events[2].start < 1920
+    _humanize_events([events[1]], humanize, 120, random.Random(1), 1920, 3840)
+    assert 1920 <= events[1].start < 3840
+
+
+def test_analysis_prefers_chord_markers(tmp_path):
+    from chordsmith.analysis import _marker_label
+
+    assert _marker_label("C", {0, 4, 7}) == "C"
+    assert _marker_label("Dm7", {0, 2, 5, 9}) == "Dm7"
+    assert _marker_label("Intro", {0, 4, 7}) is None
+    assert _marker_label("Dm7", {0, 4, 7}) is None
+
+    # An inverted Dm7 would otherwise be labelled "F6"; the file's marker wins.
+    path = tmp_path / "markers.mid"
+    _write(path, chords=("Dm7",), voicing=Voicing(inversion=1))
+    assert analyze_file(path)["progression"] == ["Dm7"]
+
+
+def test_lofi_file_analysis_matches_markers(tmp_path):
+    path = tmp_path / "lofi_markers.mid"
+    _write(
+        path,
+        chords=("Am7", "Dm7", "G7", "Cmaj7"),
+        voicing=Voicing(voice_leading=True),
+        rhythm=Rhythm(
+            pattern="pulse",
+            subdivision=0.5,
+            swing=0.33,
+            humanize=Humanize(timing_ms=12, velocity_range=10, seed=7),
+        ),
+    )
+    assert analyze_file(path)["progression"] == ["Am7", "Dm7", "G7", "Cmaj7"]
+
+
+def test_response_note_names_use_chord_spelling(tmp_path):
+    info = _write(tmp_path / "c7.mid", chords=("C7",))
+    assert info["chords"][0]["notes"] == ["C4", "E4", "G4", "Bb4"]
 
 
 async def test_lofi_preset_is_soft_and_swung(store):

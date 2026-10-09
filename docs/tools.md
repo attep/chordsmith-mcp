@@ -41,7 +41,7 @@ Turns chord symbols into a MIDI file.
 | `instrument` | 0–127 | `0` | General MIDI sound: 0 piano, 4 electric piano, 24 nylon guitar, 25 steel guitar, 48 strings, 88 pad |
 | `voicing` | object | close, root position | See [Voicing options](#voicing-options) |
 | `rhythm` | object | block chords | See [Rhythm options](#rhythm-options) |
-| `preset` | text | none | `"lofi"`: voice leading on, soft velocity, swing and light humanization |
+| `preset` | text | none | `"lofi"`: voice leading on, soft swung repeated chord hits (pulse pattern) and light humanization |
 | `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
 | `overwrite` | true/false | `false` | Replace a file with the same name |
 
@@ -211,9 +211,13 @@ Returns `tempo_bpm`, `time_signature`, `markers`, `key_signature_guess` (e.g.
 `"C major / A minor"`), `progression` (e.g. `["Am", "F", "C", "G"]`) and `segments` with
 start beat, length and notes of each chord.
 
+If the file carries chord-name markers (ChordSmith files do), those names are used for a window
+whenever their notes match the sound, so inversions, voice leading and added melody notes don't
+change the reported chords.
+
 **Limits:** this is a simple analyser. It works well on files with one chord per window, such as
-files ChordSmith made. With melodies, drums or fast chord changes it may return `?` (unknown)
-or wrong chords. `N.C.` means no notes are sounding.
+files ChordSmith made. Without chord-name markers, melodies, drums or fast chord changes can
+make it return `?` (unknown) or wrong chords. `N.C.` means no notes are sounding.
 
 ## list_generated_files
 

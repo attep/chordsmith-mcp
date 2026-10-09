@@ -32,6 +32,13 @@ def _fit_range(notes: list[int]) -> list[int]:
     return notes
 
 
+def _note_label(note: int, chord: Chord) -> str:
+    """Name a MIDI note using the chord's spelling (C7's seventh is Bb, not A#)."""
+    spelled = dict(zip(chord.pitch_classes, chord.note_names, strict=True))
+    name = spelled.get(note % 12)
+    return f"{name}{note // 12 - 1}" if name else midi_note_name(note, chord.prefer_flats)
+
+
 def _shape(chord: Chord, octave: int, inversion: int, style: str) -> list[int]:
     base = 12 * (octave + 1) + chord.root
     notes = [base + i for i in chord.chord_type.intervals]
@@ -144,13 +151,24 @@ def render_pattern(
     return events
 
 
-def _humanize_events(events: list[NoteEvent], humanize: Humanize, tempo_bpm: float) -> None:
-    """Apply deterministic timing/velocity variation (same seed -> same bytes)."""
-    rng = random.Random(humanize.seed)
+def _humanize_events(
+    events: list[NoteEvent],
+    humanize: Humanize,
+    tempo_bpm: float,
+    rng: random.Random,
+    window_start: int,
+    window_end: int,
+) -> None:
+    """Apply deterministic timing/velocity variation (same seed -> same bytes).
+
+    Timing shifts are clamped to the chord's own window so a humanized note never drifts into
+    the next chord (which would confuse bar-by-bar analysis).
+    """
     timing_ticks = _ms_to_ticks(humanize.timing_ms, tempo_bpm)
     for ev in events:
         if timing_ticks:
-            ev.start = max(0, ev.start + rng.randint(-timing_ticks, timing_ticks))
+            shifted = ev.start + rng.randint(-timing_ticks, timing_ticks)
+            ev.start = min(max(shifted, window_start), window_end - 1)
         if humanize.velocity_range:
             offset = rng.randint(-humanize.velocity_range, humanize.velocity_range)
             ev.velocity = min(127, max(1, ev.velocity + offset))
@@ -177,25 +195,23 @@ def write_progression(
     note_events: list[NoteEvent] = []
     markers: list[tuple[int, str]] = []
     summary = []
+    humanize_rng = random.Random(rhythm.humanize.seed) if rhythm.humanize else None
     tick = 0
     for (chord, beats), (bass, upper) in zip(sequence, voiced, strict=True):
         length = round(beats * TICKS_PER_BEAT)
         markers.append((tick, chord.symbol))
-        note_events += render_pattern(bass, upper, tick, length, rhythm, tempo_bpm)
+        chord_events = render_pattern(bass, upper, tick, length, rhythm, tempo_bpm)
+        if humanize_rng is not None:
+            _humanize_events(chord_events, rhythm.humanize, tempo_bpm, humanize_rng, tick, tick + length)
+        note_events += chord_events
         summary.append(
             {
                 "chord": chord.symbol,
                 "beats": beats,
-                "notes": [
-                    midi_note_name(n, chord.prefer_flats)
-                    for n in ([bass] if bass is not None else []) + upper
-                ],
+                "notes": [_note_label(n, chord) for n in ([bass] if bass is not None else []) + upper],
             }
         )
         tick += length
-
-    if rhythm.humanize is not None:
-        _humanize_events(note_events, rhythm.humanize, tempo_bpm)
 
     raw: list[tuple[int, int, mido.Message]] = []
     for ev in note_events:

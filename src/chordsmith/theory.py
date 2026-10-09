@@ -136,6 +136,7 @@ class Chord:
     chord_type: ChordType
     bass: int | None = None
     prefer_flats: bool = False
+    root_name: str | None = None
 
     @property
     def pitch_classes(self) -> list[int]:
@@ -143,7 +144,61 @@ class Chord:
 
     @property
     def note_names(self) -> list[str]:
+        if self.root_name:
+            spelled = spell_chord(self.root_name, self.chord_type.intervals)
+            if spelled is not None:
+                return spelled
         return [note_name(pc, self.prefer_flats) for pc in self.pitch_classes]
+
+
+_LETTERS = ("C", "D", "E", "F", "G", "A", "B")
+# Semitones from the root to each interval's diatonic letter (3rd = 2 letters, 7th = 6, 9th = 1, ...).
+_INTERVAL_LETTER_STEPS = {
+    0: 0,
+    2: 1,
+    3: 2,
+    4: 2,
+    5: 3,
+    6: 4,
+    7: 4,
+    8: 4,
+    9: 5,
+    10: 6,
+    11: 6,
+    13: 1,
+    14: 1,
+    15: 1,
+    17: 3,
+    21: 5,
+}
+_ACCIDENTALS = {0: "", 1: "#", 2: "##", 10: "bb", 11: "b"}
+
+
+def spell_chord(root_name: str, intervals: tuple[int, ...]) -> list[str] | None:
+    """Spell chord tones with correct letters and accidentals: C7 -> C E G Bb, D7 -> D F# A C.
+
+    Returns None when the root or an interval cannot be spelled (caller falls back to pitch classes).
+    """
+    match = re.fullmatch(r"([A-G])([#b]*)", _normalize(root_name))
+    if not match:
+        return None
+    letter = match.group(1)
+    root_pc = parse_note(root_name)
+    root_index = _LETTERS.index(letter)
+    names = []
+    for interval in intervals:
+        steps = _INTERVAL_LETTER_STEPS.get(interval)
+        if interval == 9 and 6 in intervals:
+            steps = 6  # a diminished seventh (Cdim7 = C Eb Gb Bbb), not a sixth
+        if steps is None:
+            return None
+        letter_index = (root_index + steps) % 7
+        natural_pc = _LETTER_PC[_LETTERS[letter_index]]
+        accidental = _ACCIDENTALS.get((root_pc + interval - natural_pc) % 12)
+        if accidental is None:
+            return None
+        names.append(_LETTERS[letter_index] + accidental)
+    return names
 
 
 _CHORD_RE = re.compile(r"([A-G])([#b]?)(.*?)(?:/([A-Ga-g][#b]?))?")
@@ -166,6 +221,7 @@ def parse_chord(symbol: str) -> Chord:
         chord_type=chord_type,
         bass=parse_note(bass) if bass else None,
         prefer_flats=_chord_prefers_flats(letter, accidental, chord_type),
+        root_name=letter.upper() + accidental,
     )
 
 
@@ -363,6 +419,7 @@ def roman_to_chord(numeral_text: str, key: Key) -> Chord:
         root=root,
         chord_type=CHORD_TYPES_BY_NAME[quality],
         prefer_flats=prefer_flats,
+        root_name=note_name(root, prefer_flats),
     )
 
 

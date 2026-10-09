@@ -34,6 +34,25 @@ def test_slash_chord_bass():
     assert parse_chord("C/E").bass == 4
 
 
+@pytest.mark.parametrize(
+    ("symbol", "notes"),
+    [
+        ("C7", ["C", "E", "G", "Bb"]),
+        ("D7", ["D", "F#", "A", "C"]),
+        ("B7", ["B", "D#", "F#", "A"]),
+        ("Eb7", ["Eb", "G", "Bb", "Db"]),
+        ("F#m7b5", ["F#", "A", "C", "E"]),
+        ("Cdim7", ["C", "Eb", "Gb", "Bbb"]),
+        ("C7#9", ["C", "E", "G", "Bb", "D#"]),
+        ("Abm", ["Ab", "Cb", "Eb"]),
+        ("Bmaj7", ["B", "D#", "F#", "A#"]),
+        ("D6/9", ["D", "F#", "A", "B", "E"]),
+    ],
+)
+def test_chord_spelling(symbol, notes):
+    assert parse_chord(symbol).note_names == notes
+
+
 @pytest.mark.parametrize("bad", ["", "H7", "am", "Cxyz", "C/Q"])
 def test_bad_chords_raise(bad):
     with pytest.raises(MusicTheoryError):

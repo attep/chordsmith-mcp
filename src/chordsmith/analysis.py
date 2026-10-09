@@ -11,9 +11,24 @@ from pathlib import Path
 
 import mido
 
-from chordsmith.theory import SCALES, identify_chord, note_name
+from chordsmith.theory import SCALES, MusicTheoryError, identify_chord, note_name, parse_chord
 
 _FLAT_MAJOR_TONICS = {1, 3, 5, 6, 8, 10}
+
+
+def _marker_label(text: str, pitch_classes: set[int]) -> str | None:
+    """Use a chord-name marker as the label when its notes are all present in the window.
+
+    Markers that are not chord symbols (section names like "Intro") are ignored, and so are
+    markers whose chord does not fit the notes actually sounding.
+    """
+    try:
+        chord = parse_chord(text)
+    except MusicTheoryError:
+        return None
+    if set(chord.pitch_classes) <= pitch_classes:
+        return text
+    return None
 
 
 def _collect_notes(midi: mido.MidiFile) -> tuple[list[tuple[int, int, int]], dict]:
@@ -57,6 +72,7 @@ def analyze_file(path: Path, window_beats: float | None = None) -> dict:
     flats = tonic in _FLAT_MAJOR_TONICS
     key_guess = f"{note_name(tonic, flats)} major / {note_name(tonic + 9, flats)} minor" if notes else None
 
+    marker_labels = {round(m["beat"], 3): m["text"] for m in info["markers"]}
     segments: list[dict] = []
     for w_start in range(0, end, window):
         w_end = w_start + window
@@ -81,12 +97,20 @@ def analyze_file(path: Path, window_beats: float | None = None) -> dict:
                 label = note_name(root, flats) + ct.aliases[0]
                 if bass_pc is not None and bass_pc != root:
                     label += "/" + note_name(bass_pc, flats)
+            # The file's own chord-name markers are authoritative when they match the notes.
+            marker = marker_labels.get(round(w_start / tpb, 3))
+            if marker is not None:
+                label = _marker_label(marker, pcs) or label
         if segments and segments[-1]["chord"] == label:
             segments[-1]["beats"] += window_beats
         else:
             segments.append(
                 {"start_beat": w_start / tpb, "beats": window_beats, "chord": label, "notes": names}
             )
+
+    # A note tail (release, humanized timing) can spill a few ticks into a silent extra window.
+    if segments and segments[-1]["chord"] == "N.C.":
+        segments.pop()
 
     return {
         **info,
