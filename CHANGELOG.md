@@ -9,27 +9,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `legato` option on `prepare_vocal_score`: closes gaps between notes shorter than the given
-  number of beats, so syllables connect instead of being broken apart by instrumental
-  articulations (recommended: `0.25`).
+- **Whole-word English lookup**: hyphen-joined syllables ("so- di- um", "yel- low") are looked up
+  as one word and its sounds are split across the word's notes (one vowel per syllable, maximal
+  onset principle), fixing fragments, double consonants and weak vowels; vowel-count mismatches
+  fall back to per-piece lookup with a warning that names the word.
+- **Stress warnings**: when a stressed syllable lands on a much shorter note than a weak one in
+  the same word, the mapping warns and suggests swapping them.
+- `legato` now defaults to `0.25`, so syllables connect without asking (pass `0` to keep gaps).
+- Mix normalization: the exported mix is normalized to `normalize_peak_db` (default −1 dBFS) so
+  quiet mixes are not left 19 dB down; set null to keep the raw level.
 - `/healthz` reports the running version (useful when auditing which build is deployed).
 - Closing consonants may use up to half of a note (was 40%), so dense codas stay intelligible.
 
 ### Fixed
 
-- **Mixing balances levels by measurement.** `mix_song_with_vocals` measures the active level
-  (gated RMS) of both stems and places the vocal `vocal_level_db` (default 6 dB) above the
-  backing, instead of multiplying each stem blindly. Reverb defaults to off for clarity, and the
-  result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db` and `vocal_to_backing_db`.
+- **Mixing balances levels by measurement.** `mix_song_with_vocals` measures the active level of
+  both stems **over the blocks where the voice is singing** and places the vocal
+  `vocal_level_db` (default 6 dB) above the band; the mono vocal is panned to stereo first, so
+  the measured balance is real (previously a hidden ~3 dB mono-to-stereo loss made 6 dB read as
+  ~3.8 dB). `vocal_to_backing_db` now includes the `backing_volume` trim, reverb defaults to
+  off, and the result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`,
+  `gain_correction_db` and the final `peak_db`.
+- **Slurs no longer close and reopen a syllable**: `+` moves the previous syllable's closing
+  consonants to the last note of the slur ("still +" sings s-t-ih then ih-l, not "stil-i").
 - **English lyric mapping no longer crashes on fewer syllables than notes** (the extra notes
   become rests with a warning), and phonemes are assigned to the notes that remain after holds,
   so text and sounds stay aligned.
-- **`+` now carries only the vowel** onto the next note (a slur: "gold +" sings "g-old", not
-  "gold gold").
 - **DiffSinger `gender` defaults to 0** (the voicebank's own character) instead of the extreme
   −1 shift.
 - **Vocal scores spell notes to match the key** (Eb/Ab/Bb in flat keys, like the chord tools,
   instead of D#/G#/A#).
+- Rests created from missing syllables carry no pitch, and render jobs echo their settings.
 
 Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
 (jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML

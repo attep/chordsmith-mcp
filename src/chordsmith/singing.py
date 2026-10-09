@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -419,6 +420,54 @@ def _parse_syllables(lyrics: str, language: str) -> list[str]:
     return tokens
 
 
+def _truncate_groups(groups: list[list[str]], limit: int) -> list[list[str]]:
+    """Keep the first `limit` flat tokens, preserving word groups as far as possible."""
+    result: list[list[str]] = []
+    count = 0
+    for group in groups:
+        if count >= limit:
+            break
+        take = group[: limit - count]
+        result.append(take)
+        count += len(take)
+    return result
+
+
+def _stress_warnings(
+    groups: list[list[str]], remaining: list[ScoreNote], stress_per_note: dict[int, float | None]
+) -> list[str]:
+    """Warn when a stressed syllable lands on a much shorter note than a weak one in its word."""
+    warnings: list[str] = []
+    index = 0
+    for group in groups:
+        if len(group) == 1 and group[0] in ("+", "-", "br"):
+            index += 1
+            continue
+        if len(group) > 1:
+            entries = []
+            for offset, token in enumerate(group):
+                position = index + offset
+                if position >= len(remaining):
+                    break
+                entries.append(
+                    (token, remaining[position].seconds, stress_per_note.get(remaining[position].note_id))
+                )
+            stressed = [(token, seconds) for token, seconds, level in entries if level == 1]
+            weak = [(token, seconds) for token, seconds, level in entries if level == 0]
+            if stressed and weak:
+                stressed_token, stressed_seconds = min(stressed, key=lambda item: item[1])
+                weak_token, weak_seconds = max(weak, key=lambda item: item[1])
+                if stressed_seconds < 0.6 * weak_seconds:
+                    warnings.append(
+                        f"'{''.join(group)}': the stressed syllable '{stressed_token}' sits on a "
+                        f"shorter note ({stressed_seconds:.2f}s) than the weak syllable "
+                        f"'{weak_token}' ({weak_seconds:.2f}s); consider swapping the syllables "
+                        "or giving the word longer notes."
+                    )
+        index += len(group)
+    return warnings
+
+
 def build_mapping(
     score: VocalScore, lyrics: str | None, language: str, holds: dict[int, int] | None
 ) -> VocalMapping:
@@ -448,7 +497,9 @@ def build_mapping(
     remaining = [note for note in sung if note.note_id not in skipped]
 
     syllables: list[str] = []
+    groups: list[list[str]] = []
     phonemes_per_note: dict[int, list[str]] = {}
+    stress_per_note: dict[int, float | None] = {}
     english = False
     if not wordless:
         if language == "en":
@@ -458,7 +509,8 @@ def build_mapping(
                     "CHORDSMITH_DIFFSINGER_VOICE. Use wordless mode or Japanese kana for VOICEVOX."
                 )
             english = True
-            syllables = diffsinger.split_syllables(lyrics)
+            groups = diffsinger.split_syllables(lyrics)
+            syllables = [token for group in groups for token in group]
         else:
             syllables = _parse_syllables(lyrics, language)
         if len(syllables) > len(remaining):
@@ -467,6 +519,7 @@ def build_mapping(
                 f"(the melody has {len(remaining)} singable notes)."
             )
             syllables = syllables[: len(remaining)]
+            groups = _truncate_groups(groups, len(remaining))
         if len(syllables) < len(remaining):
             warnings.append(
                 f"{len(remaining) - len(syllables)} notes had no syllable and were turned into rests "
@@ -474,10 +527,12 @@ def build_mapping(
             )
         if english and syllables:
             bank = diffsinger.get_voicebank()
-            phones_per_token, _ = diffsinger.phonemize_tokens(bank, syllables)
-            # intentional short zip: notes beyond the syllable list become rests
-            for note, phones in zip(remaining, phones_per_token, strict=False):
+            phones_per_token, group_warnings, stress = diffsinger.phonemize_groups(bank, groups)
+            warnings.extend(group_warnings)
+            for note, phones, level in zip(remaining, phones_per_token, stress, strict=False):
                 phonemes_per_note[note.note_id] = phones
+                stress_per_note[note.note_id] = level
+            warnings.extend(_stress_warnings(groups, remaining, stress_per_note))
     syllable_by_note = {
         note.note_id: syllables[index] for index, note in enumerate(remaining) if index < len(syllables)
     }
@@ -499,7 +554,15 @@ def build_mapping(
         is_rest = not wordless and lyric == ""
         seconds = note.seconds + held_seconds.get(note.note_id, 0.0)
         mapping_notes.append(
-            MappingNote(note.note_id, note.key, note.start_seconds, seconds, lyric, is_rest, phonemes)
+            MappingNote(
+                note.note_id,
+                None if is_rest else note.key,
+                note.start_seconds,
+                seconds,
+                lyric,
+                is_rest,
+                phonemes,
+            )
         )
     if not wordless and not syllables:
         warnings.append("No syllables were mapped; every note is a rest.")
@@ -788,7 +851,12 @@ def start_job(
 
 
 def _job_payload(job: SingingJob) -> dict:
-    payload: dict[str, Any] = {"job_id": job.job_id, "status": job.status, "voice_id": job.voice_id}
+    payload: dict[str, Any] = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "voice_id": job.voice_id,
+        "settings": job.settings,  # echo what was used, so the server's record is self-contained
+    }
     if job.result is not None:
         payload.update(job.result)
     if job.error is not None:
@@ -821,7 +889,9 @@ def _peak_db(path: Path) -> float:
 
 
 def _mix_filters(vocal_gain: float, backing_volume: float, reverb: bool, output_gain_db: float) -> str:
-    vocal = f"[1:a]volume={vocal_gain:.4f}"
+    # The vocal is mono (both engines) and the backing is stereo: pan the vocal to stereo
+    # explicitly, otherwise amix spreads it across both channels about 3 dB lower than measured.
+    vocal = f"[1:a]pan=stereo|c0=c0|c1=c0,volume={vocal_gain:.4f}"
     if reverb:
         vocal += ",aecho=0.8:0.9:60:0.25"
     filters = (
@@ -859,6 +929,58 @@ def gated_rms_db(path: Path, gate: float = 0.004) -> float:
     return 20.0 * math.log10(math.sqrt(total / count))
 
 
+def active_levels(
+    backing: Path, vocal: Path, block_ms: float = 50.0, gate: float = 0.004
+) -> tuple[float, float]:
+    """(backing_db, vocal_db) measured over the blocks where the voice is singing.
+
+    This is the level the tool's description promises: the band is measured only while the
+    vocal is active, not over the whole song (long instrumental sections would drag it down).
+    """
+    import array
+    import math
+
+    def read(path: Path) -> tuple[array.array, int, int]:
+        with wave.open(str(path), "rb") as handle:
+            if handle.getsampwidth() != 2:
+                raise SingingError("Mixing expects 16-bit audio files.")
+            samples = array.array("h")
+            samples.frombytes(handle.readframes(handle.getnframes()))
+            return samples, handle.getnchannels(), handle.getframerate()
+
+    backing_samples, backing_channels, backing_rate = read(backing)
+    vocal_samples, vocal_channels, vocal_rate = read(vocal)
+    vocal_block = max(1, round(vocal_rate * block_ms / 1000.0))
+    backing_block = max(1, round(backing_rate * block_ms / 1000.0))
+    vocal_frames = len(vocal_samples) // vocal_channels
+    vocal_total = 0.0
+    vocal_count = 0
+    backing_total = 0.0
+    backing_count = 0
+    for block in range(vocal_frames // vocal_block):
+        start = block * vocal_block * vocal_channels
+        chunk = vocal_samples[start : start + vocal_block * vocal_channels : 4]
+        energy = sum(sample * sample for sample in chunk) / max(1, len(chunk))
+        if math.sqrt(energy) / 32768.0 < gate:
+            continue
+        vocal_total += energy * len(chunk)
+        vocal_count += len(chunk)
+        backing_start = block * backing_block * backing_channels
+        if backing_start < len(backing_samples):
+            backing_chunk = backing_samples[
+                backing_start : backing_start + backing_block * backing_channels : 4
+            ]
+            backing_total += sum(sample * sample for sample in backing_chunk)
+            backing_count += len(backing_chunk)
+    if vocal_count == 0:
+        return gated_rms_db(backing), gated_rms_db(vocal)
+    vocal_db = 20.0 * math.log10(math.sqrt(vocal_total / vocal_count) / 32768.0)
+    if backing_count == 0 or backing_total == 0:
+        return -120.0, vocal_db
+    backing_db = 20.0 * math.log10(math.sqrt(backing_total / backing_count) / 32768.0)
+    return backing_db, vocal_db
+
+
 def mix_tracks(
     backing: Path,
     vocal: Path,
@@ -867,37 +989,22 @@ def mix_tracks(
     vocal_level_db: float = 6.0,
     backing_volume: float = 1.0,
     reverb: bool = False,
+    normalize_peak_db: float | None = -1.0,
 ) -> dict:
     """Mix the vocal into the backing, balancing levels by measurement.
 
-    ``vocal_level_db`` is the target level of the vocal *above the band*, measured over the
-    active (sung) parts of both stems, so quiet backings and loud vocals are corrected instead
-    of being multiplied blindly. The mix is turned down if it would clip.
+    ``vocal_level_db`` is the target level of the vocal *above the band*, both measured over the
+    blocks where the voice is singing, so quiet backings and loud vocals are corrected instead
+    of being multiplied blindly. The finished mix is normalized to ``normalize_peak_db`` (default
+    -1 dBFS; pass None to keep the raw level) so exports are not left very quiet.
     """
-    backing_db = gated_rms_db(backing)
-    vocal_db = gated_rms_db(vocal)
+    backing_db, vocal_db = active_levels(backing, vocal)
     vocal_gain_db = (backing_db + vocal_level_db) - vocal_db
     vocal_gain = 10.0 ** (vocal_gain_db / 20.0)
-    _ffmpeg(
-        [
-            "-y",
-            "-i",
-            str(backing),
-            "-i",
-            str(vocal),
-            "-filter_complex",
-            _mix_filters(vocal_gain, backing_volume, reverb, 0.0),
-            "-map",
-            "[m]",
-            "-ar",
-            "44100",
-            str(target),
-        ]
-    )
-    peak = _peak_db(target)
-    correction = 0.0
-    if peak > -0.5:
-        correction = round(-0.5 - peak, 2)
+    trim_db = 20.0 * math.log10(backing_volume) if backing_volume > 0 else -120.0
+    balance_db = (vocal_db + vocal_gain_db) - (backing_db + trim_db)
+
+    def render(output_gain_db: float) -> None:
         _ffmpeg(
             [
                 "-y",
@@ -906,7 +1013,7 @@ def mix_tracks(
                 "-i",
                 str(vocal),
                 "-filter_complex",
-                _mix_filters(vocal_gain, backing_volume, reverb, correction),
+                _mix_filters(vocal_gain, backing_volume, reverb, output_gain_db),
                 "-map",
                 "[m]",
                 "-ar",
@@ -914,18 +1021,27 @@ def mix_tracks(
                 str(target),
             ]
         )
-        peak = _peak_db(target)
+
+    render(0.0)
+    peak = _peak_db(target)
+    correction = 0.0
+    if normalize_peak_db is not None:
+        correction = round(normalize_peak_db - peak, 2)
+        if abs(correction) > 0.05:
+            render(correction)
+            peak = _peak_db(target)
     with wave.open(str(target), "rb") as handle:
         duration = handle.getnframes() / handle.getframerate()
     return {
         "peak_db": peak,
         "clipping": peak > -0.1,
         "gain_correction_db": correction,
+        "normalize_peak_db": normalize_peak_db,
         "duration_seconds": round(duration, 3),
         "backing_rms_db": round(backing_db, 1),
         "vocal_rms_db": round(vocal_db, 1),
         "vocal_gain_db": round(vocal_gain_db, 1),
-        "vocal_to_backing_db": round(vocal_gain_db + vocal_db - backing_db, 1),
+        "vocal_to_backing_db": round(balance_db, 1),
     }
 
 
@@ -1069,10 +1185,10 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 ge=0.0,
                 le=2.0,
                 description="Close gaps between notes shorter than this many beats, so syllables "
-                "connect (0 = off; 0.25 joins typical instrument articulations and keeps words "
-                "together).",
+                "connect (default 0.25 joins typical instrument articulations; set 0 to keep the "
+                "gaps as rests).",
             ),
-        ] = 0.0,
+        ] = 0.25,
     ) -> dict[str, Any]:
         """Prepare a monophonic vocal score from a MIDI melody track, with rests and frame timings.
 
@@ -1187,6 +1303,15 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         reverb: Annotated[
             bool, Field(description="Gentle reverb on the vocal (off by default: clarity first).")
         ] = False,
+        normalize_peak_db: Annotated[
+            float | None,
+            Field(
+                ge=-6.0,
+                le=0.0,
+                description="Normalize the exported mix to this peak level in dBFS "
+                "(default -1.0); set null to keep the raw level.",
+            ),
+        ] = -1.0,
         output_filename: Annotated[
             str | None, Field(description="Name for the mix (default: <source>_mix).")
         ] = None,
@@ -1223,6 +1348,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             vocal_level_db=vocal_level_db,
             backing_volume=backing_volume,
             reverb=reverb,
+            normalize_peak_db=normalize_peak_db,
         )
         return {
             "filename": target.name,
@@ -1232,7 +1358,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             "source": source_path.name,
             "vocal": vocal_path.name,
             "backing": backing_wav.name,
-            "levels": {"vocal_level_db": vocal_level_db, "backing_volume": backing_volume},
+            "levels": {
+                "vocal_level_db": vocal_level_db,
+                "backing_volume": backing_volume,
+                "normalize_peak_db": normalize_peak_db,
+            },
             "guide_removed": _track_names(midi)[track_index],
             **info,
         }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 import time
 import wave
 from pathlib import Path
@@ -229,6 +230,7 @@ async def test_render_job_lifecycle_and_reuse(store, fake_engine):
     assert (store.root / job["filename"]).is_file()
     assert job["duration_seconds"] > 0
     assert job["start_offset_seconds"] == 0.0
+    assert job["settings"]["volume_cap"] == 0.6  # the job echoes what was used
     assert fake_engine.renders == 1
     assert fake_engine.query_speakers == [6000]
     assert fake_engine.synth_speakers == [6000]
@@ -350,12 +352,14 @@ def _full_audio_ready() -> bool:
     )
 
 
-def _write_constant_wav(path, amplitude: int, seconds: float = 1.0, rate: int = 44100) -> None:
+def _write_constant_wav(
+    path, amplitude: int, seconds: float = 1.0, rate: int = 44100, channels: int = 1
+) -> None:
     with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(1)
+        handle.setnchannels(channels)
         handle.setsampwidth(2)
         handle.setframerate(rate)
-        handle.writeframes(amplitude.to_bytes(2, "little") * round(seconds * rate))
+        handle.writeframes(amplitude.to_bytes(2, "little") * round(seconds * rate) * channels)
 
 
 def test_gated_rms_db(tmp_path):
@@ -370,16 +374,35 @@ def test_gated_rms_db(tmp_path):
     assert singing.gated_rms_db(silence) == -120.0
 
 
-@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
-def test_mix_corrects_clipping(tmp_path):
+def test_active_levels_measure_only_sung_parts(tmp_path):
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
-    _write_constant_wav(backing, 30000)
+    # backing: loud first half, silent second half; vocal: silent first half, loud second half
+    with wave.open(str(backing), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(44100)
+        handle.writeframes((24000).to_bytes(2, "little") * 22050 + (0).to_bytes(2, "little") * 22050)
+    with wave.open(str(vocal), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(44100)
+        handle.writeframes((0).to_bytes(2, "little") * 22050 + (12000).to_bytes(2, "little") * 22050)
+    backing_db, vocal_db = singing.active_levels(backing, vocal)
+    assert backing_db == -120.0  # the loud part plays while the voice is silent: not counted
+    assert abs(vocal_db - 20 * math.log10(12000 / 32768)) < 0.3
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_corrects_clipping_and_normalizes(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 30000, channels=2)
     _write_constant_wav(vocal, 30000)
     target = tmp_path / "mix.wav"
     info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, reverb=True)
     assert info["clipping"] is False
-    assert info["peak_db"] <= -0.1
+    assert abs(info["peak_db"] - (-1.0)) <= 0.2  # normalized to -1 dBFS by default
     assert abs(info["duration_seconds"] - 1.0) < 0.05
 
 
@@ -387,15 +410,34 @@ def test_mix_corrects_clipping(tmp_path):
 def test_mix_balances_levels_by_measurement(tmp_path):
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
-    _write_constant_wav(backing, 3000)
+    _write_constant_wav(backing, 3000, channels=2)
     _write_constant_wav(vocal, 24000)
     target = tmp_path / "mix.wav"
     info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0)
-    expected_gain = singing.gated_rms_db(backing) + 6.0 - singing.gated_rms_db(vocal)
+    backing_db, vocal_db = singing.active_levels(backing, vocal)
+    expected_gain = backing_db + 6.0 - vocal_db
     assert abs(info["vocal_gain_db"] - expected_gain) <= 0.2  # the loud vocal is turned down
     assert info["vocal_gain_db"] < 0
     assert abs(info["vocal_to_backing_db"] - 6.0) <= 0.2
     assert info["clipping"] is False
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_vocal_level_is_exact_after_stereo_pan(tmp_path):
+    # a quiet stereo backing and a much louder mono vocal: after panning the mono vocal to
+    # stereo at full level, the measured vocal in the mix must match the computed gain
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 300, channels=2)
+    _write_constant_wav(vocal, 12000)
+    target = tmp_path / "mix.wav"
+    info = singing.mix_tracks(
+        backing, vocal, target, vocal_level_db=6.0, backing_volume=0.0, normalize_peak_db=None
+    )
+    backing_db, vocal_db = singing.active_levels(backing, vocal)
+    expected_mix_vocal_db = vocal_db + info["vocal_gain_db"]
+    measured = singing.gated_rms_db(target)
+    assert abs(measured - expected_mix_vocal_db) <= 0.3  # no hidden ~3 dB mono-to-stereo loss
 
 
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
@@ -434,28 +476,55 @@ needs_voicebank = pytest.mark.skipif(not diffsinger.available(), reason="DiffSin
 @needs_voicebank
 def test_english_phonemizer():
     bank = diffsinger.get_voicebank()
-    assert diffsinger.split_syllables("so- di- um gold") == ["so", "di", "um", "gold"]
-    phones, _ = diffsinger.phonemize_tokens(bank, ["so", "di", "um", "gold"])
+    groups = diffsinger.split_syllables("so- di- um gold")
+    assert groups == [["so", "di", "um"], ["gold"]]
+    phones, warnings, _ = diffsinger.phonemize_groups(bank, groups)
     assert phones[0] == ["s", "ow"]
     assert phones[1] == ["d", "iy"]
     assert phones[2] == ["ah", "m"]
     assert phones[3] == ["g", "ow", "l", "d"]
+    assert warnings == []
     with pytest.raises(diffsinger.DiffSingerError) as exc:
-        diffsinger.phonemize_tokens(bank, ["streetlights"])
+        diffsinger.phonemize_groups(bank, [["streetlights"]])
     assert "streetlights" in str(exc.value)
 
 
 @needs_voicebank
 def test_english_words_phonemes():
     bank = diffsinger.get_voicebank()
-    phones, _ = diffsinger.phonemize_tokens(bank, ["sodium", "gold"])
+    phones, _, _ = diffsinger.phonemize_groups(bank, [["sodium"], ["gold"]])
     assert phones[0] == ["s", "ow", "d", "iy", "ah", "m"]
     assert phones[1] == ["g", "ow", "l", "d"]
 
 
+@needs_voicebank
+def test_whole_word_lookup_splits_syllables():
+    bank = diffsinger.get_voicebank()
+    # "yellow" over two notes (yel- low): y-eh then l-ow (not "yell low" with a double l)
+    phones, warnings, _ = diffsinger.phonemize_groups(bank, [["yel", "low"]])
+    assert warnings == []
+    assert phones[0] == ["y", "eh"]
+    assert phones[1] == ["l", "ow"]
+    # "moment" over two notes: m-ow then m-ah-n-t
+    phones, _, _ = diffsinger.phonemize_groups(bank, [["mo", "ment"]])
+    assert phones[0] == ["m", "ow"]
+    assert phones[1] == ["m", "ah", "n", "t"]
+
+
+@needs_voicebank
+def test_vowel_mismatch_falls_back_with_warning():
+    bank = diffsinger.get_voicebank()
+    # "ion" has two vowels but three notes: warn, then look the pieces up individually
+    phones, warnings, _ = diffsinger.phonemize_groups(bank, [["i", "o", "n"]])
+    assert any("'ion'" in warning and "falling back" in warning for warning in warnings)
+    assert phones[0] == ["ay"]
+    assert phones[1] == ["ow"]
+    assert phones[2] == ["eh", "n"]
+
+
 def test_split_syllables_controls():
-    assert diffsinger.split_syllables("so- di- um + gold") == ["so", "di", "um", "+", "gold"]
-    assert diffsinger.split_syllables("ah - br") == ["ah", "-", "br"]
+    assert diffsinger.split_syllables("so- di- um + gold") == [["so", "di", "um"], ["+"], ["gold"]]
+    assert diffsinger.split_syllables("ah - br") == [["ah"], ["-"], ["br"]]
 
 
 class _StubBank:
@@ -588,12 +657,13 @@ async def test_legato_closes_small_gaps(store):
         {"pitch": "E5", "start_beat": 1.10, "beats": 0.5},
     ]
     song = await _make_melody(store, notes, name="legato")
-    plain = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    plain = (
+        await _call("prepare_vocal_score", {"filename": song, "track": "Melody", "legato": 0})
+    ).structuredContent
     assert [note["kind"] for note in plain["notes"]] == ["note", "rest", "note", "rest", "note"]
 
-    joined = (
-        await _call("prepare_vocal_score", {"filename": song, "track": "Melody", "legato": 0.25})
-    ).structuredContent
+    # legato is on by default now: the gaps close without asking
+    joined = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
     assert [note["kind"] for note in joined["notes"]] == ["note", "note", "note"]
     assert joined["notes"][0]["seconds"] > plain["notes"][0]["seconds"]  # runs into the next note
 
@@ -612,10 +682,14 @@ async def test_score_spells_flats_in_flat_keys(store):
 
 
 @needs_voicebank
-def test_plus_carries_only_the_vowel():
+def test_plus_carries_vowel_and_moves_the_coda():
     bank = diffsinger.get_voicebank()
-    phones, _ = diffsinger.phonemize_tokens(bank, ["gold", "+", "+"])
-    assert phones == [["g", "ow", "l", "d"], ["ow"], ["ow"]]
+    phones, warnings, _ = diffsinger.phonemize_groups(bank, [["gold"], ["+"], ["+"]])
+    assert warnings == []
+    # "gold + +" sings g-ow, ow, ow-l-d: the closing consonants move to the last slur note
+    assert phones == [["g", "ow"], ["ow"], ["ow", "l", "d"]]
+    phones, _, _ = diffsinger.phonemize_groups(bank, [["still"], ["+"]])
+    assert phones == [["s", "t", "ih"], ["ih", "l"]]
 
 
 @needs_voicebank
@@ -629,7 +703,9 @@ async def test_english_fewer_syllables_becomes_rests_not_a_crash(store, fake_eng
     assert len(sung) == 1
     assert sung[0]["phonemes"] == ["s", "ow", "d", "iy", "ah", "m"]
     assert any("had no syllable" in warning for warning in mapping["warnings"])
-    assert sum(1 for note in mapping["notes"] if note["kind"] == "rest") >= 3
+    rests = [note for note in mapping["notes"] if note["kind"] == "rest"]
+    assert len(rests) >= 3
+    assert all(rest["pitch"] is None for rest in rests)  # rests carry no pitch
 
 
 @needs_voicebank
@@ -652,3 +728,26 @@ async def test_holds_keep_lyrics_and_phonemes_aligned(store, fake_engine):
     # note 0 holds over note 1; the remaining notes get so, di, um (gold is unused)
     assert [note["lyric"] for note in sung] == ["so", "di", "um"]
     assert [note["phonemes"] for note in sung] == [["s", "ow"], ["d", "iy"], ["ah", "m"]]
+
+
+@needs_voicebank
+async def test_stress_warning_when_stressed_syllable_gets_a_short_note(store, fake_engine):
+    # "so" (stressed in "sodium") on a 0.25 s note, "di" (weak) on 0.5 s
+    notes = [
+        {"pitch": "C5", "start_beat": 0.0, "beats": 0.5},
+        {"pitch": "D5", "start_beat": 0.5, "beats": 1.0},
+        {"pitch": "E5", "start_beat": 1.5, "beats": 1.0},
+    ]
+    song = await _make_melody(store, notes, name="stress")
+    score = (
+        await _call("prepare_vocal_score", {"filename": song, "track": "Melody", "transpose": 0})
+    ).structuredContent
+    mapping = (
+        await _call(
+            "map_vocal_lyrics",
+            {"score_id": score["score_id"], "lyrics": "so- di- um", "language": "en"},
+        )
+    ).structuredContent
+    warning = next((w for w in mapping["warnings"] if "stressed" in w), None)
+    assert warning is not None
+    assert "'sodium'" in warning and "'so'" in warning and "'di'" in warning

@@ -182,58 +182,234 @@ def get_voicebank() -> _Voicebank:
 # ------------------------------------------------------------------ phonemizer
 
 
-def split_syllables(lyrics: str) -> list[str]:
-    """Split lyrics into one token per note: whitespace-separated, hyphens join syllables.
+def split_syllables(lyrics: str) -> list[list[str]]:
+    """Group lyrics into words: whitespace-separated, hyphens join syllables of one word.
 
-    'so- di- um gold' -> ['so', 'di', 'um', 'gold']; '+' continues the previous note,
-    '-' is a pause and 'br' a breath.
+    'so- di- um gold' -> [['so', 'di', 'um'], ['gold']]; '+' continues the previous note,
+    '-' is a pause and 'br' a breath (each their own group).
     """
-    tokens = []
+    groups: list[list[str]] = []
+    current: list[str] = []
     for raw in lyrics.split():
         lowered = raw.lower()
         if lowered in ("+", "-", "br"):
-            tokens.append(lowered)
+            if current:
+                groups.append(current)
+                current = []
+            groups.append([lowered])
             continue
+        continues = raw.endswith("-")
         token = raw.strip("-").lower()
-        if token:
-            tokens.append(token)
-    return tokens
+        if not token:
+            continue
+        current.append(token)
+        if not continues:
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    return groups
 
 
-def phonemize_tokens(bank: _Voicebank, tokens: list[str]) -> tuple[list[list[str]], list[str]]:
-    """Map syllable tokens to phonemes per note; refuses unknown words by name."""
-    result: list[list[str]] = []
+# English syllable onsets (ARPAbet), longest first within each length; used to split a word's
+# sounds between its syllables ("s-t-r" can start a syllable, "l-t" cannot).
+_VALID_ONSETS = frozenset(
+    {
+        "b",
+        "ch",
+        "d",
+        "dh",
+        "f",
+        "g",
+        "hh",
+        "jh",
+        "k",
+        "l",
+        "m",
+        "n",
+        "p",
+        "r",
+        "s",
+        "sh",
+        "t",
+        "th",
+        "v",
+        "w",
+        "y",
+        "z",
+        "zh",
+        "bl",
+        "br",
+        "dr",
+        "dw",
+        "fl",
+        "fr",
+        "gl",
+        "gr",
+        "gw",
+        "kl",
+        "kr",
+        "kw",
+        "pl",
+        "pr",
+        "shl",
+        "shr",
+        "sk",
+        "sl",
+        "sm",
+        "sn",
+        "sp",
+        "spl",
+        "spr",
+        "st",
+        "str",
+        "sw",
+        "tr",
+        "thr",
+        "tw",
+    }
+)
+
+
+def _split_word_into_syllables(
+    phones: list[str], stress: list[float | None], bank: _Voicebank, count: int
+) -> list[tuple[list[str], list[float | None]]] | None:
+    """Split a word's phonemes (and their stress values) into `count` syllables, one vowel each.
+
+    Uses the maximal onset principle: consonants between two vowels go to the next syllable as
+    far as English allows ("s-t-r" can start a syllable, "l-t" cannot). Returns None when the
+    vowel count does not match the number of pieces.
+    """
+    vowel_positions = [
+        index for index, phone in enumerate(phones) if bank.is_vowel(phone) and phone not in ("SP", "AP")
+    ]
+    if len(vowel_positions) != count:
+        return None
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for position_index, vowel_position in enumerate(vowel_positions):
+        if position_index + 1 < len(vowel_positions):
+            next_vowel = vowel_positions[position_index + 1]
+            cluster = phones[vowel_position + 1 : next_vowel]
+            take = 0
+            for size in range(min(len(cluster), 3), 0, -1):
+                if "".join(cluster[-size:]) in _VALID_ONSETS:
+                    take = size
+                    break
+            ranges.append((start, vowel_position + 1 + (len(cluster) - take)))
+            start = next_vowel - take
+        else:
+            ranges.append((start, len(phones)))
+    return [(phones[first:last], stress[first:last]) for first, last in ranges]
+
+
+def _word_phones(bank: _Voicebank, word: str) -> tuple[list[str], list[float | None]] | None:
+    """Whole-word lookup: voicebank dictionary first, then CMUdict (stress digits kept)."""
+    key = word.lower()
+    if key in bank.en_dict:
+        return list(bank.en_dict[key]), [None] * len(bank.en_dict[key])
+    if key in bank.cmu:
+        entry = bank.cmu[key][0]
+        phones = [phone.rstrip("012").lower() for phone in entry]
+        stress: list[float | None] = [float(phone[-1]) if phone[-1].isdigit() else None for phone in entry]
+        return phones, stress
+    return None
+
+
+def _syllable_stress(phones: list[str], stress: list[float | None], bank: _Voicebank) -> float | None:
+    for phone, value in zip(phones, stress, strict=False):
+        if bank.is_vowel(phone) and phone not in ("SP", "AP"):
+            return value
+    return None
+
+
+def phonemize_groups(
+    bank: _Voicebank, groups: list[list[str]]
+) -> tuple[list[list[str]], list[str], list[float | None]]:
+    """Phones per flat token, warnings, and the stress level of each token's vowel.
+
+    Syllables of one word are looked up as the whole word and its sounds are split between the
+    word's notes (one vowel per syllable); when that is impossible, the pieces are looked up
+    individually and a warning names the word. A '+' carries the previous vowel onto the next
+    note and moves the closing consonants to the last note of the slur ("still +" sings
+    s-t-ih then ih-l, not s-t-ih-l then ih).
+    """
+    flat_tokens = [token for group in groups for token in group]
+    phones_per_token: list[list[str] | None] = [None] * len(flat_tokens)
+    stress_per_token: list[float | None] = [None] * len(flat_tokens)
+    warnings: list[str] = []
     unknown: list[str] = []
-    previous_vowel: str | None = None
-    for token in tokens:
-        if token == "+":
-            if previous_vowel is None:
-                raise DiffSingerError("'+' needs a preceding syllable with a vowel.")
-            result.append([previous_vowel])  # a slur carries the vowel onto the new pitch
+    index = 0
+    for group in groups:
+        if len(group) == 1 and group[0] in ("+", "-", "br"):
+            control = group[0]
+            phones_per_token[index] = {"+": None, "-": ["SP"], "br": ["AP"]}[control]
+            index += 1
             continue
-        if token == "-":
-            result.append(["SP"])
-            previous_vowel = None
-            continue
-        if token == "br":
-            result.append(["AP"])
-            previous_vowel = None
-            continue
-        try:
-            phones = bank.phonemize(token)
-        except DiffSingerError:
-            unknown.append(token)
-            continue
-        result.append(phones)
-        vowels = [p for p in phones if bank.is_vowel(p) and p not in ("SP", "AP")]
-        previous_vowel = vowels[-1] if vowels else None
+        word = "".join(group)
+        whole = _word_phones(bank, word)
+        pieces: list[list[str]] = []
+        stresses: list[float | None] = []
+        if whole is not None:
+            split = _split_word_into_syllables(whole[0], whole[1], bank, len(group))
+            if split is not None:
+                pieces = [piece for piece, _ in split]
+                stresses = [_syllable_stress(piece, piece_stress, bank) for piece, piece_stress in split]
+            else:
+                vowels = sum(1 for phone in whole[0] if bank.is_vowel(phone) and phone not in ("SP", "AP"))
+                warnings.append(
+                    f"'{word}' has {vowels} vowels but {len(group)} notes; falling back to per-piece lookup."
+                )
+        if not pieces:
+            for token in group:
+                single = _word_phones(bank, token)
+                if single is None:
+                    unknown.append(token)
+                    continue
+                pieces.append(single[0])
+                stresses.append(_syllable_stress(single[0], single[1], bank))
+        for offset in range(len(group)):
+            if offset < len(pieces):
+                phones_per_token[index + offset] = pieces[offset]
+                stress_per_token[index + offset] = stresses[offset]
+        index += len(group)
     if unknown:
         raise DiffSingerError(
             "These words are not in the voicebank's English dictionary or CMUdict: "
             + ", ".join(sorted(set(unknown)))
             + ". Use a per-syllable spelling, or '-' for a pause."
         )
-    return result, []
+
+    # slur pass: '+' carries the vowel; the closing consonants move to the last note of the run
+    for position, token in enumerate(flat_tokens):
+        if token != "+":
+            continue
+        if position > 0 and flat_tokens[position - 1] == "+":
+            continue  # only the first '+' of a run does the work; the rest just carry the vowel
+        base_index = position - 1
+        while base_index >= 0 and flat_tokens[base_index] == "+":
+            base_index -= 1
+        if base_index < 0 or phones_per_token[base_index] is None:
+            raise DiffSingerError("'+' needs a preceding syllable with a vowel.")
+        base_phones = phones_per_token[base_index]
+        vowel_positions = [
+            i for i, phone in enumerate(base_phones) if bank.is_vowel(phone) and phone not in ("SP", "AP")
+        ]
+        if not vowel_positions:
+            raise DiffSingerError("'+' needs a preceding syllable with a vowel.")
+        vowel_position = vowel_positions[-1]
+        vowel = base_phones[vowel_position]
+        coda = base_phones[vowel_position + 1 :]
+        phones_per_token[base_index] = base_phones[: vowel_position + 1]  # keep onset + vowel only
+        # find the last '+' of this run
+        run_end = position
+        while run_end + 1 < len(flat_tokens) and flat_tokens[run_end + 1] == "+":
+            run_end += 1
+        for offset in range(position, run_end + 1):
+            phones_per_token[offset] = [vowel]
+        phones_per_token[run_end] = [vowel] + coda
+    result = [phones if phones is not None else ["SP"] for phones in phones_per_token]
+    return result, warnings, stress_per_token
 
 
 # ------------------------------------------------------------------ timeline planner
