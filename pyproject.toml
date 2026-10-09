@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+diffsinger = ["onnxruntime>=1.17,<2", "numpy>=1.26", "PyYAML>=6", "cmudict>=1.0"]
 
 [project.scripts]
 chordsmith-mcp = "chordsmith.server:main"

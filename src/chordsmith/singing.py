@@ -29,7 +29,7 @@ import mido
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
-from chordsmith import audio, delivery
+from chordsmith import audio, delivery, diffsinger
 from chordsmith.storage import FileStore
 from chordsmith.theory import midi_note_name
 
@@ -110,7 +110,8 @@ class ScoreNote:
     key: int | None  # None for rests
     start_beat: float
     beats: float
-    frames: int
+    start_seconds: float
+    seconds: float
     is_rest: bool
 
 
@@ -126,16 +127,18 @@ class VocalScore:
     notes: list[ScoreNote]
     warnings: list[str]
     created_at: float
+    total_seconds: float = 0.0
 
 
 @dataclass
 class MappingNote:
     note_id: int
     key: int | None
-    frames: int
+    start_seconds: float
+    seconds: float
     lyric: str
     is_rest: bool
-    start_frame: int
+    phonemes: list[str] | None = None
 
 
 @dataclass
@@ -145,7 +148,7 @@ class VocalMapping:
     version: int
     voice_hint: str
     notes: list[MappingNote]
-    total_frames: int
+    total_seconds: float
     wordless: bool
     warnings: list[str]
     created_at: float
@@ -239,15 +242,41 @@ def _melody_notes(track: mido.MidiTrack, ticks_per_beat: int) -> list[tuple[int,
     return notes
 
 
+def _tempo_map(midi: mido.MidiFile) -> list[tuple[int, float]]:
+    """All tempo changes (tick, bpm), sorted; every tempo change is honoured."""
+    events: dict[int, float] = {}
+    for track in midi.tracks:
+        tick = 0
+        for msg in track:
+            tick += msg.time
+            if msg.type == "set_tempo" and tick not in events:
+                events[tick] = mido.tempo2bpm(msg.tempo)
+    points = sorted(events.items())
+    if not points:
+        return [(0, 120.0)]
+    if points[0][0] != 0:
+        points.insert(0, (0, points[0][1]))
+    return points
+
+
+def _tick_to_seconds(points: list[tuple[int, float]], tick: int, ticks_per_beat: int) -> float:
+    seconds = 0.0
+    for index, (start_tick, bpm) in enumerate(points):
+        if tick <= start_tick:
+            break
+        end_tick = points[index + 1][0] if index + 1 < len(points) else tick
+        seconds += (min(tick, end_tick) - start_tick) / ticks_per_beat * 60.0 / bpm
+        if tick <= end_tick:
+            break
+    return seconds
+
+
 def build_score(path: Path, track: str | int | None, transpose: int) -> VocalScore:
     midi = mido.MidiFile(path)
     track_index = find_track(midi, track)
     track_name = _track_names(midi)[track_index]
-    tempo = 120.0
-    for msg in midi.tracks[0]:
-        if msg.type == "set_tempo":
-            tempo = mido.tempo2bpm(msg.tempo)
-            break
+    tempos = _tempo_map(midi)
+    tempo = tempos[0][1]
     raw = _melody_notes(midi.tracks[track_index], midi.ticks_per_beat)
     if not raw:
         raise SingingError(f"Track '{track_name}' has no notes.")
@@ -260,26 +289,24 @@ def build_score(path: Path, track: str | int | None, transpose: int) -> VocalSco
             )
         last_end = max(last_end, end)
 
-    frames_per_beat = FRAME_RATE * 60.0 / tempo
     warnings: list[str] = []
-
-    def to_frame(tick: int) -> int:
-        return round(tick / midi.ticks_per_beat * frames_per_beat)
-
     notes: list[ScoreNote] = []
     note_id = 0
     cursor_tick = 0
     for start, end, pitch in raw:
         if start > cursor_tick:
-            frames = to_frame(start) - to_frame(cursor_tick)
-            if frames > 0:
+            rest_seconds = _tick_to_seconds(tempos, start, midi.ticks_per_beat) - _tick_to_seconds(
+                tempos, cursor_tick, midi.ticks_per_beat
+            )
+            if rest_seconds > 0:
                 notes.append(
                     ScoreNote(
                         note_id,
                         None,
                         cursor_tick / midi.ticks_per_beat,
                         (start - cursor_tick) / midi.ticks_per_beat,
-                        frames,
+                        _tick_to_seconds(tempos, cursor_tick, midi.ticks_per_beat),
+                        rest_seconds,
                         True,
                     )
                 )
@@ -289,15 +316,20 @@ def build_score(path: Path, track: str | int | None, transpose: int) -> VocalSco
             raise SingingError(
                 f"Transposing {midi_note_name(pitch)} by {transpose:+d} leaves the MIDI range 0-127."
             )
-        frames = to_frame(end) - to_frame(start)
-        if frames < MIN_FRAME_LENGTH:
-            warnings.append(
-                f"Note at tick {start} was shorter than {MIN_FRAME_LENGTH} frames and was lengthened."
-            )
-            frames = MIN_FRAME_LENGTH
+        seconds = _tick_to_seconds(tempos, end, midi.ticks_per_beat) - _tick_to_seconds(
+            tempos, start, midi.ticks_per_beat
+        )
+        if seconds * FRAME_RATE < MIN_FRAME_LENGTH:
+            warnings.append(f"Note at tick {start} is very short; engines may lengthen it slightly.")
         notes.append(
             ScoreNote(
-                note_id, key, start / midi.ticks_per_beat, (end - start) / midi.ticks_per_beat, frames, False
+                note_id,
+                key,
+                start / midi.ticks_per_beat,
+                (end - start) / midi.ticks_per_beat,
+                _tick_to_seconds(tempos, start, midi.ticks_per_beat),
+                seconds,
+                False,
             )
         )
         note_id += 1
@@ -313,6 +345,7 @@ def build_score(path: Path, track: str | int | None, transpose: int) -> VocalSco
         notes=notes,
         warnings=warnings,
         created_at=time.time(),
+        total_seconds=_tick_to_seconds(tempos, last_end, midi.ticks_per_beat),
     )
 
 
@@ -323,6 +356,7 @@ def _score_payload(score: VocalScore) -> dict:
         "track": {"index": score.track_index + 1, "name": score.track_name},
         "tempo_bpm": score.tempo_bpm,
         "transpose": score.transpose,
+        "total_seconds": round(score.total_seconds, 3),
         "warnings": score.warnings,
         "notes": [
             {
@@ -332,7 +366,9 @@ def _score_payload(score: VocalScore) -> dict:
                 "name": midi_note_name(note.key) if note.key is not None else None,
                 "start_beat": round(note.start_beat, 4),
                 "beats": round(note.beats, 4),
-                "frames": note.frames,
+                "start_seconds": round(note.start_seconds, 4),
+                "seconds": round(note.seconds, 4),
+                "frames": round(note.seconds * FRAME_RATE) if not note.is_rest else None,
             }
             for note in score.notes
         ],
@@ -362,23 +398,50 @@ def build_mapping(
     score: VocalScore, lyrics: str | None, language: str, holds: dict[int, int] | None
 ) -> VocalMapping:
     wordless = lyrics is None or lyrics.strip() == ""
-    syllables = [] if wordless else _parse_syllables(lyrics, language)
     warnings: list[str] = []
     sung = [note for note in score.notes if not note.is_rest]
+    syllables: list[str] = []
+    phonemes_per_note: dict[int, list[str]] = {}
+    english = False
     if not wordless:
-        if len(syllables) > len(sung):
-            warnings.append(
-                f"{len(syllables) - len(sung)} extra syllables were not used "
-                f"(the melody has {len(sung)} notes)."
-            )
-        if len(syllables) < len(sung):
-            warnings.append(
-                f"{len(sung) - len(syllables)} notes had no syllable and were turned into rests "
-                "(no words were invented)."
-            )
+        if language == "en":
+            if not diffsinger.available():
+                raise SingingError(
+                    "English lyrics need the DiffSinger voicebank (see docs/singing.md) and "
+                    "CHORDSMITH_DIFFSINGER_VOICE. Use wordless mode or Japanese kana for VOICEVOX."
+                )
+            english = True
+            syllables = diffsinger.split_syllables(lyrics)
+            if len(syllables) > len(sung):
+                warnings.append(
+                    f"{len(syllables) - len(sung)} extra syllables were not used "
+                    f"(the melody has {len(sung)} notes)."
+                )
+                syllables = syllables[: len(sung)]
+            if len(syllables) < len(sung):
+                warnings.append(
+                    f"{len(sung) - len(syllables)} notes had no syllable and were turned into rests "
+                    "(no words were invented)."
+                )
+            bank = diffsinger.get_voicebank()
+            phones_per_token, _ = diffsinger.phonemize_tokens(bank, syllables)
+            for note, phones in zip(sung, phones_per_token, strict=True):
+                phonemes_per_note[note.note_id] = phones
+        else:
+            syllables = _parse_syllables(lyrics, language)
+            if len(syllables) > len(sung):
+                warnings.append(
+                    f"{len(syllables) - len(sung)} extra syllables were not used "
+                    f"(the melody has {len(sung)} notes)."
+                )
+            if len(syllables) < len(sung):
+                warnings.append(
+                    f"{len(sung) - len(syllables)} notes had no syllable and were turned into rests "
+                    "(no words were invented)."
+                )
 
     holds = holds or {}
-    held_frames: dict[int, int] = {}
+    held_seconds: dict[int, float] = {}
     skipped: set[int] = set()
     if holds:
         sung_ids = [note.note_id for note in sung]
@@ -390,37 +453,43 @@ def build_mapping(
             for offset in range(1, count + 1):
                 if position + offset < len(sung_ids):
                     target = sung_ids[position + offset]
-                    held_frames[key] = held_frames.get(key, 0) + next(
-                        note.frames for note in sung if note.note_id == target
+                    held_seconds[key] = held_seconds.get(key, 0.0) + next(
+                        note.seconds for note in sung if note.note_id == target
                     )
                     skipped.add(target)
 
     mapping_notes: list[MappingNote] = []
-    cursor = 0
     syllable_iter = iter(syllables)
     for note in score.notes:
         if note.is_rest:
-            mapping_notes.append(MappingNote(note.note_id, None, note.frames, "", True, cursor))
-            cursor += note.frames
+            mapping_notes.append(MappingNote(note.note_id, None, note.start_seconds, note.seconds, "", True))
             continue
         if note.note_id in skipped:
             continue
+        phonemes: list[str] | None = None
         if wordless:
             lyric = WORDLESS_LYRIC
+        elif english:
+            lyric = next(syllable_iter, "")
+            phonemes = phonemes_per_note.get(note.note_id)
+            if lyric == "":
+                phonemes = None  # no syllable: this note becomes a rest
         else:
             lyric = next(syllable_iter, "")
-        frames = note.frames + held_frames.get(note.note_id, 0)
-        mapping_notes.append(MappingNote(note.note_id, note.key, frames, lyric, False, cursor))
-        cursor += frames
+        is_rest = not wordless and lyric == ""
+        seconds = note.seconds + held_seconds.get(note.note_id, 0.0)
+        mapping_notes.append(
+            MappingNote(note.note_id, note.key, note.start_seconds, seconds, lyric, is_rest, phonemes)
+        )
     if not wordless and not syllables:
         warnings.append("No syllables were mapped; every note is a rest.")
     return VocalMapping(
         mapping_id=f"map_{uuid.uuid4().hex[:10]}",
         score_id=score.score_id,
         version=1,
-        voice_hint="voicevox",
+        voice_hint="diffsinger" if english else "voicevox",
         notes=mapping_notes,
-        total_frames=cursor,
+        total_seconds=score.total_seconds,
         wordless=wordless,
         warnings=warnings,
         created_at=time.time(),
@@ -433,8 +502,8 @@ def _mapping_payload(mapping: VocalMapping) -> dict:
         "score_id": mapping.score_id,
         "version": mapping.version,
         "wordless": mapping.wordless,
-        "total_frames": mapping.total_frames,
-        "duration_seconds": round(mapping.total_frames / FRAME_RATE, 3),
+        "voice_hint": mapping.voice_hint,
+        "duration_seconds": round(mapping.total_seconds, 3),
         "warnings": mapping.warnings,
         "notes": [
             {
@@ -442,8 +511,10 @@ def _mapping_payload(mapping: VocalMapping) -> dict:
                 "kind": "rest" if note.is_rest else "note",
                 "pitch": note.key,
                 "lyric": note.lyric,
-                "frames": note.frames,
-                "start_frame": note.start_frame,
+                "phonemes": note.phonemes,
+                "start_seconds": round(note.start_seconds, 4),
+                "seconds": round(note.seconds, 4),
+                "frames": round(note.seconds * FRAME_RATE) if not note.is_rest else None,
             }
             for note in mapping.notes
         ],
@@ -456,7 +527,8 @@ def _mapping_payload(mapping: VocalMapping) -> dict:
 class SoftSettings(BaseModel):
     """Soft-voice controls.
 
-    VOICEVOX supports energy and volume_cap; breathiness/vibrato are DiffSinger-only.
+    VOICEVOX uses energy and volume_cap. DiffSinger voices use velocity, gender, expr, steps and
+    depth; breathiness is refused (this voicebank has none).
     """
 
     energy: float = Field(
@@ -466,13 +538,28 @@ class SoftSettings(BaseModel):
         None,
         ge=0.05,
         le=1.0,
-        description="Clamp every frame's volume to this value, so loud notes stay soft (e.g. 0.6).",
+        description="VOICEVOX only: clamp every frame's volume so loud notes stay soft (e.g. 0.6).",
     )
     breathiness: float | None = Field(
-        None, ge=0.0, le=1.0, description="DiffSinger-only; VOICEVOX fails if this is set."
+        None, ge=0.0, le=1.0, description="Not supported: this voicebank has no breathiness control."
     )
     vibrato: float | None = Field(
-        None, ge=0.0, le=1.0, description="DiffSinger-only; VOICEVOX fails if this is set."
+        None, ge=0.0, le=1.0, description="Not supported yet (DiffSinger vibrato needs curve support)."
+    )
+    velocity: float = Field(
+        1.0, ge=0.5, le=2.0, description="DiffSinger only: singing speed factor (1.0 = original)."
+    )
+    gender: float = Field(
+        -1.0, ge=-1.0, le=1.0, description="DiffSinger only: formant/gender shift (0 = neutral)."
+    )
+    expr: float = Field(
+        1.0, ge=0.0, le=1.0, description="DiffSinger only: pitch expressiveness (1.0 = natural)."
+    )
+    steps: int = Field(
+        20, ge=1, le=100, description="DiffSinger only: diffusion sampling steps (higher = slower)."
+    )
+    depth: float = Field(
+        0.6, ge=0.05, le=0.6, description="DiffSinger only: diffusion depth (voicebank max 0.6)."
     )
 
 
@@ -514,40 +601,107 @@ def resolve_speakers(voice_id: str, singers: list[dict]) -> tuple[int, int]:
     return teacher, speaker
 
 
-def _settings_dict(settings: SoftSettings | None) -> dict:
-    data = (settings or SoftSettings()).model_dump(exclude_none=True)
+def _settings_dict(settings: SoftSettings | None, engine: str) -> dict:
+    data = (settings or SoftSettings()).model_dump(exclude_none=True, exclude_defaults=True)
     for unsupported in ("breathiness", "vibrato"):
         if unsupported in data:
             raise SingingError(
-                f"VOICEVOX does not support '{unsupported}' (that control is DiffSinger-only). "
-                "Use energy and volume_cap for a soft VOICEVOX voice."
+                f"'{unsupported}' is not supported by the {engine} voices. "
+                "Use energy/volume_cap (VOICEVOX) or velocity/gender/expr (DiffSinger)."
             )
+    if engine == "voicevox":
+        for diffsinger_only in ("velocity", "gender", "expr", "steps", "depth"):
+            if diffsinger_only in data:
+                raise SingingError(
+                    f"'{diffsinger_only}' is a DiffSinger setting; VOICEVOX uses energy/volume_cap."
+                )
     return data
 
 
+def parse_voice_engine(voice_id: str) -> tuple[str, str]:
+    """Split a voice id into (engine, rest): 'voicevox:6000' or 'diffsinger:hanami/nectar'."""
+    engine, _, rest = voice_id.partition(":")
+    if engine not in ("voicevox", "diffsinger") or not rest:
+        raise SingingError(f"Unknown voice '{voice_id}'. Use list_singing_voices to pick one.")
+    return engine, rest
+
+
+def _voicevox_payload(mapping: VocalMapping) -> dict:
+    """Build the VOICEVOX score from the engine-neutral mapping (absolute frame rounding)."""
+    notes = []
+    for note in mapping.notes:
+        start_frame = round(note.start_seconds * FRAME_RATE)
+        end_frame = round((note.start_seconds + note.seconds) * FRAME_RATE)
+        notes.append({"key": note.key, "frame_length": max(1, end_frame - start_frame), "lyric": note.lyric})
+    return {"notes": notes}
+
+
+def _run_voicevox(job: SingingJob, mapping: VocalMapping, score: VocalScore, query: int, synth: int) -> dict:
+    client = get_client()
+    query_data = client.sing_frame_audio_query(_voicevox_payload(mapping), query)
+    energy = float(job.settings.get("energy", 1.0))
+    if energy != 1.0:
+        query_data["volumeScale"] = float(query_data.get("volumeScale", 1.0)) * energy
+    cap = job.settings.get("volume_cap")
+    if cap is not None:
+        query_data["volume"] = [min(float(v), float(cap)) for v in query_data.get("volume", [])]
+    data = client.frame_synthesis(query_data, synth)
+    return {"data": data, "query_voice_id": f"voicevox:{query}"}
+
+
+def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore) -> dict:
+    _, voice = parse_voice_engine(job.voice_id)
+    mode = voice.split("/", 1)[-1]
+    if mode not in diffsinger.MODES:
+        raise SingingError(f"Unknown DiffSinger mode '{mode}'; use one of {', '.join(diffsinger.MODES)}.")
+    specs = [
+        diffsinger.NoteSpec(
+            phonemes=note.phonemes or [],
+            start_seconds=note.start_seconds,
+            seconds=note.seconds,
+            midi=note.key or 60,
+        )
+        for note in mapping.notes
+        if not note.is_rest
+    ]
+    if not specs:
+        raise SingingError("Nothing to sing: every note is a rest.")
+    if any(not spec.phonemes for spec in specs):
+        raise SingingError("English notes need phonemes; re-run map_vocal_lyrics with language='en'.")
+    store = _get_store()
+    assert store is not None
+    path = store.new_path(None, f"{Path(score.source).stem}_vocal", extension=".wav")
+    info = diffsinger.render(
+        specs,
+        path,
+        mode=mode,
+        steps=int(job.settings.get("steps", 20)),
+        depth=float(job.settings.get("depth", 0.6)),
+        velocity=float(job.settings.get("velocity", 1.0)),
+        gender=float(job.settings.get("gender", 0.0)),
+        expr=float(job.settings.get("expr", 1.0)),
+        energy=float(job.settings.get("energy", 1.0)),
+        total_seconds=mapping.total_seconds,
+    )
+    return {"path": path, "info": info}
+
+
 def _run_job(
-    job: SingingJob, mapping: VocalMapping, score: VocalScore, query_speaker: int, synth_speaker: int
+    job: SingingJob, mapping: VocalMapping, score: VocalScore, speakers: tuple[int, int] | None
 ) -> None:
     job.status = "running"
     try:
-        client = get_client()
-        payload = {
-            "notes": [
-                {"key": note.key, "frame_length": note.frames, "lyric": note.lyric} for note in mapping.notes
-            ]
-        }
-        query = client.sing_frame_audio_query(payload, query_speaker)
-        energy = float(job.settings.get("energy", 1.0))
-        if energy != 1.0:
-            query["volumeScale"] = float(query.get("volumeScale", 1.0)) * energy
-        cap = job.settings.get("volume_cap")
-        if cap is not None:
-            query["volume"] = [min(float(v), float(cap)) for v in query.get("volume", [])]
-        data = client.frame_synthesis(query, synth_speaker)
+        engine, _ = parse_voice_engine(job.voice_id)
         store = _get_store()
         assert store is not None
-        path = store.new_path(None, f"{Path(score.source).stem}_vocal", extension=".wav")
-        path.write_bytes(data)
+        if engine == "voicevox":
+            assert speakers is not None
+            result = _run_voicevox(job, mapping, score, *speakers)
+            path = store.new_path(None, f"{Path(score.source).stem}_vocal", extension=".wav")
+            path.write_bytes(result["data"])
+        else:
+            result = _run_diffsinger(job, mapping, score)
+            path = result["path"]
         with wave.open(str(path), "rb") as handle:
             duration = handle.getnframes() / handle.getframerate()
             sample_rate = handle.getframerate()
@@ -561,8 +715,11 @@ def _run_job(
             "start_offset_seconds": 0.0,
             "mapping_id": mapping.mapping_id,
             "voice_id": job.voice_id,
-            "query_voice_id": f"voicevox:{query_speaker}",
         }
+        if engine == "voicevox":
+            job.result["query_voice_id"] = result["query_voice_id"]
+        else:
+            job.result.update({k: v for k, v in result["info"].items() if k not in ("duration_seconds",)})
         job.status = "done"
     except Exception as exc:  # the job must fail loudly, never render twice
         logger.warning("Singing job %s failed: %s", job.job_id, exc)
@@ -580,7 +737,14 @@ def start_job(
         for job in _registry.jobs.values():
             if job.cache_key == cache_key and job.status in ("queued", "running", "done"):
                 return job, True
-    query_speaker, synth_speaker = resolve_speakers(voice_id, get_client().singers())
+    engine, _ = parse_voice_engine(voice_id)
+    speakers: tuple[int, int] | None = None
+    if engine == "voicevox":
+        speakers = resolve_speakers(voice_id, get_client().singers())
+    elif not diffsinger.available():
+        raise SingingError(
+            "No DiffSinger voicebank configured; set CHORDSMITH_DIFFSINGER_VOICE (see docs/singing.md)."
+        )
     job = SingingJob(
         job_id=f"job_{uuid.uuid4().hex[:10]}",
         status="queued",
@@ -592,9 +756,7 @@ def start_job(
     )
     with _registry.lock:
         _registry.jobs[job.job_id] = job
-    thread = threading.Thread(
-        target=_run_job, args=(job, mapping, score, query_speaker, synth_speaker), daemon=True
-    )
+    thread = threading.Thread(target=_run_job, args=(job, mapping, score, speakers), daemon=True)
     thread.start()
     return job, False
 
@@ -724,42 +886,95 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
 
     @mcp.tool()
     def list_singing_voices(
-        engine: Annotated[Literal["voicevox", "all"], Field(description="Which engine to query.")] = "all",
+        engine: Annotated[
+            Literal["voicevox", "diffsinger", "all"], Field(description="Which engine to query.")
+        ] = "all",
     ) -> dict[str, Any]:
         """List the singing voices an engine offers, with languages, licence notes and soft controls.
 
-        The VOICEVOX adapter sings Japanese kana (or a wordless hum) and supports the 'energy' and
-        'volume_cap' soft controls. Decode-only voices (including the whisper styles) are prepared
-        by the engine's teacher style and sung in the chosen voice's timbre.
+        VOICEVOX sings Japanese kana (or a wordless hum); decode-only voices (including the whisper
+        styles) are prepared by the engine's teacher style. DiffSinger sings English lyrics from a
+        voicebank you mount yourself (CHORDSMITH_DIFFSINGER_VOICE) and reports its licence layers.
         """
         _registry.prune()
-        if engine not in ("voicevox", "all"):
+        if engine not in ("voicevox", "diffsinger", "all"):
             raise SingingError(f"Unknown engine '{engine}'.")
-        client = get_client()
-        singers = client.singers()
-        types = _style_types(singers)
-        voices = []
-        for singer in singers:
-            for style in singer["styles"]:
-                style_type = types.get(style["id"], "sing")
-                voices.append(
-                    {
-                        "voice_id": f"voicevox:{style['id']}",
-                        "name": f"{singer['name']} / {style['name']}",
-                        "engine": "voicevox",
-                        "language": "ja",
-                        "style_type": style_type,
-                        "query_via_teacher": style_type not in ("sing", "singing_teacher"),
-                        "licence": VOICEVOX_LICENCE,
-                        "soft_controls": {
-                            "energy": True,
-                            "volume_cap": True,
-                            "breathiness": False,
-                            "vibrato": False,
-                        },
-                    }
-                )
-        return {"engine": "voicevox", "engine_url": client.base_url, "voices": voices}
+        result: dict[str, Any] = {"engines": {}}
+        if engine in ("voicevox", "all"):
+            client = get_client()
+            singers = client.singers()
+            types = _style_types(singers)
+            voices = []
+            for singer in singers:
+                for style in singer["styles"]:
+                    style_type = types.get(style["id"], "sing")
+                    voices.append(
+                        {
+                            "voice_id": f"voicevox:{style['id']}",
+                            "name": f"{singer['name']} / {style['name']}",
+                            "engine": "voicevox",
+                            "language": "ja",
+                            "style_type": style_type,
+                            "query_via_teacher": style_type not in ("sing", "singing_teacher"),
+                            "licence": VOICEVOX_LICENCE,
+                            "soft_controls": {
+                                "energy": True,
+                                "volume_cap": True,
+                                "breathiness": False,
+                                "vibrato": False,
+                            },
+                        }
+                    )
+            result["engines"]["voicevox"] = {
+                "engine": "voicevox",
+                "engine_url": client.base_url,
+                "voices": voices,
+            }
+        if engine in ("diffsinger", "all"):
+            info = diffsinger.describe()
+            if info is None:
+                if engine == "diffsinger":
+                    raise SingingError(
+                        "No DiffSinger voicebank configured; set CHORDSMITH_DIFFSINGER_VOICE "
+                        "(see docs/singing.md)."
+                    )
+                result["engines"]["diffsinger"] = {"configured": False, "voices": []}
+            else:
+                result["engines"]["diffsinger"] = {
+                    "configured": True,
+                    "voicebank": info["voicebank"],
+                    "credit": info["credit"],
+                    "licence": info["licence"],
+                    "commercial_status": info["commercial_status"],
+                    "voices": [
+                        {
+                            "voice_id": f"diffsinger:hanami/{mode}",
+                            "name": f"Hoshino Hanami / {mode.capitalize()}"
+                            + (" (soft)" if mode == "nectar" else ""),
+                            "engine": "diffsinger",
+                            "language": "en",
+                            "style_type": "diffsinger",
+                            "query_via_teacher": False,
+                            "licence": info["licence"],
+                            "credit": info["credit"],
+                            "commercial_status": info["commercial_status"],
+                            "soft_controls": {
+                                "energy": True,
+                                "velocity": True,
+                                "gender": True,
+                                "expr": True,
+                                "steps": True,
+                                "depth": True,
+                                "breathiness": False,
+                                "vibrato": False,
+                            },
+                        }
+                        for mode in diffsinger.MODES
+                    ],
+                }
+        if engine == "all":
+            return result["engines"]
+        return result["engines"][engine]
 
     @mcp.tool()
     def prepare_vocal_score(
@@ -792,17 +1007,24 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         score_id: Annotated[str, Field(description="Score id from prepare_vocal_score.")],
         lyrics: Annotated[
             str | None,
-            Field(description="Kana syllables, e.g. 'う う う' (one per note). Omit for a wordless hum."),
+            Field(
+                description="One token per note. English: words or syllables, e.g. 'sodium gold' or "
+                "'so- di- um gold'; '+' continues the previous note, '-' is a pause, 'br' a breath. "
+                "Japanese: kana, e.g. 'う う う'. Omit for a wordless hum."
+            ),
         ] = None,
-        language: Annotated[str, Field(description="'ja' for kana; omit lyrics for wordless mode.")] = "ja",
+        language: Annotated[
+            str, Field(description="'en' for English words, 'ja' for kana; omit lyrics for wordless mode.")
+        ] = "ja",
         holds: Annotated[
             dict[int, int] | None,
             Field(description='Optional holds: {"<note_id>": how many following notes it is held over.'),
         ] = None,
     ) -> dict[str, Any]:
-        """Attach one syllable per note (or 'う' on every note in wordless mode).
+        """Attach one token per note (or 'う' on every note in wordless mode).
 
-        Mismatches produce warnings; words are never dropped or invented.
+        English tokens are phonemized here (the dry run): the result lists the phonemes per note and
+        refuses unknown words by name. Mismatches produce warnings; words are never dropped or invented.
         """
         with _registry.lock:
             score = _registry.scores.get(score_id)
@@ -819,7 +1041,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     def render_singing(
         mapping_id: Annotated[str, Field(description="Mapping id from map_vocal_lyrics.")],
         voice_id: Annotated[
-            str, Field(description="Voice id from list_singing_voices, e.g. 'voicevox:6000'.")
+            str,
+            Field(
+                description="Voice id from list_singing_voices: 'voicevox:6000' or "
+                "'diffsinger:hanami/nectar'."
+            ),
         ],
         settings: SoftSettings | None = None,
     ) -> dict[str, Any]:
@@ -833,7 +1059,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             score = _registry.scores.get(mapping.score_id) if mapping else None
         if mapping is None or score is None:
             raise SingingError(f"Mapping '{mapping_id}' not found (mappings expire after 24 hours).")
-        settings_dict = _settings_dict(settings)
+        engine, _ = parse_voice_engine(voice_id)
+        settings_dict = _settings_dict(settings, engine)
         job, reused = start_job(mapping, score, voice_id, settings_dict)
         return {"job_id": job.job_id, "status": job.status, "reused": reused}
 

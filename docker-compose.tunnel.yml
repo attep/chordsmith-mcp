@@ -27,9 +27,12 @@ services:
       CHORDSMITH_OUTPUT_DIR: /data
       CHORDSMITH_STATE_DIR: /state
       CHORDSMITH_VOICEVOX_URL: "http://voicevox:50021"
+      CHORDSMITH_DIFFSINGER_VOICE: "${CHORDSMITH_DIFFSINGER_VOICE:-/voicebank}"
     volumes:
       - ./data:/data
       - ./state:/state
+      # Your DiffSinger voicebank (never committed; see docs/singing.md)
+      - ./voicebank:/voicebank:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 30s

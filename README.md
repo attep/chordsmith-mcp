@@ -112,8 +112,9 @@ Both `create_*` tools accept **voicing** options (inversions, open/drop-2 voicin
 bass note), **rhythm** options (block chords, pulses, arpeggios, Alberti bass, strumming, swing
 and humanize) and a `lofi` preset for a soft, swung, humanized feel.
 
-There is also a **singing pipeline** (slice 1, "Sodium Gold"): wordless hums with a soft VOICEVOX
-voice, mixed and exported. See [docs/singing.md](docs/singing.md).
+There is also a **singing pipeline** (Sodium Gold): wordless hums or Japanese kana with VOICEVOX,
+and English lyrics through a DiffSinger voicebank you mount yourself, all mixed and exported.
+See [docs/singing.md](docs/singing.md).
 
 There are also **resources** (`chords://types`, `scales://{key}`, `midi://{filename}`) and
 **prompts** (`compose_progression`, `explain_progression`).

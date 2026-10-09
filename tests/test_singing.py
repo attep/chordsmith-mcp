@@ -6,12 +6,13 @@ import base64
 import io
 import time
 import wave
+from pathlib import Path
 
 import mido
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from chordsmith import audio, server, singing
+from chordsmith import audio, diffsinger, server, singing
 
 pytestmark = pytest.mark.anyio
 
@@ -116,7 +117,9 @@ async def test_prepare_score_extracts_notes_and_rests(store, fake_engine):
     ]
     assert data["notes"][0]["pitch"] == 60  # C5 down an octave
     assert data["notes"][-1]["pitch"] == 67  # G5 down an octave
-    assert data["notes"][0]["frames"] == 23  # 0.5 beat at 120 BPM
+    assert data["notes"][0]["seconds"] == 0.25  # 0.5 beat at 120 BPM
+    assert data["notes"][0]["frames"] == 23  # VOICEVOX preview frames
+    assert data["total_seconds"] == 2.0
 
 
 async def test_prepare_score_rejects_polyphony(store, fake_engine):
@@ -161,7 +164,8 @@ async def test_lyric_mismatches_warn_and_never_invent(store, fake_engine):
         await _call("map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "あ い"})
     ).structuredContent
     assert any("had no syllable" in warning for warning in short["warnings"])
-    assert [n["lyric"] for n in short["notes"] if n["kind"] == "note"] == ["あ", "い", "", ""]
+    assert [n["lyric"] for n in short["notes"] if n["kind"] == "note"] == ["あ", "い"]
+    assert sum(1 for n in short["notes"] if n["kind"] == "rest") >= 2
 
     long = (
         await _call("map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "あ い う え お か"})
@@ -176,10 +180,10 @@ async def test_lyric_validation(store, fake_engine):
     bad_char = await _call("map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "la la"})
     assert bad_char.isError and "kana" in bad_char.content[0].text
 
-    english = await _call(
-        "map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "la", "language": "en"}
+    french = await _call(
+        "map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "la", "language": "fr"}
     )
-    assert english.isError and "not supported" in english.content[0].text
+    assert french.isError and "not supported" in french.content[0].text
 
 
 async def test_holds_merge_following_notes(store, fake_engine):
@@ -192,7 +196,7 @@ async def test_holds_merge_following_notes(store, fake_engine):
     )
     data = result.structuredContent
     assert data["warnings"] == []
-    assert data["notes"][0]["frames"] == first_note["frames"] * 2
+    assert data["notes"][0]["seconds"] == round(first_note["seconds"] * 2, 4)
 
 
 # ------------------------------------------------------------------ rendering
@@ -277,7 +281,7 @@ async def test_unknown_voice_and_unsupported_controls_are_rejected(store, fake_e
 
 
 async def test_list_singing_voices(fake_engine):
-    result = await _call("list_singing_voices", {})
+    result = await _call("list_singing_voices", {"engine": "voicevox"})
     voices = result.structuredContent["voices"]
     assert voices[0]["voice_id"] == "voicevox:6000"
     assert voices[0]["language"] == "ja"
@@ -286,6 +290,21 @@ async def test_list_singing_voices(fake_engine):
     assert voices[0]["query_via_teacher"] is False
     assert voices[1]["voice_id"] == "voicevox:3014"
     assert voices[1]["query_via_teacher"] is True
+
+
+@pytest.mark.skipif(not diffsinger.available(), reason="DiffSinger voicebank not configured")
+async def test_list_singing_voices_diffsinger(fake_engine):
+    result = await _call("list_singing_voices", {"engine": "diffsinger"})
+    data = result.structuredContent
+    voices = data["voices"]
+    assert [v["voice_id"] for v in voices] == [
+        "diffsinger:hanami/root",
+        "diffsinger:hanami/fragrance",
+        "diffsinger:hanami/nectar",
+    ]
+    assert all(v["language"] == "en" for v in voices)
+    assert "Lotte V" in voices[0]["credit"]
+    assert "non-commercial" in data["commercial_status"]
 
 
 # ------------------------------------------------------------------ mixing
@@ -373,3 +392,145 @@ async def test_export_returns_all_files(store, fake_engine):
     for entry in data.values():
         assert base64.b64decode(entry["data_base64"])[:1] in (b"R", b"I", b"M")
     assert data["midi"]["filename"] == song
+
+
+# ------------------------------------------------------------------ DiffSinger (English)
+
+
+needs_voicebank = pytest.mark.skipif(not diffsinger.available(), reason="DiffSinger voicebank not configured")
+
+
+@needs_voicebank
+def test_english_phonemizer():
+    bank = diffsinger.get_voicebank()
+    assert diffsinger.split_syllables("so- di- um gold") == ["so", "di", "um", "gold"]
+    phones, _ = diffsinger.phonemize_tokens(bank, ["so", "di", "um", "gold"])
+    assert phones[0] == ["s", "ow"]
+    assert phones[1] == ["d", "iy"]
+    assert phones[2] == ["ah", "m"]
+    assert phones[3] == ["g", "ow", "l", "d"]
+    with pytest.raises(diffsinger.DiffSingerError) as exc:
+        diffsinger.phonemize_tokens(bank, ["streetlights"])
+    assert "streetlights" in str(exc.value)
+
+
+@needs_voicebank
+def test_english_words_phonemes():
+    bank = diffsinger.get_voicebank()
+    phones, _ = diffsinger.phonemize_tokens(bank, ["sodium", "gold"])
+    assert phones[0] == ["s", "ow", "d", "iy", "ah", "m"]
+    assert phones[1] == ["g", "ow", "l", "d"]
+
+
+def test_split_syllables_controls():
+    assert diffsinger.split_syllables("so- di- um + gold") == ["so", "di", "um", "+", "gold"]
+    assert diffsinger.split_syllables("ah - br") == ["ah", "-", "br"]
+
+
+class _StubBank:
+    def is_vowel(self, phoneme):
+        return phoneme in {"a", "e", "i", "o", "u", "ow", "iy", "ah"}
+
+
+def test_plan_timeline_puts_vowels_on_notes():
+    notes = [
+        diffsinger.NoteSpec(phonemes=["s", "ow"], start_seconds=0.0, seconds=0.5, midi=60),
+        diffsinger.NoteSpec(phonemes=["g", "ow", "l", "d"], start_seconds=0.5, seconds=0.5, midi=62),
+    ]
+    predicted = [[2.0, 3.0], [2.0, 3.0, 2.0, 1.0]]
+    timeline = diffsinger.plan_timeline(notes, predicted, bank=_StubBank())
+    frame = 0
+    vowel_start: dict[int, int] = {}
+    for entry in timeline:
+        if entry["kind"] == "vowel":
+            vowel_start.setdefault(entry["note"], frame)
+        frame += entry["frames"]
+    assert vowel_start[0] == diffsinger.HEAD_FRAMES
+    assert vowel_start[1] == diffsinger.HEAD_FRAMES + diffsinger.frame_at(0.5)
+    assert frame == sum(entry["frames"] for entry in timeline)
+
+
+@needs_voicebank
+def test_render_sodium_gold(tmp_path):
+    specs = [
+        diffsinger.NoteSpec(phonemes=phones, start_seconds=index * 0.5, seconds=0.5, midi=midi)
+        for index, (phones, midi) in enumerate(
+            [(["s", "ow"], 60), (["d", "iy"], 62), (["ah", "m"], 64), (["g", "ow", "l", "d"], 65)]
+        )
+    ]
+    out = tmp_path / "sodium.wav"
+    info = diffsinger.render(specs, out, mode="nectar", steps=12, total_seconds=2.0)
+    with wave.open(str(out), "rb") as handle:
+        assert handle.getframerate() == 44100
+        assert handle.getnchannels() == 1
+        seconds = handle.getnframes() / handle.getframerate()
+    expected = 2.0 + 2 * diffsinger.HEAD_FRAMES * diffsinger.FRAME_MS / 1000
+    assert abs(seconds - expected) <= 0.05
+    assert info["peak_db"] <= -1.0  # report test 3: peak below -1 dBFS
+    assert out.stat().st_size > 44100  # at least a quarter second of audio
+
+
+@needs_voicebank
+async def test_english_mapping_via_tools(store, fake_engine):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    mapping = (
+        await _call(
+            "map_vocal_lyrics",
+            {"score_id": score["score_id"], "lyrics": "so- di- um gold", "language": "en"},
+        )
+    ).structuredContent
+    sung = [note for note in mapping["notes"] if note["kind"] == "note"]
+    assert [note["lyric"] for note in sung] == ["so", "di", "um", "gold"]
+    assert sung[0]["phonemes"] == ["s", "ow"]
+    assert mapping["voice_hint"] == "diffsinger"
+
+
+@needs_voicebank
+async def test_diffsinger_job_dispatch(store, fake_engine, monkeypatch):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    mapping = (
+        await _call(
+            "map_vocal_lyrics",
+            {"score_id": score["score_id"], "lyrics": "so- di- um gold", "language": "en"},
+        )
+    ).structuredContent
+
+    def fake_render(specs, output, **kwargs):
+        with wave.open(str(output), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(44100)
+            handle.writeframes(b"\x01\x00" * 4410)
+        return {
+            "duration_seconds": 0.1,
+            "sample_rate": 44100,
+            "frames": 9,
+            "peak_db": -20.0,
+            "mode": kwargs.get("mode"),
+        }
+
+    monkeypatch.setattr(diffsinger, "render", fake_render)
+    started = await _call(
+        "render_singing",
+        {
+            "mapping_id": mapping["mapping_id"],
+            "voice_id": "diffsinger:hanami/nectar",
+            "settings": {"steps": 10, "velocity": 1.1},
+        },
+    )
+    assert not started.isError
+    job = await _wait_for_job(started.structuredContent["job_id"])
+    assert job["status"] == "done"
+    assert job["mode"] == "nectar"
+    assert (store.root / job["filename"]).is_file()
+
+
+def test_voicebank_never_enters_the_repo():
+    root = Path(__file__).resolve().parents[1]
+    ignore = (root / ".gitignore").read_text(encoding="utf-8")
+    assert "voicebank/" in ignore
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8").lower()
+    assert "voicebank" not in dockerfile
+    assert "dsconfig" not in dockerfile

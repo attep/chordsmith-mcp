@@ -11,3 +11,5 @@ chordsmith_output/
 data/
 state/
 output/
+voicebank/
+*.zip

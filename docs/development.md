@@ -35,7 +35,8 @@ src/chordsmith/
   storage.py      Output folder; keeps every file inside it and cleans up names
   delivery.py     Signed, expiring download URLs for get_midi_file/render_audio
   audio.py        FluidSynth/ffmpeg rendering of MIDI to wav/mp3
-  singing.py      Singing pipeline (Sodium Gold): VOICEVOX adapter, scores, jobs, mixing
+  singing.py      Singing pipeline (Sodium Gold): engines, scores, jobs, mixing
+  diffsinger.py   DiffSinger ONNX adapter (English voicebanks, mounted read-only, never bundled)
   auth.py         OAuth 2.1 authorization server (sign-in page, tokens) for HTTP transports
 tests/            pytest suite, including end-to-end tests through a real MCP client session
 ```

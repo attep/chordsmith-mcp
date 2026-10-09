@@ -12,7 +12,7 @@ COPY src ./src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends fluidsynth fluid-soundfont-gm ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir . \
+    && pip install --no-cache-dir ".[diffsinger]" \
     && useradd --create-home --uid 1000 chordsmith \
     && mkdir -p /data /state && chown chordsmith /data /state
 

@@ -1,15 +1,18 @@
-# Singing (Sodium Gold, slice 1)
+# Singing (Sodium Gold)
 
-ChordSmith can sing: give it a melody track and it renders a soft vocal with the
-[VOICEVOX](https://voicevox.hiroshiba.jp/) singing engine, then mixes it with the backing.
+ChordSmith can sing: give it a melody track and it renders a soft vocal, then mixes it with the
+backing. Two engines are supported:
 
-This is **slice 1** of the Sodium Gold design: a wordless hum on "う" (oo) with a soft VOICEVOX
-voice. English lyrics (DiffSinger adapter) and phrase-level re-rendering are later slices.
+- **VOICEVOX** (slice 1): a wordless hum on "う" (oo) or Japanese kana lyrics, soft voices,
+  including whisper styles.
+- **DiffSinger** (slice 2): English lyrics through a voicebank you download and mount yourself
+  (Hoshino Hanami ~AI❤dol~ is the tested one). The voicebank is never bundled or committed.
 
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [Tools](#tools)
 - [Voices and soft controls](#voices-and-soft-controls)
+- [English lyrics (DiffSinger)](#english-lyrics-diffsinger)
 - [Mixing and export](#mixing-and-export)
 - [Settings](#settings)
 - [Limits and licence notes](#limits-and-licence-notes)
@@ -19,9 +22,11 @@ voice. English lyrics (DiffSinger adapter) and phrase-level re-rendering are lat
 1. `prepare_vocal_score` reads a **monophonic** melody track from a MIDI file, turns gaps into
    rests and converts the timing to VOICEVOX frames (93.75 per second). Default transposition is
    **-12** (one octave down), which suits a soft, light voice. The source file is never changed.
-2. `map_vocal_lyrics` attaches one lyric per note. Omit the lyrics for a wordless hum ("う" on
-   every note), or pass Japanese kana (`う う う`). Mismatches produce warnings; words are never
-   dropped or invented. `holds` merges a note into the following ones.
+2. `map_vocal_lyrics` attaches one token per note. Omit the lyrics for a wordless hum ("う" on
+   every note), pass Japanese kana (`う う う`), or English words/syllables with `language: "en"`
+   (`so- di- um gold`; `+` continues the previous note, `-` is a pause, `br` a breath). English
+   tokens are phonemized here as a dry run; unknown words are refused by name. Mismatches produce
+   warnings; words are never dropped or invented. `holds` merges a note into the following ones.
 3. `render_singing` starts a background job and returns immediately; `get_singing_job` reports
    `queued`, `running`, `done` (with the vocal file) or `failed` (with the error). Repeating the
    same request reuses the finished job instead of rendering twice.
@@ -83,6 +88,38 @@ Soft controls (VOICEVOX):
 - `volume_cap` (0.05–1.0): clamps every frame's volume, so loud notes stay quiet (try `0.6`).
 - `breathiness` / `vibrato`: DiffSinger-only; VOICEVOX fails clearly if these are set.
 
+## English lyrics (DiffSinger)
+
+English singing uses a DiffSinger voicebank running in-process (onnxruntime, CPU). ChordSmith
+never downloads or redistributes voicebanks — you download one yourself, keep it out of git, and
+point ChordSmith at it:
+
+```bash
+# download a voicebank (e.g. Hoshino Hanami ~AI❤dol~ for DiffSinger) and extract it, then:
+export CHORDSMITH_DIFFSINGER_VOICE="/path/to/voicebank"     # the folder with dsconfig.yaml
+# Docker: mount it read-only and set the same variable (compose mounts ./voicebank to /voicebank)
+```
+
+Then:
+
+> Prepare a vocal score from my file (Melody track), map the lyrics "so- di- um gold" in English,
+> render it with diffsinger:hanami/nectar and mix it with the backing.
+
+Voices: `diffsinger:hanami/root`, `diffsinger:hanami/fragrance` and `diffsinger:hanami/nectar`
+(the soft one). `list_singing_voices` reports the credit line and the licence layers with every
+voice.
+
+**Settings** (inside `settings`): `velocity` (0.5–2.0, singing speed), `gender` (−1..1 formant
+shift), `expr` (0–1 pitch expressiveness), `steps` (diffusion steps, default 20) and `depth`
+(≤ 0.6). `energy` works as output gain; `breathiness` is refused (this voicebank has none).
+Rendering takes tens of seconds on CPU for a full song — it runs in the same background job flow
+as VOICEVOX.
+
+**Licence layers** (for Hanami ~AI❤dol~): the voicebank models are under the Team L❤VE Voicebank
+License (any creative use including commercial, credit required); the bundled AI❤dolGAN vocoder
+is CC BY-NC-SA 4.0 (**non-commercial**) — get written permission or swap the vocoder before a
+commercial release. Always check each voicebank's own terms.
+
 ## Mixing and export
 
 `mix_song_with_vocals` defaults: vocal `0.9`, backing `0.55`, gentle reverb on. The guide track
@@ -96,12 +133,16 @@ clean (`clipping: false`). Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and t
 | Variable | Default | Meaning |
 |---|---|---|
 | `CHORDSMITH_VOICEVOX_URL` | `http://127.0.0.1:50021` | Where the VOICEVOX engine listens (Compose sets `http://voicevox:50021`) |
+| `CHORDSMITH_DIFFSINGER_VOICE` | `./voicebank` (auto-scan) | DiffSinger voicebank folder containing `dsconfig.yaml` |
 
 ## Limits and licence notes
 
 - One note at a time: `prepare_vocal_score` fails on overlapping notes (pick a monophonic track).
-- Japanese kana or wordless only; English lyrics need the DiffSinger adapter (not in slice 1).
+- VOICEVOX sings Japanese kana or a wordless hum; English words need the DiffSinger voicebank.
+- English phonemization uses the voicebank's own dictionary first, then CMUdict; words that are
+  in neither are refused by name (never silently skipped).
 - Scores, mappings and jobs live in memory and expire after 24 hours.
-- VOICEVOX engine is LGPL-3.0, and **each voice character has its own terms of use** — check the
-  character's terms before publishing rendered audio. `list_singing_voices` includes the licence
-  note with every voice.
+- Voicebanks are never committed or built into the image (there is a test that enforces this).
+- VOICEVOX engine is LGPL-3.0 and every character has its own terms of use. DiffSinger voicebanks
+  each have their own licence layers (see above); check them before publishing rendered audio.
+  `list_singing_voices` includes the licence notes with every voice.
