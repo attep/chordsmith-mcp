@@ -26,6 +26,7 @@ services:
       CHORDSMITH_AUTH_PASSWORD: "${CHORDSMITH_AUTH_PASSWORD:?Set CHORDSMITH_AUTH_PASSWORD in .env}"
       CHORDSMITH_OUTPUT_DIR: /data
       CHORDSMITH_STATE_DIR: /state
+      CHORDSMITH_VOICEVOX_URL: "http://voicevox:50021"
     volumes:
       - ./data:/data
       - ./state:/state
@@ -44,3 +45,9 @@ services:
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:
       TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}"
+
+  # Singing engine (Sodium Gold). Opt in with: docker compose -f docker-compose.tunnel.yml --profile singing up -d
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-ubuntu22.04-latest
+    restart: unless-stopped
+    profiles: ["singing"]

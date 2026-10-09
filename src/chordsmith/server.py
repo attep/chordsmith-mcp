@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import json
 import logging
 import os
@@ -17,7 +15,7 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__, audio, delivery
+from chordsmith import __version__, audio, delivery, singing
 from chordsmith.analysis import analyze_file
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
@@ -104,36 +102,6 @@ async def download_file(request: Request) -> Response:
         ".mp3": "audio/mpeg",
     }[path.suffix.lower()]
     return FileResponse(path, media_type=media_type, filename=path.name)
-
-
-def _public_url() -> str | None:
-    return os.environ.get("CHORDSMITH_PUBLIC_URL", "").strip().rstrip("/") or None
-
-
-def _deliver(
-    path_name: str, data: bytes, return_as: str, expires_in: int = delivery.DEFAULT_TTL_SECONDS
-) -> dict:
-    """Shape a file for tool-only clients: base64 bytes or a signed, expiring download URL."""
-    result: dict[str, Any] = {
-        "filename": path_name,
-        "size_bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
-    if return_as == "base64":
-        result["data_base64"] = base64.b64encode(data).decode()
-    elif return_as == "url":
-        public_url = _public_url()
-        if public_url is None:
-            raise ValueError(
-                "No public URL is configured, so download links cannot be built; use "
-                "return_as='base64' or set CHORDSMITH_PUBLIC_URL."
-            )
-        url, expires_at = delivery.build_url(public_url, path_name, expires_in)
-        result["download_url"] = url
-        result["expires_at"] = expires_at
-    else:
-        raise ValueError("return_as must be 'base64' or 'url'.")
-    return result
 
 
 ChordList = Annotated[
@@ -424,13 +392,7 @@ def list_generated_files() -> dict[str, Any]:
     return {"output_dir": str(root), "files": store.list_files()}
 
 
-ReturnAs = Annotated[
-    Literal["base64", "url"],
-    Field(
-        description="base64 returns the bytes in the response (works everywhere); url returns a "
-        "signed download link that expires (needs CHORDSMITH_PUBLIC_URL)."
-    ),
-]
+ReturnAs = delivery.ReturnAs
 
 
 @mcp.tool()
@@ -448,7 +410,7 @@ def get_midi_file(
     """
     path = store.existing_path(filename)
     data = path.read_bytes()
-    result = _deliver(path.name, data, return_as, expires_in)
+    result = delivery.deliver_file(path.name, data, return_as, expires_in)
     result["mime_type"] = "audio/midi"
     return result
 
@@ -556,7 +518,7 @@ def render_audio(
     except audio.AudioError as exc:
         raise ValueError(str(exc)) from None
     data = target.read_bytes()
-    result = _deliver(target.name, data, return_as, expires_in)
+    result = delivery.deliver_file(target.name, data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if format == "wav" else "audio/mpeg"
     result["source"] = source.name
     if format == "wav":
@@ -676,6 +638,9 @@ def _configure_transport_security(public_url: str) -> None:
             "http://[::1]:*",
         ],
     )
+
+
+singing.register(mcp, lambda: store)
 
 
 def main() -> None:

@@ -19,6 +19,7 @@ services:
       CHORDSMITH_AUTH_PASSWORD: "${CHORDSMITH_AUTH_PASSWORD:?Set CHORDSMITH_AUTH_PASSWORD in .env}"
       CHORDSMITH_OUTPUT_DIR: /data
       CHORDSMITH_STATE_DIR: /state
+      CHORDSMITH_VOICEVOX_URL: "http://voicevox:50021"
     volumes:
       - ./data:/data
       - ./state:/state
@@ -43,6 +44,12 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+
+  # Singing engine (Sodium Gold). Opt in with: docker compose --profile singing up -d
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-ubuntu22.04-latest
+    restart: unless-stopped
+    profiles: ["singing"]
 
 volumes:
   caddy-data:

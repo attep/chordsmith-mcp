@@ -106,10 +106,14 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `analyze_midi` | Reads a `.mid` file and guesses the chords |
 | `list_generated_files` | Lists the files you've made |
 | `delete_midi_file` / `rename_midi_file` | Tidies up the output folder |
+| `prepare_vocal_score` → `render_singing` → `mix_song_with_vocals` | Sings a melody track with a soft voice (VOICEVOX) and mixes it with the backing |
 
 Both `create_*` tools accept **voicing** options (inversions, open/drop-2 voicings, voice leading,
 bass note), **rhythm** options (block chords, pulses, arpeggios, Alberti bass, strumming, swing
 and humanize) and a `lofi` preset for a soft, swung, humanized feel.
+
+There is also a **singing pipeline** (slice 1, "Sodium Gold"): wordless hums with a soft VOICEVOX
+voice, mixed and exported. See [docs/singing.md](docs/singing.md).
 
 There are also **resources** (`chords://types`, `scales://{key}`, `midi://{filename}`) and
 **prompts** (`compose_progression`, `explain_progression`).
@@ -122,9 +126,10 @@ Full details are in [docs/tools.md](docs/tools.md).
    and setup for other AI apps
 2. [Run it online](docs/remote.md): host it on a server with Docker Compose, HTTPS and OAuth
 3. [Tools reference](docs/tools.md): every tool, option and example
-4. [Music cheat sheet](docs/music-basics.md): chord symbols and Roman numerals explained simply
-5. [Troubleshooting](docs/troubleshooting.md): common problems and fixes
-6. [Development](docs/development.md): running tests and the project layout
+4. [Singing](docs/singing.md): sing a melody track with a soft voice and mix it in (VOICEVOX)
+5. [Music cheat sheet](docs/music-basics.md): chord symbols and Roman numerals explained simply
+6. [Troubleshooting](docs/troubleshooting.md): common problems and fixes
+7. [Development](docs/development.md): running tests and the project layout
 
 ## How it works
 
