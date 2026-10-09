@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
 import mido
 
-from chordsmith.models import Rhythm, Voicing
+from chordsmith.models import Humanize, Rhythm, Voicing
 from chordsmith.theory import Chord, MusicTheoryError, midi_note_name, parse_chord
 
 TICKS_PER_BEAT = 480
@@ -100,10 +101,15 @@ def render_pattern(
     events: list[NoteEvent] = []
 
     def steps():
+        index = 0
         t = start
         while t < start + length:
-            yield t, min(step, start + length - t)
+            shifted = t + (round(rhythm.swing * step) if index % 2 else 0)
+            span = min(step, start + length - shifted)
+            if span > 0:
+                yield shifted, span
             t += step
+            index += 1
 
     if rhythm.pattern == "block":
         dur = max(1, round(length * rhythm.gate))
@@ -138,6 +144,18 @@ def render_pattern(
     return events
 
 
+def _humanize_events(events: list[NoteEvent], humanize: Humanize, tempo_bpm: float) -> None:
+    """Apply deterministic timing/velocity variation (same seed -> same bytes)."""
+    rng = random.Random(humanize.seed)
+    timing_ticks = _ms_to_ticks(humanize.timing_ms, tempo_bpm)
+    for ev in events:
+        if timing_ticks:
+            ev.start = max(0, ev.start + rng.randint(-timing_ticks, timing_ticks))
+        if humanize.velocity_range:
+            offset = rng.randint(-humanize.velocity_range, humanize.velocity_range)
+            ev.velocity = min(127, max(1, ev.velocity + offset))
+
+
 def write_progression(
     path: Path,
     chords: list[tuple[Chord, float]],
@@ -149,16 +167,12 @@ def write_progression(
     program: int,
     repeat: int = 1,
     title: str = "ChordSmith",
+    midi_type: int = 1,
 ) -> dict:
+    if midi_type not in (0, 1):
+        raise ValueError("midi_type must be 0 or 1.")
     sequence = chords * repeat
     voiced = voice_progression([c for c, _ in sequence], voicing)
-
-    conductor = mido.MidiTrack()
-    conductor.append(mido.MetaMessage("track_name", name=title, time=0))
-    conductor.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo_bpm), time=0))
-    conductor.append(
-        mido.MetaMessage("time_signature", numerator=time_signature[0], denominator=time_signature[1], time=0)
-    )
 
     note_events: list[NoteEvent] = []
     markers: list[tuple[int, str]] = []
@@ -180,37 +194,115 @@ def write_progression(
         )
         tick += length
 
-    last = 0
-    for t, text in markers:
-        conductor.append(mido.MetaMessage("marker", text=text, time=t - last))
-        last = t
-    conductor.append(mido.MetaMessage("end_of_track", time=max(0, tick - last)))
+    if rhythm.humanize is not None:
+        _humanize_events(note_events, rhythm.humanize, tempo_bpm)
 
-    track = mido.MidiTrack()
-    track.append(mido.MetaMessage("track_name", name="Chords", time=0))
-    track.append(mido.Message("program_change", program=program, channel=0, time=0))
     raw: list[tuple[int, int, mido.Message]] = []
     for ev in note_events:
         raw.append((ev.start, 1, mido.Message("note_on", note=ev.note, velocity=ev.velocity)))
         raw.append((ev.start + ev.duration, 0, mido.Message("note_off", note=ev.note, velocity=0)))
-    raw.sort(key=lambda r: (r[0], r[1]))
-    last = 0
-    for t, _, msg in raw:
-        track.append(msg.copy(time=t - last))
-        last = t
-    track.append(mido.MetaMessage("end_of_track", time=max(0, tick - last)))
 
-    midi = mido.MidiFile(type=1, ticks_per_beat=TICKS_PER_BEAT)
-    midi.tracks.extend([conductor, track])
+    if midi_type == 0:
+        merged: list[tuple[int, int, mido.Message | mido.MetaMessage]] = [
+            (0, 0, mido.MetaMessage("track_name", name=title)),
+            (0, 0, mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo_bpm))),
+            (
+                0,
+                0,
+                mido.MetaMessage(
+                    "time_signature", numerator=time_signature[0], denominator=time_signature[1]
+                ),
+            ),
+        ]
+        merged += [(t, 0, mido.MetaMessage("marker", text=text)) for t, text in markers]
+        merged.append((0, 1, mido.Message("program_change", program=program, channel=0)))
+        merged += [(t, 2 if kind == 0 else 3, msg) for t, kind, msg in raw]
+        merged.sort(key=lambda r: (r[0], r[1]))
+        track = mido.MidiTrack()
+        last = 0
+        for t, _, msg in merged:
+            track.append(msg.copy(time=max(0, t - last)))
+            last = t
+        track.append(mido.MetaMessage("end_of_track", time=max(0, tick - last)))
+        midi = mido.MidiFile(type=0, ticks_per_beat=TICKS_PER_BEAT)
+        midi.tracks.append(track)
+    else:
+        conductor = mido.MidiTrack()
+        conductor.append(mido.MetaMessage("track_name", name=title, time=0))
+        conductor.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo_bpm), time=0))
+        conductor.append(
+            mido.MetaMessage(
+                "time_signature", numerator=time_signature[0], denominator=time_signature[1], time=0
+            )
+        )
+        last = 0
+        for t, text in markers:
+            conductor.append(mido.MetaMessage("marker", text=text, time=t - last))
+            last = t
+        conductor.append(mido.MetaMessage("end_of_track", time=max(0, tick - last)))
+
+        track = mido.MidiTrack()
+        track.append(mido.MetaMessage("track_name", name="Chords", time=0))
+        track.append(mido.Message("program_change", program=program, channel=0, time=0))
+        raw.sort(key=lambda r: (r[0], r[1]))
+        last = 0
+        for t, _, msg in raw:
+            track.append(msg.copy(time=t - last))
+            last = t
+        track.append(mido.MetaMessage("end_of_track", time=max(0, tick - last)))
+
+        midi = mido.MidiFile(type=1, ticks_per_beat=TICKS_PER_BEAT)
+        midi.tracks.extend([conductor, track])
     midi.save(path)
 
     total_beats = tick / TICKS_PER_BEAT
     return {
+        "midi_type": midi_type,
         "total_beats": total_beats,
         "bars": round(total_beats / (time_signature[0] * 4 / time_signature[1]), 2),
         "duration_seconds": round(total_beats * 60 / tempo_bpm, 2),
         "chords": summary,
     }
+
+
+def add_track(
+    source: Path,
+    target: Path,
+    *,
+    track_name: str,
+    program: int,
+    channel: int,
+    notes: list[tuple[int, float, float, int]],
+) -> dict:
+    """Append a note-level track to a copy of ``source``.
+
+    ``notes`` are ``(pitch, start_beat, beats, velocity)`` tuples. The original file is never
+    modified; a type 0 file is promoted to type 1 so it can hold several tracks.
+    """
+    midi = mido.MidiFile(source)
+    if midi.type == 0:
+        midi.type = 1
+    tpb = midi.ticks_per_beat
+    track = mido.MidiTrack()
+    track.append(mido.MetaMessage("track_name", name=track_name, time=0))
+    track.append(mido.Message("program_change", program=program, channel=channel, time=0))
+    raw: list[tuple[int, int, mido.Message]] = []
+    end = 0
+    for pitch, start_beat, beats, velocity in notes:
+        start = round(start_beat * tpb)
+        duration = max(1, round(beats * tpb))
+        raw.append((start, 1, mido.Message("note_on", note=pitch, velocity=velocity, channel=channel)))
+        raw.append((start + duration, 0, mido.Message("note_off", note=pitch, velocity=0, channel=channel)))
+        end = max(end, start + duration)
+    raw.sort(key=lambda r: (r[0], r[1]))
+    last = 0
+    for t, _, msg in raw:
+        track.append(msg.copy(time=max(0, t - last)))
+        last = t
+    track.append(mido.MetaMessage("end_of_track", time=max(0, end - last)))
+    midi.tracks.append(track)
+    midi.save(target)
+    return {"notes_added": len(notes), "total_tracks": len(midi.tracks), "track_index": len(midi.tracks) - 1}
 
 
 def transpose_chord_symbol(symbol: str, semitones: int) -> str:

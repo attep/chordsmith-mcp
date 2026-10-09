@@ -1,0 +1,49 @@
+# ChordSmith behind Caddy, which obtains a Let's Encrypt certificate for DOMAIN
+# and proxies https://DOMAIN/mcp to the ChordSmith container.
+#
+# Copy .env.example to .env, set DOMAIN and CHORDSMITH_AUTH_PASSWORD, then:
+#   docker compose up -d --build
+#
+# The MIDI/audio files land in ./data and the OAuth state in ./state on the host,
+# so they are easy to find and survive restarts and upgrades.
+
+services:
+  chordsmith:
+    build: .
+    restart: unless-stopped
+    command: ["--transport", "streamable-http"]
+    environment:
+      CHORDSMITH_HOST: "0.0.0.0"
+      CHORDSMITH_PORT: "8000"
+      CHORDSMITH_PUBLIC_URL: "https://${DOMAIN:?Set DOMAIN in .env}"
+      CHORDSMITH_AUTH_PASSWORD: "${CHORDSMITH_AUTH_PASSWORD:?Set CHORDSMITH_AUTH_PASSWORD in .env}"
+      CHORDSMITH_OUTPUT_DIR: /data
+      CHORDSMITH_STATE_DIR: /state
+    volumes:
+      - ./data:/data
+      - ./state:/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - chordsmith
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

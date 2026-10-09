@@ -98,13 +98,18 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 |---|---|
 | `create_chord_progression` | Chord names (`["Am","F","C","G"]`) → `.mid` file |
 | `create_progression_from_roman` | Roman numerals (`i–VI–III–VII`) + key → `.mid` file |
+| `add_track` | Adds a note-level track (melody, bass, drums) to a copy of a file |
+| `get_midi_file` | Hands the actual file back (base64 or a signed download link) |
+| `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app |
 | `list_chord_types` | Shows every chord type ChordSmith understands |
 | `transpose_midi` | Moves a file up/down, or from one key to another |
 | `analyze_midi` | Reads a `.mid` file and guesses the chords |
 | `list_generated_files` | Lists the files you've made |
+| `delete_midi_file` / `rename_midi_file` | Tidies up the output folder |
 
 Both `create_*` tools accept **voicing** options (inversions, open/drop-2 voicings, voice leading,
-bass note) and **rhythm** options (block chords, pulses, arpeggios, Alberti bass, strumming).
+bass note), **rhythm** options (block chords, pulses, arpeggios, Alberti bass, strumming, swing
+and humanize) and a `lofi` preset for a soft, swung, humanized feel.
 
 There are also **resources** (`chords://types`, `scales://{key}`, `midi://{filename}`) and
 **prompts** (`compose_progression`, `explain_progression`).
@@ -115,10 +120,11 @@ Full details are in [docs/tools.md](docs/tools.md).
 
 1. [Getting started](docs/getting-started.md): installation options (uv, Docker, from source)
    and setup for other AI apps
-2. [Tools reference](docs/tools.md): every tool, option and example
-3. [Music cheat sheet](docs/music-basics.md): chord symbols and Roman numerals explained simply
-4. [Troubleshooting](docs/troubleshooting.md): common problems and fixes
-5. [Development](docs/development.md): running tests and the project layout
+2. [Run it online](docs/remote.md): host it on a server with Docker Compose, HTTPS and OAuth
+3. [Tools reference](docs/tools.md): every tool, option and example
+4. [Music cheat sheet](docs/music-basics.md): chord symbols and Roman numerals explained simply
+5. [Troubleshooting](docs/troubleshooting.md): common problems and fixes
+6. [Development](docs/development.md): running tests and the project layout
 
 ## How it works
 
@@ -128,6 +134,20 @@ You → AI app (picks the chords) → ChordSmith tool call → .mid file on your
 
 ChordSmith never calls an AI service itself and needs no API keys. It checks the input, writes
 the notes and saves the file. Everything runs on your computer.
+
+## Run it online
+
+ChordSmith can also run on a server so you can use it from any device:
+
+```bash
+cp .env.example .env   # set DOMAIN and CHORDSMITH_AUTH_PASSWORD
+docker compose up -d --build
+```
+
+Caddy obtains HTTPS for your domain and ChordSmith protects itself with an OAuth 2.1 sign-in
+page. Prefer no open ports? Use the Cloudflare Tunnel setup
+(`docker-compose.tunnel.yml`) instead. See [docs/remote.md](docs/remote.md) for the full
+walkthrough, client setup and security notes.
 
 ## License
 

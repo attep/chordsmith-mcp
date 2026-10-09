@@ -41,7 +41,24 @@ and disappeared when it stopped. Add the `-v` option.
 
 A MIDI file contains notes, not audio. In your music app, make sure the track has an
 **instrument** (a software synth or sampler) and isn't muted. In Ableton/FL/Reaper, drag the file
-onto an instrument track rather than an audio track.
+onto an instrument track rather than an audio track. Or ask the assistant to `render_audio` the
+file to wav/mp3 so you can play it anywhere.
+
+### The assistant can't attach the MIDI file
+
+Tool-only clients (no resources) should call `get_midi_file` — it returns the file itself as
+base64, or as a signed download link when `CHORDSMITH_PUBLIC_URL` is set.
+
+### render_audio fails
+
+Audio rendering needs FluidSynth plus a `.sf2` soundfont (and ffmpeg for mp3). The Docker image
+includes all three. Locally, install `fluidsynth` and set `CHORDSMITH_SOUNDFONT=/path/to/your.sf2`
+(`CHORDSMITH_FLUIDSYNTH`/`CHORDSMITH_FFMPEG` override the executable locations).
+
+### A note or melody is rejected
+
+Melody pitches must be note names with an octave (`E6`, `Bb3`) or MIDI numbers 0–127; anything
+outside that range is refused so the file stays playable.
 
 ### The assistant used the wrong chords or ignored my options
 
@@ -64,6 +81,11 @@ npx @modelcontextprotocol/inspector uvx --from git+https://github.com/attep/chor
 ```
 
 It opens a web page where you can call each tool by hand.
+
+### Problems with the online (remote) server
+
+Sign-in loops, `421 Invalid Host header`, `401` after connecting and similar issues are covered
+in [Run it online → Troubleshooting](remote.md#troubleshooting).
 
 Still stuck? [Open an issue](https://github.com/attep/chordsmith-mcp/issues) with the error
 message and your config file (without any secrets).

@@ -165,6 +165,9 @@ uvx --from git+https://github.com/attep/chordsmith-mcp chordsmith-mcp --transpor
 
 and point the app to `http://127.0.0.1:8000/mcp`.
 
+To host ChordSmith on a server so you can reach it from anywhere (with HTTPS and an OAuth
+sign-in page), see [Run it online](remote.md).
+
 ## Check that it works
 
 Ask your assistant:
@@ -188,6 +191,12 @@ ChordSmith reads these optional environment variables:
 | `CHORDSMITH_TRANSPORT` | `stdio` | `stdio`, `streamable-http` or `sse` |
 | `CHORDSMITH_HOST` | `127.0.0.1` | Host for HTTP transports |
 | `CHORDSMITH_PORT` | `8000` | Port for HTTP transports |
+| `CHORDSMITH_PUBLIC_URL` | local URL | Public `https://` URL when running online, e.g. `https://chordsmith.example.com` |
+| `CHORDSMITH_AUTH_PASSWORD` | random, printed in logs | Password for the OAuth sign-in page (HTTP transports) |
+| `CHORDSMITH_AUTH` | on for HTTP | `off` disables OAuth |
+| `CHORDSMITH_STATE_DIR` | `~/.chordsmith` | Where OAuth clients and tokens are stored (Docker: `/state`) |
+
+The online-related variables are explained in [Run it online](remote.md#settings).
 
 To change the output folder in Claude Desktop, add an `env` block:
 
@@ -206,6 +215,7 @@ A `.mid` file contains notes, not sound. Your music app plays those notes with a
 - **GarageBand / Logic**: drag the file onto the track area.
 - **Ableton Live / FL Studio / Reaper / Cubase**: drag the file onto a MIDI or instrument track.
 - **MuseScore** (free): *File → Open* shows the chords as sheet music.
-- **Windows**: double-click the file to hear it with the built-in player.
+- **Windows**: Windows 11's built-in Media Player no longer plays `.mid` files; use MuseScore, a
+  DAW, or a MIDI-capable player.
 
 Each chord's name is stored as a *marker*, so many apps show the chord names on the timeline.

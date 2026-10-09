@@ -45,6 +45,29 @@ def midi_note_name(note: int, prefer_flats: bool = False) -> str:
     return f"{note_name(note % 12, prefer_flats)}{note // 12 - 1}"
 
 
+def parse_pitch(value: str | int, default_octave: int = 4) -> int:
+    """Return a MIDI note number (0-127) for 'E6', 'Bb3', 'C#-1' or a plain number.
+
+    Note names without an octave (e.g. 'C') use ``default_octave``.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; reject it explicitly
+        raise MusicTheoryError(f"'{value}' is not a pitch. Use e.g. E6 or 88.")
+    if isinstance(value, int):
+        if not 0 <= value <= 127:
+            raise MusicTheoryError(f"MIDI note {value} is outside the valid range 0-127.")
+        return value
+    text = _normalize(str(value)).replace(" ", "")
+    match = re.fullmatch(r"([A-Ga-g])([#b]*)(-?\d+)?", text)
+    if not match:
+        raise MusicTheoryError(f"'{value}' is not a pitch. Use e.g. E6, Bb3 or a MIDI number 0-127.")
+    letter, accidentals, octave = match.groups()
+    octave_number = int(octave) if octave is not None else default_octave
+    note = parse_note(letter + accidentals) + 12 * (octave_number + 1)
+    if not 0 <= note <= 127:
+        raise MusicTheoryError(f"'{value}' is outside the MIDI range 0-127.")
+    return note
+
+
 @dataclass(frozen=True)
 class ChordType:
     name: str

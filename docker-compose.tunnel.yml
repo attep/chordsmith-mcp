@@ -1,0 +1,46 @@
+# ChordSmith behind a Cloudflare Tunnel with a stable hostname (no open ports, no Caddy).
+#
+# 1. In the Cloudflare dashboard (Zero Trust -> Networks -> Tunnels) create a tunnel,
+#    copy its token, and add a Public Hostname, e.g. chordsmith.example.com,
+#    with service type HTTP and URL chordsmith:8000.
+# 2. In .env set:
+#      CLOUDFLARE_TUNNEL_TOKEN=<the token>
+#      CHORDSMITH_PUBLIC_URL=https://chordsmith.example.com
+#      CHORDSMITH_AUTH_PASSWORD=<a long random passphrase>
+# 3. Start it:
+#      docker compose -f docker-compose.tunnel.yml up -d --build
+#
+# Cloudflare terminates HTTPS; ChordSmith must know its public URL for the OAuth
+# metadata, the sign-in redirect and token audience checks, so CHORDSMITH_PUBLIC_URL
+# must match the public hostname exactly.
+
+services:
+  chordsmith:
+    build: .
+    restart: unless-stopped
+    command: ["--transport", "streamable-http"]
+    environment:
+      CHORDSMITH_HOST: "0.0.0.0"
+      CHORDSMITH_PORT: "8000"
+      CHORDSMITH_PUBLIC_URL: "${CHORDSMITH_PUBLIC_URL:?Set CHORDSMITH_PUBLIC_URL in .env}"
+      CHORDSMITH_AUTH_PASSWORD: "${CHORDSMITH_AUTH_PASSWORD:?Set CHORDSMITH_AUTH_PASSWORD in .env}"
+      CHORDSMITH_OUTPUT_DIR: /data
+      CHORDSMITH_STATE_DIR: /state
+    volumes:
+      - ./data:/data
+      - ./state:/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - chordsmith
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}"

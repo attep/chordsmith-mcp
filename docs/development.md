@@ -28,11 +28,14 @@ pull request.
 ```
 src/chordsmith/
   server.py       MCP tools, resources and prompts (FastMCP); command-line entry point
-  models.py       Pydantic schemas: ChordEvent, NumeralEvent, Voicing, Rhythm
-  theory.py       Notes, chord types, chord-symbol parser, keys/scales, Roman numerals
-  midi_writer.py  Voicing, rhythm patterns, writing and transposing .mid files (mido)
+  models.py       Pydantic schemas: ChordEvent, NumeralEvent, NoteInput, Humanize, Voicing, Rhythm
+  theory.py       Notes, chord types, chord-symbol parser, keys/scales, Roman numerals, pitches
+  midi_writer.py  Voicing, rhythm patterns (swing/humanize), writing, adding tracks, transposing
   analysis.py     Simple chord detection for analyze_midi
   storage.py      Output folder; keeps every file inside it and cleans up names
+  delivery.py     Signed, expiring download URLs for get_midi_file/render_audio
+  audio.py        FluidSynth/ffmpeg rendering of MIDI to wav/mp3
+  auth.py         OAuth 2.1 authorization server (sign-in page, tokens) for HTTP transports
 tests/            pytest suite, including end-to-end tests through a real MCP client session
 ```
 
@@ -46,6 +49,9 @@ tests/            pytest suite, including end-to-end tests through a real MCP cl
   live directly inside the output folder.
 - MIDI files are type 1, 480 ticks per beat: track 0 holds tempo, time signature and one marker
   per chord, and track 1 holds the notes on channel 1.
+- **OAuth is opt-in at startup.** `main()` turns it on for HTTP transports via `auth.py`; the
+  stdio server (and the in-memory tests) run without auth. `tests/test_auth.py` covers the
+  provider and drives the full browser flow through the ASGI app.
 
 ## Adding a chord type
 

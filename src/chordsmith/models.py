@@ -26,6 +26,27 @@ class NumeralEvent(BaseModel):
     beats: float = Field(gt=0, le=64, description="Length of this chord in beats (quarter notes).")
 
 
+class NoteInput(BaseModel):
+    """One note for add_track, e.g. {"pitch": "E6", "start_beat": 0, "beats": 0.5}."""
+
+    pitch: str | int = Field(description="Note name with octave ('E6', 'Bb3', 'C#-1') or MIDI number 0-127.")
+    start_beat: float = Field(ge=0, le=100000, description="When the note starts, in beats from the start.")
+    beats: float = Field(gt=0, le=100000, description="Length of the note in beats (quarter notes).")
+    velocity: int = Field(90, ge=1, le=127, description="Loudness, 1-127.")
+
+
+class Humanize(BaseModel):
+    """Deterministic timing and velocity variation, so repeated renders sound identical."""
+
+    timing_ms: float = Field(
+        0, ge=0, le=50, description="Random timing offset of up to this many milliseconds per note."
+    )
+    velocity_range: int = Field(
+        0, ge=0, le=60, description="Random velocity offset of up to +/- this many steps per note."
+    )
+    seed: int = Field(0, ge=0, le=2**31 - 1, description="Random seed; the same seed gives the same file.")
+
+
 class Voicing(BaseModel):
     """How the notes of each chord are arranged (which octave, inversion, spacing)."""
 
@@ -67,4 +88,14 @@ class Rhythm(BaseModel):
     gate: float = Field(0.95, gt=0, le=1, description="Fraction of each step the note sounds (1.0 = legato).")
     strum_spread_ms: float = Field(
         25, ge=0, le=200, description="Delay between strings in a strum, in milliseconds."
+    )
+    swing: float = Field(
+        0,
+        ge=0,
+        le=0.75,
+        description="Delays every offbeat step by this fraction of the step: 0 = straight, "
+        "0.33 = triplet swing, 0.5 = dotted feel.",
+    )
+    humanize: Humanize | None = Field(
+        None, description="Adds small, seed-controlled timing/velocity variation for a less robotic feel."
     )

@@ -1,0 +1,4 @@
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy chordsmith:8000
+}

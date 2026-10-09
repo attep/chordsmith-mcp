@@ -3,25 +3,36 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
+import logging
 import os
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__
+from chordsmith import __version__, audio, delivery
 from chordsmith.analysis import analyze_file
+from chordsmith.auth import AuthConfig, enable_auth
+from chordsmith.midi_writer import add_track as add_track_midi
 from chordsmith.midi_writer import transpose_file, write_progression
-from chordsmith.models import ChordEvent, NumeralEvent, Rhythm, Voicing
-from chordsmith.storage import FileStore
+from chordsmith.models import ChordEvent, Humanize, NoteInput, NumeralEvent, Rhythm, Voicing
+from chordsmith.storage import FileStore, StorageError
 from chordsmith.theory import (
     CHORD_TYPES,
     Chord,
+    MusicTheoryError,
     identify_chord,
     note_name,
     parse_chord,
     parse_key,
+    parse_pitch,
     roman_to_chord,
     split_numerals,
 )
@@ -30,10 +41,100 @@ INSTRUCTIONS = """ChordSmith writes chord progressions to MIDI (.mid) files.
 You choose the harmony; ChordSmith turns it into notes and saves the file.
 Typical flow: (optional) read scales://{key} for the diatonic chords of a key ->
 create_chord_progression or create_progression_from_roman -> tell the user the file path.
-Use the 'voicing' and 'rhythm' options for inversions, voice leading, arpeggios or strumming."""
+Use the 'voicing' and 'rhythm' options for inversions, voice leading, arpeggios or strumming.
+get_midi_file hands the actual file to tool-only clients; add_track adds melodies and other
+tracks; render_audio turns a file into wav/mp3 so it can be heard without a music app."""
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP("ChordSmith", instructions=INSTRUCTIONS)
 store = FileStore()
+
+PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
+    "lofi": (
+        Voicing(voice_leading=True),
+        Rhythm(
+            pattern="pulse",
+            subdivision=0.5,
+            velocity=70,
+            gate=0.6,
+            swing=0.33,
+            humanize=Humanize(timing_ms=12, velocity_range=10, seed=7),
+        ),
+    ),
+}
+Preset = Annotated[
+    Literal["lofi"] | None,
+    Field(
+        description="Optional style preset. 'lofi' turns on voice leading and gives a soft, "
+        "swung, slightly humanized feel. Explicit voicing/rhythm objects replace the preset's."
+    ),
+]
+MidiType = Annotated[
+    Literal[0, 1],
+    Field(
+        description="MIDI file type: 1 (default, separate tempo/chord tracks) or 0 (everything "
+        "in one track with the tempo inline, for simple players that ignore track 0)."
+    ),
+]
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def health_check(_request: Request) -> Response:
+    """Liveness probe for container platforms."""
+    return JSONResponse({"status": "ok"})
+
+
+@mcp.custom_route("/files/{filename}", methods=["GET"])
+async def download_file(request: Request) -> Response:
+    """Serve a generated file for a signed, expiring URL from get_midi_file/render_audio."""
+    filename = request.path_params["filename"]
+    if not delivery.verify(
+        filename, request.query_params.get("expires", ""), request.query_params.get("token", "")
+    ):
+        return JSONResponse({"error": "Invalid or expired download link."}, status_code=403)
+    try:
+        path = store.existing_media_path(filename)
+    except StorageError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    media_type = {
+        ".mid": "audio/midi",
+        ".midi": "audio/midi",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+    }[path.suffix.lower()]
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+def _public_url() -> str | None:
+    return os.environ.get("CHORDSMITH_PUBLIC_URL", "").strip().rstrip("/") or None
+
+
+def _deliver(
+    path_name: str, data: bytes, return_as: str, expires_in: int = delivery.DEFAULT_TTL_SECONDS
+) -> dict:
+    """Shape a file for tool-only clients: base64 bytes or a signed, expiring download URL."""
+    result: dict[str, Any] = {
+        "filename": path_name,
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    if return_as == "base64":
+        result["data_base64"] = base64.b64encode(data).decode()
+    elif return_as == "url":
+        public_url = _public_url()
+        if public_url is None:
+            raise ValueError(
+                "No public URL is configured, so download links cannot be built; use "
+                "return_as='base64' or set CHORDSMITH_PUBLIC_URL."
+            )
+        url, expires_at = delivery.build_url(public_url, path_name, expires_in)
+        result["download_url"] = url
+        result["expires_at"] = expires_at
+    else:
+        raise ValueError("return_as must be 'base64' or 'url'.")
+    return result
+
 
 ChordList = Annotated[
     list[str | ChordEvent],
@@ -78,6 +179,15 @@ def _parse_time_signature(text: str) -> tuple[int, int]:
     return num, den
 
 
+def _apply_preset(
+    preset: str | None, voicing: Voicing | None, rhythm: Rhythm | None
+) -> tuple[Voicing | None, Rhythm | None]:
+    if preset is None:
+        return voicing, rhythm
+    preset_voicing, preset_rhythm = PRESETS[preset]
+    return voicing or preset_voicing, rhythm or preset_rhythm
+
+
 def _render(
     chords: list[tuple[Chord, float]],
     *,
@@ -90,6 +200,7 @@ def _render(
     voicing: Voicing | None,
     rhythm: Rhythm | None,
     overwrite: bool,
+    midi_type: int = 1,
 ) -> dict[str, Any]:
     path = store.new_path(filename, default_stem, overwrite)
     result = write_progression(
@@ -102,6 +213,7 @@ def _render(
         program=instrument,
         repeat=repeat,
         title=path.stem,
+        midi_type=midi_type,
     )
     return {
         "filename": path.name,
@@ -128,6 +240,8 @@ def create_chord_progression(
     instrument: Instrument = 0,
     voicing: Voicing | None = None,
     rhythm: Rhythm | None = None,
+    preset: Preset = None,
+    midi_type: MidiType = 1,
     overwrite: Overwrite = False,
 ) -> dict[str, Any]:
     """Write chord symbols (e.g. ["Am", "F", "C", "G"]) to a MIDI file.
@@ -143,6 +257,7 @@ def create_chord_progression(
             parsed.append((parse_chord(item.chord), item.beats))
         else:
             parsed.append((parse_chord(item), default_beats))
+    voicing, rhythm = _apply_preset(preset, voicing, rhythm)
     return _render(
         parsed,
         filename=filename,
@@ -154,6 +269,7 @@ def create_chord_progression(
         voicing=voicing,
         rhythm=rhythm,
         overwrite=overwrite,
+        midi_type=midi_type,
     )
 
 
@@ -177,6 +293,8 @@ def create_progression_from_roman(
     instrument: Instrument = 0,
     voicing: Voicing | None = None,
     rhythm: Rhythm | None = None,
+    preset: Preset = None,
+    midi_type: MidiType = 1,
     overwrite: Overwrite = False,
 ) -> dict[str, Any]:
     """Write a Roman-numeral progression in a given key (e.g. i-VI-III-VII in A minor) to a MIDI file.
@@ -200,6 +318,7 @@ def create_progression_from_roman(
         else:
             parsed.append((roman_to_chord(item, parsed_key), default_beats))
             labels.append(item)
+    voicing, rhythm = _apply_preset(preset, voicing, rhythm)
     result = _render(
         parsed,
         filename=filename,
@@ -211,6 +330,7 @@ def create_progression_from_roman(
         voicing=voicing,
         rhythm=rhythm,
         overwrite=overwrite,
+        midi_type=midi_type,
     )
     return {
         "key": parsed_key.name,
@@ -302,6 +422,146 @@ def list_generated_files() -> dict[str, Any]:
     """List the MIDI files in the ChordSmith output folder (newest first)."""
     root = store.ensure_root()
     return {"output_dir": str(root), "files": store.list_files()}
+
+
+ReturnAs = Annotated[
+    Literal["base64", "url"],
+    Field(
+        description="base64 returns the bytes in the response (works everywhere); url returns a "
+        "signed download link that expires (needs CHORDSMITH_PUBLIC_URL)."
+    ),
+]
+
+
+@mcp.tool()
+def get_midi_file(
+    filename: Annotated[str, Field(description="File in the output folder, e.g. 'melancholy.mid'.")],
+    return_as: ReturnAs = "base64",
+    expires_in: Annotated[
+        int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
+    ] = delivery.DEFAULT_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Return the MIDI file itself so tool-only clients can hand it to the user.
+
+    Use return_as='base64' for the bytes inline, or return_as='url' for a signed link that can
+    be opened without the OAuth login and expires after expires_in seconds.
+    """
+    path = store.existing_path(filename)
+    data = path.read_bytes()
+    result = _deliver(path.name, data, return_as, expires_in)
+    result["mime_type"] = "audio/midi"
+    return result
+
+
+@mcp.tool()
+def add_track(
+    filename: Annotated[str, Field(description="Existing file to copy and extend.")],
+    track_name: Annotated[str, Field(description="Name of the new track, e.g. 'Melody'.")],
+    notes: Annotated[
+        list[NoteInput],
+        Field(
+            min_length=1,
+            max_length=5000,
+            description='Notes, e.g. [{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}]. '
+            "Pitch is a note name with octave or a MIDI number 0-127.",
+        ),
+    ],
+    instrument: Instrument = 0,
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> dict[str, Any]:
+    """Add a note-level track (melody, bass, drums, ...) to a copy of an existing MIDI file.
+
+    The original file is never modified. The copy keeps all existing tracks and gets the new one
+    on the chosen channel; a type 0 file is promoted to type 1.
+    """
+    source = store.existing_path(filename)
+    target = store.new_path(output_filename, f"{source.stem}_{track_name}", overwrite)
+    if target == source:
+        raise ValueError("Choose a different output_filename; the original file is never modified.")
+    parsed: list[tuple[int, float, float, int]] = []
+    for note in notes:
+        try:
+            pitch = parse_pitch(note.pitch)
+        except MusicTheoryError as exc:
+            raise ValueError(str(exc)) from None
+        parsed.append((pitch, note.start_beat, note.beats, note.velocity))
+    info = add_track_midi(
+        source,
+        target,
+        track_name=track_name,
+        program=instrument,
+        channel=channel - 1,
+        notes=parsed,
+    )
+    return {
+        "source": source.name,
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"midi://{target.name}",
+        "track_name": track_name,
+        "channel": channel,
+        **info,
+    }
+
+
+@mcp.tool()
+def delete_midi_file(
+    filename: Annotated[str, Field(description="File in the output folder to delete.")],
+) -> dict[str, Any]:
+    """Delete a MIDI file from the output folder."""
+    path = store.remove(filename)
+    return {"deleted": path.name}
+
+
+@mcp.tool()
+def rename_midi_file(
+    filename: Annotated[str, Field(description="File in the output folder to rename.")],
+    new_name: Annotated[str, Field(description="New name, e.g. 'lofi_sketch'. '.mid' is added.")],
+) -> dict[str, Any]:
+    """Rename a MIDI file. Refuses to overwrite an existing file."""
+    target = store.rename(filename, new_name)
+    return {"filename": target.name, "path": str(target), "uri": f"midi://{target.name}"}
+
+
+@mcp.tool()
+def render_audio(
+    filename: Annotated[str, Field(description="MIDI file in the output folder to render.")],
+    format: Annotated[Literal["wav", "mp3"], Field(description="Audio format.")] = "wav",
+    return_as: ReturnAs = "base64",
+    soundfont: Annotated[
+        str | None,
+        Field(
+            description="Path to a .sf2 soundfont. Default: CHORDSMITH_SOUNDFONT or a standard system path."
+        ),
+    ] = None,
+    output_filename: FileName = None,
+    expires_in: Annotated[
+        int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
+    ] = delivery.DEFAULT_TTL_SECONDS,
+    overwrite: Overwrite = False,
+) -> dict[str, Any]:
+    """Render a MIDI file to audio (wav or mp3) with FluidSynth so it can be heard without a music app.
+
+    The audio file is written next to the MIDI files and returned like get_midi_file
+    (base64 bytes or a signed, expiring download URL).
+    """
+    source = store.existing_path(filename)
+    target = store.new_path(
+        output_filename or source.stem, f"{source.stem}_{format}", overwrite, f".{format}"
+    )
+    try:
+        audio.render(source, target, format, soundfont)
+    except audio.AudioError as exc:
+        raise ValueError(str(exc)) from None
+    data = target.read_bytes()
+    result = _deliver(target.name, data, return_as, expires_in)
+    result["mime_type"] = "audio/wav" if format == "wav" else "audio/mpeg"
+    result["source"] = source.name
+    if format == "wav":
+        result["duration_seconds"] = round(audio.wav_duration(target), 2)
+    return result
 
 
 @mcp.resource("chords://types", mime_type="text/markdown")
@@ -400,6 +660,24 @@ Cover, in plain language:
 4. One or two variations to try. Offer to save them with create_chord_progression."""
 
 
+def _configure_transport_security(public_url: str) -> None:
+    """Allow the public URL's host in the DNS-rebinding check (localhost stays allowed)."""
+    netloc = urlsplit(public_url).netloc
+    if not netloc:
+        return
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[netloc, f"{netloc}:*", "localhost:*", "127.0.0.1:*", "[::1]:*"],
+        allowed_origins=[
+            public_url,
+            f"{public_url}:*",
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "http://[::1]:*",
+        ],
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="chordsmith-mcp", description="ChordSmith MCP server")
     parser.add_argument(
@@ -413,6 +691,20 @@ def main() -> None:
     args = parser.parse_args()
     mcp.settings.host = args.host
     mcp.settings.port = args.port
+    if args.transport != "stdio":
+        public_url = os.environ.get("CHORDSMITH_PUBLIC_URL", "").strip().rstrip("/")
+        if public_url:
+            _configure_transport_security(public_url)
+        try:
+            auth_config = AuthConfig.from_env(host=args.host, port=args.port)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if auth_config is None:
+            logger.warning(
+                "OAuth is disabled (CHORDSMITH_AUTH=off); anyone who can reach this server can use it."
+            )
+        else:
+            enable_auth(mcp, auth_config)
     mcp.run(transport=args.transport)
 
 

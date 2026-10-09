@@ -7,10 +7,14 @@ for something specific ("use drop2 voicing") or understand a result.
 - [create_progression_from_roman](#create_progression_from_roman)
 - [Voicing options](#voicing-options)
 - [Rhythm options](#rhythm-options)
+- [add_track](#add_track)
+- [get_midi_file](#get_midi_file)
+- [render_audio](#render_audio)
 - [list_chord_types](#list_chord_types)
 - [transpose_midi](#transpose_midi)
 - [analyze_midi](#analyze_midi)
 - [list_generated_files](#list_generated_files)
+- [delete_midi_file and rename_midi_file](#delete_midi_file-and-rename_midi_file)
 - [Resources](#resources)
 - [Prompts](#prompts)
 - [Errors](#errors)
@@ -37,6 +41,8 @@ Turns chord symbols into a MIDI file.
 | `instrument` | 0–127 | `0` | General MIDI sound: 0 piano, 4 electric piano, 24 nylon guitar, 25 steel guitar, 48 strings, 88 pad |
 | `voicing` | object | close, root position | See [Voicing options](#voicing-options) |
 | `rhythm` | object | block chords | See [Rhythm options](#rhythm-options) |
+| `preset` | text | none | `"lofi"`: voice leading on, soft velocity, swing and light humanization |
+| `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
 | `overwrite` | true/false | `false` | Replace a file with the same name |
 
 **Example call**
@@ -108,6 +114,8 @@ Pass these inside `"rhythm": {...}`. All are optional.
 | `velocity` | `90` | Loudness 1–127 |
 | `gate` | `0.95` | How long each note sounds within its step (`1.0` = fully connected) |
 | `strum_spread_ms` | `25` | Delay between "strings" for `strum` |
+| `swing` | `0` | 0–0.75. Delays every offbeat step by this fraction of the step: `0.33` ≈ triplet swing, `0.5` = dotted feel |
+| `humanize` | off | `{"timing_ms": 12, "velocity_range": 10, "seed": 7}`: small, seed-controlled timing/velocity variation. The same seed always produces the same bytes |
 
 | Pattern | Sounds like |
 |---|---|
@@ -121,6 +129,53 @@ Pass these inside `"rhythm": {...}`. All are optional.
 
 With arpeggio and Alberti patterns, a bass note (from `add_bass` or a slash chord) is held under
 the moving notes.
+
+## add_track
+
+Adds a note-level track (melody, bass, drums, …) to a **copy** of an existing MIDI file. The
+original is never modified. A type 0 file is promoted to type 1.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing file in the output folder |
+| `track_name` (required) | Name for the new track, e.g. `"Melody"` |
+| `notes` (required) | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes |
+| `instrument` | General MIDI program for the track (0 piano, 24 nylon guitar, …) |
+| `channel` | MIDI channel 1–16 (10 = drums) |
+| `output_filename` | Default: `<name>_<track_name>.mid` |
+| `overwrite` | Replace an existing output file |
+
+## get_midi_file
+
+Returns the MIDI file itself, so clients that only expose tools (no resources) can hand the file
+to you.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | File in the output folder |
+| `return_as` | `"base64"` (default): the bytes inline as `data_base64`, with `size_bytes` and `sha256`. `"url"`: a signed `download_url` plus `expires_at` (needs `CHORDSMITH_PUBLIC_URL`) |
+| `expires_in` | Link lifetime in seconds, 30–3600 (default 300) |
+
+The signed URL works without the OAuth login and stops working when it expires; the signing
+secret lives in the state folder.
+
+## render_audio
+
+Renders a MIDI file to audio with FluidSynth, so a sketch can be heard without a music app. The
+Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, install
+`fluidsynth` and set `CHORDSMITH_SOUNDFONT` (and `CHORDSMITH_FLUIDSYNTH` if it is not on `PATH`).
+
+| Option | Description |
+|---|---|
+| `filename` (required) | MIDI file in the output folder |
+| `format` | `"wav"` (default) or `"mp3"` (mp3 needs ffmpeg) |
+| `return_as` | Like [get_midi_file](#get_midi_file): `"base64"` or `"url"` |
+| `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
+| `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
+| `expires_in`, `overwrite` | As above |
+
+The result includes `mime_type`, `size_bytes`, `sha256`, and for wav the rendered
+`duration_seconds`.
 
 ## list_chord_types
 
@@ -164,6 +219,13 @@ or wrong chords. `N.C.` means no notes are sounding.
 
 No options. Returns the output folder path and its `.mid` files (newest first), with size, date
 and `midi://` link.
+
+## delete_midi_file and rename_midi_file
+
+Tidy up the output folder. Both stay inside the folder; path tricks are cleaned up or rejected.
+
+- `delete_midi_file(filename)` removes a file.
+- `rename_midi_file(filename, new_name)` renames a file and refuses to overwrite an existing one.
 
 ---
 
