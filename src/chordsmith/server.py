@@ -75,6 +75,15 @@ MidiType = Annotated[
         "in one track with the tempo inline, for simple players that ignore track 0)."
     ),
 ]
+Seed = Annotated[
+    int | None,
+    Field(
+        ge=0,
+        le=2**31 - 1,
+        description="Fix the humanize random seed (overrides the preset's seed). The same seed "
+        "always writes the same bytes; has no effect on rhythms without humanize.",
+    ),
+]
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
@@ -156,6 +165,13 @@ def _apply_preset(
     return voicing or preset_voicing, rhythm or preset_rhythm
 
 
+def _apply_seed(rhythm: Rhythm | None, seed: int | None) -> Rhythm | None:
+    """Override the humanize seed so renders are reproducible on request."""
+    if seed is None or rhythm is None or rhythm.humanize is None:
+        return rhythm
+    return rhythm.model_copy(update={"humanize": rhythm.humanize.model_copy(update={"seed": seed})})
+
+
 def _render(
     chords: list[tuple[Chord, float]],
     *,
@@ -209,6 +225,7 @@ def create_chord_progression(
     voicing: Voicing | None = None,
     rhythm: Rhythm | None = None,
     preset: Preset = None,
+    seed: Seed = None,
     midi_type: MidiType = 1,
     overwrite: Overwrite = False,
 ) -> dict[str, Any]:
@@ -226,6 +243,7 @@ def create_chord_progression(
         else:
             parsed.append((parse_chord(item), default_beats))
     voicing, rhythm = _apply_preset(preset, voicing, rhythm)
+    rhythm = _apply_seed(rhythm, seed)
     return _render(
         parsed,
         filename=filename,
@@ -262,6 +280,7 @@ def create_progression_from_roman(
     voicing: Voicing | None = None,
     rhythm: Rhythm | None = None,
     preset: Preset = None,
+    seed: Seed = None,
     midi_type: MidiType = 1,
     overwrite: Overwrite = False,
 ) -> dict[str, Any]:
@@ -287,6 +306,7 @@ def create_progression_from_roman(
             parsed.append((roman_to_chord(item, parsed_key), default_beats))
             labels.append(item)
     voicing, rhythm = _apply_preset(preset, voicing, rhythm)
+    rhythm = _apply_seed(rhythm, seed)
     result = _render(
         parsed,
         filename=filename,

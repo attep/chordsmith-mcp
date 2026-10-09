@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 
@@ -43,6 +44,20 @@ def note_name(pc: int, prefer_flats: bool = False) -> str:
 def midi_note_name(note: int, prefer_flats: bool = False) -> str:
     """60 -> 'C4' (scientific pitch notation, middle C = C4)."""
     return f"{note_name(note % 12, prefer_flats)}{note // 12 - 1}"
+
+
+def note_name_with_octave(name: str, note: int) -> str:
+    """Attach the correct scientific octave to a spelled name: B#4, Cb4, Bbb4.
+
+    The natural-letter formula (note // 12 - 1) is wrong for names that cross an octave
+    boundary (MIDI 72 is C5 but also B#4; MIDI 59 is B3 but also Cb4).
+    """
+    match = re.fullmatch(r"([A-G])([#b]*)", name)
+    if not match:
+        return f"{name}{note // 12 - 1}"
+    letter, accidentals = match.groups()
+    accidental = accidentals.count("#") - accidentals.count("b")
+    return f"{name}{(note - accidental) // 12 - 1}"
 
 
 def parse_pitch(value: str | int, default_octave: int = 4) -> int:
@@ -120,11 +135,22 @@ for _alias, _ct in _ALIASES.items():
         _ALIASES_LOWER[_alias.lower()] = _ct
 
 
+def _did_you_mean(text: str, candidates: list[str]) -> str:
+    """A ' Did you mean ...?' hint for error messages, or an empty string."""
+    matches = difflib.get_close_matches(text.lower(), [c.lower() for c in candidates], n=1, cutoff=0.6)
+    if not matches:
+        return ""
+    original = next(c for c in candidates if c.lower() == matches[0])
+    return f" Did you mean '{original}'?"
+
+
 def lookup_chord_type(suffix: str) -> ChordType:
     ct = _ALIASES.get(suffix) or _ALIASES_LOWER.get(suffix.lower())
     if ct is None:
+        aliases = [alias for alias in _ALIASES if alias]
         raise MusicTheoryError(
-            f"Unknown chord quality '{suffix}'. Call list_chord_types to see supported qualities."
+            f"Unknown chord quality '{suffix}'.{_did_you_mean(suffix, aliases)} "
+            "Call list_chord_types to see supported qualities."
         )
     return ct
 
@@ -327,7 +353,10 @@ def parse_key(text: str) -> Key:
     mode = mode_text.strip().lower().replace(" ", "_")
     mode = _MODE_ALIASES.get(mode, mode)
     if mode not in SCALES:
-        raise MusicTheoryError(f"Unknown mode/scale '{mode_text}'. Supported: {', '.join(sorted(SCALES))}.")
+        raise MusicTheoryError(
+            f"Unknown mode/scale '{mode_text}'.{_did_you_mean(mode_text, list(SCALES))} "
+            f"Supported: {', '.join(sorted(SCALES))}."
+        )
     tonic_name = letter.upper() + accidental
     return Key(tonic=parse_note(tonic_name), mode=mode, tonic_name=tonic_name)
 

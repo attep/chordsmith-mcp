@@ -571,8 +571,10 @@ def parse_voice_id(voice_id: str, singers: list[dict] | None = None) -> int:
     if singers is not None:
         known = {style_info["id"] for singer in singers for style_info in singer["styles"]}
         if speaker not in known:
+            closest = min(known, key=lambda candidate: abs(candidate - speaker)) if known else None
+            hint = f" Did you mean 'voicevox:{closest}'?" if closest is not None else ""
             raise SingingError(
-                f"Voice '{voice_id}' is not offered by the engine (no swapping in another voice)."
+                f"Voice '{voice_id}' is not offered by the engine (no swapping in another voice).{hint}"
             )
     return speaker
 

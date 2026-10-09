@@ -9,7 +9,7 @@ from pathlib import Path
 import mido
 
 from chordsmith.models import Humanize, Rhythm, Voicing
-from chordsmith.theory import Chord, MusicTheoryError, midi_note_name, parse_chord
+from chordsmith.theory import Chord, MusicTheoryError, midi_note_name, note_name_with_octave, parse_chord
 
 TICKS_PER_BEAT = 480
 # Shifts that take C major to a flat key (Db, Eb, F, Ab, Bb); used to spell transposed chord names.
@@ -36,7 +36,9 @@ def _note_label(note: int, chord: Chord) -> str:
     """Name a MIDI note using the chord's spelling (C7's seventh is Bb, not A#)."""
     spelled = dict(zip(chord.pitch_classes, chord.note_names, strict=True))
     name = spelled.get(note % 12)
-    return f"{name}{note // 12 - 1}" if name else midi_note_name(note, chord.prefer_flats)
+    if name is None:
+        return midi_note_name(note, chord.prefer_flats)
+    return note_name_with_octave(name, note)
 
 
 def _shape(chord: Chord, octave: int, inversion: int, style: str) -> list[int]:
