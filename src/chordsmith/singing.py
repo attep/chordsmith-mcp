@@ -1350,10 +1350,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         """Prepare a monophonic vocal score from a MIDI melody track (step 1 of singing).
 
         Read-only for the source file: it registers a score in memory and returns its id plus
-        every note with beats, seconds and engine frames, and the real rests. Fails if the track
-        has overlapping notes (pick a monophonic track). ``legato`` closes the tiny gaps an
-        instrumental melody leaves between notes, so the voice does not stop and start inside
-        words. The next step is map_vocal_lyrics with the returned score_id.
+        every note with beats, seconds and engine frames, and the real rests. The score is kept
+        for 24 hours. Fails if the track has overlapping notes (pick a monophonic track).
+        ``legato`` closes the tiny gaps an instrumental melody leaves between notes, so the voice
+        does not stop and start inside words. The next step is map_vocal_lyrics with the returned
+        score_id.
         """
         store = _get_store()
         assert store is not None
@@ -1395,10 +1396,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     ) -> results.MappingResult:
         """Attach one token per note (step 2 of singing) and dry-run the phonemization.
 
-        Read-only: registers the mapping in memory and returns the per-note plan (tokens, phonemes,
-        timings) plus warnings, so mistakes are caught before rendering. English tokens are
-        phonemized here; unknown words are refused by name and words are never dropped or invented.
-        Mismatches produce warnings. The next step is render_singing with the returned mapping_id.
+        Read-only: registers the mapping in memory and returns the per-note plan (tokens,
+        phonemes, timings) plus warnings, so mistakes are caught before rendering. The mapping is
+        kept for 24 hours. English tokens are phonemized here; unknown words are refused by name
+        and words are never dropped or invented. Mismatches produce warnings. The next step is
+        render_singing with the returned mapping_id.
         """
         with _registry.lock:
             score = _registry.scores.get(score_id)
@@ -1432,7 +1434,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     ) -> results.RenderStartResult:
         """Start rendering the vocal in the background (step 3 of singing) and return a job id.
 
-        Creates a wav when the job finishes; poll get_singing_job. Repeating an identical request
+        Creates a wav when the job finishes; poll get_singing_job. The job record is kept for
+        24 hours (the rendered file stays in the output folder). Repeating an identical request
         reuses the finished job instead of rendering twice. A 'seed' in settings fixes DiffSinger's
         sampling noise so the same input renders identical bytes (tested on Hanami v1.0; not
         promised across voicebank versions). Failures (missing voicebank, engine unreachable) are
@@ -1462,7 +1465,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         with _registry.lock:
             job = _registry.jobs.get(job_id)
         if job is None:
-            raise SingingError(f"Job '{job_id}' not found.")
+            raise SingingError(f"Job '{job_id}' not found (jobs expire after 24 hours).")
         return _job_payload(job)
 
     @mcp.tool(title="Mix song with vocals", annotations=_CREATES)

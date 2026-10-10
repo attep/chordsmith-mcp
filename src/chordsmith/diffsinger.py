@@ -482,10 +482,11 @@ def plan_timeline(
 ) -> list[dict]:
     """Lay phonemes on the note grid: every vowel starts exactly on its note.
 
-    Onsets are sung ahead of the beat by taking time from the previous segment (silence first,
-    then the previous coda/vowel, keeping at least one frame); codas stay inside the note.
-    Notes are anchored to absolute time, so leading silence and rests keep the vocal aligned
-    with the backing; trailing silence (up to ``total_seconds``) is padded too.
+    Onsets are sung ahead of the beat by taking time from the previous vowel first (consonant
+    anticipation), then the previous coda (kept at least one frame), and only then older
+    silence; codas stay inside the note. Notes are anchored to absolute time, so leading
+    silence and rests keep the vocal aligned with the backing; trailing silence (up to
+    ``total_seconds``) is padded too.
     """
     bank = bank or get_voicebank()
     timeline: list[dict] = [{"phoneme": "SP", "note": -1, "kind": "pad", "frames": HEAD_FRAMES}]
@@ -514,13 +515,17 @@ def plan_timeline(
             wanted = max(len(onset), int(round(sum(weights[k] for k in range(len(onset))))))
             if wanted > gap:
                 deficit = wanted - gap
-                for entry in reversed(timeline):
-                    if deficit <= 0:
-                        break
-                    if entry["kind"] in ("vowel", "coda", "gap", "pad"):
-                        take = min(deficit, entry["frames"] - 1)
-                        entry["frames"] -= take
-                        deficit -= take
+                # Onsets are sung ahead of the beat: take time from the previous vowel first
+                # (consonant anticipation), then the previous coda (kept at least one frame so
+                # it stays audible), and only then older silence.
+                for kinds in (("vowel",), ("coda",), ("gap", "pad")):
+                    for entry in reversed(timeline):
+                        if deficit <= 0:
+                            break
+                        if entry["kind"] in kinds:
+                            take = min(deficit, entry["frames"] - 1)
+                            entry["frames"] -= take
+                            deficit -= take
                 wanted -= deficit
             if wanted >= len(onset):
                 if gap > wanted:
@@ -573,6 +578,34 @@ def _note_partition(timeline: list[dict], notes: list[NoteSpec]) -> tuple[list[i
             break
         midis[index] = midis[index] or float(notes[0].midi)
     return durations, midis, rests
+
+
+def _word_inputs(
+    segments: list[dict], notes: list[NoteSpec], bank: _Voicebank
+) -> tuple[list[int], list[int]]:
+    """Word boundaries and durations for the linguistic encoder.
+
+    Words are vowel-anchored spans (the voicebank's ``ph_num`` convention): each vowel starts a
+    span that runs to the next vowel, and the trailing silence is the last span. Durations are in
+    frames; the span anchored at the leading pad uses the first note's duration, because that
+    span carries the first word's onset consonants (the pad is sung ahead of the note). Without
+    real word durations the encoder assumes one-frame words and predicts consonants at 1-3
+    frames, which is why final consonants used to be cut off.
+    """
+    vowel_ids = [i for i, s in enumerate(segments) if bank.is_vowel(s["phoneme"])]
+    word_div = [vowel_ids[i + 1] - vowel_ids[i] for i in range(len(vowel_ids) - 1)]
+    word_div.append(len(segments) - vowel_ids[-1])
+    note_frames = [frame_at(note.seconds) for note in notes]
+    word_dur: list[int] = []
+    for position, vowel_id in enumerate(vowel_ids):
+        note = segments[vowel_id]["note"]
+        if note >= 0:
+            word_dur.append(note_frames[note])
+        elif position == 0:
+            word_dur.append(note_frames[0])
+        else:
+            word_dur.append(TAIL_FRAMES)
+    return word_div, word_dur
 
 
 def render(
@@ -631,15 +664,13 @@ def render(
     segments.append({"phoneme": "SP", "note": -1, "kind": "pad"})
 
     tokens = np.array([[bank.phoneme_ids[s["phoneme"]] for s in segments]], dtype=np.int64)
-    vowel_ids = [i for i, s in enumerate(segments) if bank.is_vowel(s["phoneme"])]
-    word_div = [vowel_ids[0]] + [vowel_ids[i + 1] - vowel_ids[i] for i in range(len(vowel_ids) - 1)]
-    word_div.append(tokens.shape[1] - vowel_ids[-1])
+    word_div, word_dur = _word_inputs(segments, notes, bank)
     encoder_out, x_masks = session_for("dsmain/linguistic.onnx").run(
         None,
         {
             "tokens": tokens,
             "word_div": np.array([word_div], dtype=np.int64),
-            "word_dur": np.ones((1, len(word_div)), dtype=np.int64),
+            "word_dur": np.array([word_dur], dtype=np.int64),
         },
     )[:2]
     note_pitch = np.array(

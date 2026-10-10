@@ -102,6 +102,11 @@ The create tools accept **voicing** options (inversions, open/drop-2, voice lead
 **rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), a `lofi`
 preset, a `seed` for reproducible renders, and `midi_type` 0/1 for simple players.
 
+Every tool also carries a human **title** and **behaviour hints** (read-only / creates /
+destructive) that MCP clients display, and every result is machine-checkable (a declared output
+schema, returned as structured JSON). See
+[How tools appear to MCP clients](docs/tools.md#how-tools-appear-to-mcp-clients).
+
 ## Run it online
 
 ChordSmith can run on a server so you can use it from any device, protected by OAuth 2.1

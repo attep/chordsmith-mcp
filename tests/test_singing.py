@@ -595,7 +595,49 @@ def test_split_syllables_controls():
 
 class _StubBank:
     def is_vowel(self, phoneme):
-        return phoneme in {"a", "e", "i", "o", "u", "ow", "iy", "ah"}
+        return phoneme in {
+            "a",
+            "e",
+            "i",
+            "o",
+            "u",
+            "ae",
+            "aa",
+            "ao",
+            "ah",
+            "aw",
+            "ay",
+            "eh",
+            "er",
+            "ey",
+            "ih",
+            "iy",
+            "ow",
+            "oy",
+            "uh",
+            "uw",
+            "SP",
+            "AP",
+        }
+
+
+def test_word_inputs_match_the_ph_num_convention():
+    # words are vowel-anchored spans: each vowel starts a span to the next vowel, the trailing
+    # silence is its own span, and every span carries its note's frames (no one-frame words)
+    notes = [
+        diffsinger.NoteSpec(phonemes=["g", "l", "ow"], start_seconds=0.0, seconds=0.5, midi=62),
+        diffsinger.NoteSpec(phonemes=["hh", "ey", "z"], start_seconds=0.5, seconds=0.5, midi=62),
+    ]
+    segments = [{"phoneme": "SP", "note": -1, "kind": "pad"}]
+    for index, note in enumerate(notes):
+        for j, phone in enumerate(note.phonemes):
+            kind = "vowel" if j == len(note.phonemes) - 1 else "onset"
+            segments.append({"phoneme": phone, "note": index, "kind": kind})
+    segments.append({"phoneme": "SP", "note": -1, "kind": "pad"})
+    word_div, word_dur = diffsinger._word_inputs(segments, notes, _StubBank())
+    assert word_div == [3, 2, 2, 1]  # [SP,g,l] [ow,hh] [ey,z] [SP]
+    frames = diffsinger.frame_at(0.5)
+    assert word_dur == [frames, frames, frames, diffsinger.TAIL_FRAMES]
 
 
 def test_plan_timeline_puts_vowels_on_notes():
@@ -614,6 +656,21 @@ def test_plan_timeline_puts_vowels_on_notes():
     assert vowel_start[0] == diffsinger.HEAD_FRAMES
     assert vowel_start[1] == diffsinger.HEAD_FRAMES + diffsinger.frame_at(0.5)
     assert frame == sum(entry["frames"] for entry in timeline)
+
+
+def test_onsets_anticipate_into_the_previous_vowel_not_the_coda():
+    notes = [
+        diffsinger.NoteSpec(phonemes=["hh", "ey", "z"], start_seconds=0.0, seconds=0.5, midi=62),
+        diffsinger.NoteSpec(phonemes=["g", "l", "ae", "s"], start_seconds=0.5, seconds=0.5, midi=62),
+    ]
+    predicted = [[10.0, 25.0, 8.0], [8.0, 12.0, 25.0, 12.0]]
+    timeline = diffsinger.plan_timeline(notes, predicted, bank=_StubBank())
+    codas = [e for e in timeline if e["kind"] == "coda" and e["note"] == 0]
+    assert sum(e["frames"] for e in codas) == 8  # the z keeps its full length
+    onsets = [e for e in timeline if e["kind"] == "onset" and e["note"] == 1]
+    assert sum(e["frames"] for e in onsets) == 20  # 8 + 12, taken from the previous vowel
+    vowels = [e for e in timeline if e["kind"] == "vowel" and e["note"] == 0]
+    assert sum(e["frames"] for e in vowels) == 35 - 20
 
 
 @needs_voicebank

@@ -24,6 +24,36 @@ Files are always saved in the output folder (default `~/ChordSmith`, see
 (`"my song"` becomes `my_song.mid`), and an existing file is never replaced unless you set
 `overwrite: true`. Otherwise the new file gets a number, e.g. `my_song_2.mid`.
 
+## How tools appear to MCP clients
+
+Everything on this page is also machine-readable. MCP clients (and the assistants inside them)
+see each tool with:
+
+- **A friendly title** — e.g. "Create chord progression" or "Mix song with vocals" — shown in
+  tool lists and permission prompts.
+- **Behaviour hints**, so apps can treat calls appropriately:
+
+  | Hint | Tools | Meaning |
+  |---|---|---|
+  | Read-only | `list_chord_types`, `analyze_midi`, `list_generated_files`, `get_midi_file`, `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`, `get_singing_job` | Nothing on disk changes (the singing steps only keep temporary state in memory) |
+  | Creates files | `create_chord_progression`, `create_progression_from_roman`, `add_track`, `transpose_midi`, `render_audio`, `render_singing`, `mix_song_with_vocals`, `export_vocal_song` | Writes new files; an existing file is never replaced unless you pass `overwrite: true` |
+  | Destructive | `delete_midi_file`, `rename_midi_file` | Changes files that already exist; some clients ask you to confirm first |
+
+- **A fully described input schema** — every option has a description and its default, so the
+  assistant can fill in calls without guessing.
+- **A declared output schema** — results come back as typed `structuredContent` (and as JSON
+  text too, for older clients), so apps can validate what they receive instead of parsing prose.
+
+When something is wrong, the call comes back as an **error the assistant can act on** (see
+[Errors](#errors)) — never as a crash.
+
+The tool definitions follow the MCP
+[tools specification](https://modelcontextprotocol.io/specification/2026-07-28/server/tools):
+`name`, `title`, `description`, `inputSchema`, `outputSchema`, `annotations`, and results with
+`structuredContent` / `isError`. On the wire, ChordSmith currently negotiates protocol revision
+**2025-11-25**, the latest supported by the official MCP Python SDK v1.x; the tool fields above
+are common to both revisions (icons are optional and not used yet).
+
 ---
 
 ## create_chord_progression

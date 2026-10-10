@@ -12,6 +12,28 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.5.2] - 2026-10-10
+
+### Fixed
+
+- **Final consonants are no longer cut off.** The linguistic encoder was given one-frame word
+  durations, so the duration model predicted closing consonants at 12–35 ms — "glass" sang as
+  "gla", "haze" as "hey", "car" as "ca". Word durations are now real (vowel-anchored spans, the
+  voicebank's `ph_num` convention): on the diagnostic line /z/ goes 35 → 186 ms, /s/ 35 → 244 ms
+  and /r/ 12 → 337 ms, and the consonants are audible.
+- **Onsets no longer eat the previous word's coda.** With realistic onset lengths, the
+  beat-ahead placement was consuming the previous note's closing consonants to make room;
+  onsets now anticipate into the previous vowel first, and codas keep their full length.
+- Seeded renders stay reproducible, but their bytes differ from pre-fix renders — re-render
+  stored seeds before comparing across the fix.
+
+### Added
+
+- Docs: "How tools appear to MCP clients" (titles, behaviour hints, output schemas, and the MCP
+  tools specification), linked from the README.
+- The singing tools now state their retention: scores, mappings and job records are kept for
+  24 hours (rendered files stay in the output folder).
+
 ## [0.5.1] - 2026-10-10
 
 ### Added
