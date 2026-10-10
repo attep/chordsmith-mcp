@@ -194,9 +194,10 @@ the vocal, write softer velocities), raise `vocal_level_db`, trim the offending 
 
 **Vocal dynamics (`compress`, off by default):** the vocal gets a gentle high-pass and compressor
 before the balance is measured, which roughly halves its note-to-note level swings (measured on
-two songs: about ±4.5 dB raw, ±2.5 dB compressed). It can cost diction on dense, loud mixes (a
-death-metal test scored 89/102 compressed against 95/102 raw), so it is off by default — turn it
-on when smoothness matters more than the last few words.
+two songs: about ±4.5 dB raw, ±2.5 dB compressed). Its effect on diction is song-dependent: it
+costs words on dense, loud mixes (a death-metal test scored 89/102 compressed against 95/102
+raw) but can help a quieter vocal over a loud backing (61/88 raw against 82/88 compressed at
+vocal +6 dB), so it is off by default — judge each song by ear.
 
 **Ducking (`ducking`, off by default; `duck_db`, default 4):** the vocal's envelope dips the
 backing `duck_db` dB while the voice sings, with a fast attack and a slow release. The dip is

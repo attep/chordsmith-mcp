@@ -35,7 +35,8 @@ export, Roman-numeral analysis, an `explain_progression` tool, and contributor h
 
 - `compress` now defaults to **false**: it halves the voice's level swings (measured ~±4.5 dB
   to ~±2.5) but costs diction on dense, loud mixes (89/102 against 95/102 on a death-metal
-  test), so it is opt-in.
+  test), so it is opt-in. It is not universally worse: on a quiet vocal over a loud backing it
+  can help a lot (61/88 against 82/88 at vocal +6 dB), so judge each song by ear.
 - The `overwrite` option's description now mentions the numbered-name fallback (`song_2.wav`).
 
 ## [0.7.1] - 2026-10-10
