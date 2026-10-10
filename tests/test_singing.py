@@ -298,7 +298,6 @@ async def test_list_singing_voices(fake_engine):
     assert voices[1]["query_via_teacher"] is True
 
 
-@pytest.mark.skipif(not diffsinger.available(), reason="DiffSinger voicebank not configured")
 async def test_list_singing_voices_all_engines(fake_engine):
     result = await _call("list_singing_voices", {})
     assert not result.isError, result.content[0].text
@@ -310,6 +309,7 @@ async def test_list_singing_voices_all_engines(fake_engine):
     assert single.structuredContent["voices"][0]["voice_id"] == "voicevox:6000"
 
 
+@pytest.mark.skipif(not diffsinger.available(), reason="DiffSinger voicebank not configured")
 async def test_list_singing_voices_diffsinger(fake_engine):
     result = await _call("list_singing_voices", {"engine": "diffsinger"})
     data = result.structuredContent
