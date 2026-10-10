@@ -90,7 +90,8 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `create_progression_from_roman` | Roman numerals (`i–VI–III–VII`) + key → `.mid` file |
 | `add_track` | Adds a note-level track (melody, bass, drums) to a copy of a file |
 | `get_midi_file` | Hands the actual file back (base64 or a signed download link) |
-| `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app |
+| `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app (or per-track stems with `stems: true`) |
+| `set_track_instrument` / `list_instruments` | Per-track instrument specs (a soundfont per track, trims) and the engines this server can run |
 | `list_chord_types` | Shows every chord type ChordSmith understands (30) |
 | `transpose_midi` | Moves a file up/down, or from one key to another |
 | `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key |
@@ -124,8 +125,9 @@ Caddy obtains HTTPS for your domain. Prefer no open ports? Use the Cloudflare Tu
 
 Wordless hums and Japanese kana work with the bundled VOICEVOX engine
 (`docker compose --profile singing up -d`). English lyrics need a DiffSinger voicebank that you
-download and mount yourself — it is never bundled or committed. See
-[docs/singing.md](docs/singing.md).
+download and mount yourself — it is never bundled or committed. The mixer measures the vocal
+against the band, can compress the voice or duck the band under it, and renders per-track stems
+you can balance with `backing_levels`. See [docs/singing.md](docs/singing.md).
 
 ## Documentation
 

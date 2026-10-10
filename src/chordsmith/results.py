@@ -130,9 +130,45 @@ class GetMidiFileResult(_FileIdentity, DeliveryFields):
     pass
 
 
+class StemEntry(_FileIdentity, DeliveryFields):
+    track: str
+    gain_db: float
+
+
 class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     source: str | None
     duration_seconds: float | None
+    stems: list[StemEntry] | None
+
+
+class EngineEntry(TypedDict):
+    name: str
+    available: bool
+    default_soundfont: str | None
+    notes: str
+
+
+class InstrumentTrack(TypedDict):
+    engine: str
+    preset: str | None
+    gain_db: float
+
+
+class InstrumentsFile(TypedDict):
+    filename: str
+    tracks: list[str]
+    specs: dict[str, InstrumentTrack]
+
+
+class InstrumentsResult(TypedDict):
+    engines: list[EngineEntry]
+    file: InstrumentsFile | None
+
+
+class InstrumentMapResult(TypedDict):
+    filename: str
+    path: str
+    tracks: dict[str, InstrumentTrack]
 
 
 class ExportEntry(_FileIdentity, DeliveryFields):
@@ -264,6 +300,7 @@ class MixLevels(TypedDict):
     vocal_level_db: float
     backing_volume: float
     normalize_peak_db: float | None
+    duck_db: float | None
 
 
 class MixResult(TypedDict):

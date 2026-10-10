@@ -572,22 +572,71 @@ def test_mix_compressor_tames_the_vocal_dynamics(tmp_path):
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
-def test_mix_ducking_lowers_the_backing_under_the_voice(tmp_path):
-    # the vocal's envelope dips the backing: right after the voice stops, the backing must still
-    # be recovering (slow release), so the ducked mix is lower than the plain one
+def test_mix_ducking_adds_headroom_for_the_voice(tmp_path):
+    # the dip is applied after the gain is computed on the ORIGINAL backing, so the vocal keeps
+    # its gain and the band steps back: vocal over band while singing = vocal_level_db + duck_db
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
     _write_constant_wav(backing, 8000, seconds=2.0, channels=2)
     _write_block_vocal(vocal, [20000, 0], block_s=1.0)
     plain = tmp_path / "plain.wav"
     ducked = tmp_path / "ducked.wav"
-    singing.mix_tracks(backing, vocal, plain, compress=False, normalize_peak_db=None)
-    singing.mix_tracks(backing, vocal, ducked, compress=False, ducking=True, normalize_peak_db=None)
-    plain_tail = _window_rms_db(plain, 1.05, 1.35)
-    ducked_tail = _window_rms_db(ducked, 1.05, 1.35)
-    assert ducked_tail < plain_tail - 1.0
-    # and the quiet part is untouched once the compressor has released
+    plain_info = singing.mix_tracks(backing, vocal, plain, compress=False, normalize_peak_db=None)
+    ducked_info = singing.mix_tracks(
+        backing, vocal, ducked, compress=False, ducking=True, duck_db=4.0, normalize_peak_db=None
+    )
+    assert ducked_info["vocal_gain_db"] == plain_info["vocal_gain_db"]  # the vocal keeps its gain
+    assert ducked_info["vocal_to_backing_db"] == 10.0  # 6 requested + 4 dip while singing
+    assert ducked_info["balance_check"] == "ok"
+    assert ducked_info["duck_db"] == 4.0
+    assert plain_info["duck_db"] is None
+    # the band is lower right after the voice stops (recovering) and back later
+    assert _window_rms_db(ducked, 1.05, 1.35) < _window_rms_db(plain, 1.05, 1.35) - 1.0
     assert abs(_window_rms_db(plain, 1.8, 2.0) - _window_rms_db(ducked, 1.8, 2.0)) < 0.5
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_true_peak_guard_prevents_clipping(tmp_path):
+    # hot settings: the old code measured the peak on the already-clamped 16-bit file and only
+    # ever turned it down by the normalization margin; the float probe sees the true peak
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 20000, seconds=1.0, channels=2)
+    _write_constant_wav(vocal, 20000)
+    target = tmp_path / "hot.wav"
+    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=18.0, backing_volume=2.0, compress=False)
+    assert info["clipping"] is False  # the export never clips
+    assert info["gain_correction_db"] < -3.0  # a hot raw mix was turned down
+    assert abs(info["peak_db"] - (-1.0)) <= 0.2
+    with wave.open(str(target), "rb") as handle:
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    assert max(abs(value) for value in samples) < 32767  # no full-scale samples
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_clipping_guard_works_without_normalization(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 20000, seconds=1.0, channels=2)
+    _write_constant_wav(vocal, 20000)
+    target = tmp_path / "raw_hot.wav"
+    info = singing.mix_tracks(
+        backing,
+        vocal,
+        target,
+        vocal_level_db=18.0,
+        backing_volume=2.0,
+        compress=False,
+        normalize_peak_db=None,
+    )
+    assert info["clipping"] is False  # the guard still applies when normalization is off
+    assert info["gain_correction_db"] < 0
+    assert info["peak_db"] <= -0.05
+    with wave.open(str(target), "rb") as handle:
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    assert max(abs(value) for value in samples) < 32767
 
 
 async def test_mix_echoes_compress_and_ducking(store, monkeypatch):

@@ -42,6 +42,7 @@ Consequences:
 | `storage.py` | The output-folder sandbox: name cleaning, path containment, listing |
 | `delivery.py` | Signed, expiring download URLs for tool-only clients |
 | `audio.py` | FluidSynth/ffmpeg rendering of MIDI to wav/mp3 |
+| `renderers.py` | Per-track rendering: the Renderer protocol, FluidSynth engine, instrument specs |
 | `singing.py` | Vocal scores, lyrics mapping, render jobs, mixing (engine dispatch) |
 | `diffsinger.py` | DiffSinger ONNX adapter for English voicebanks (mounted, never bundled) |
 | `auth.py` | OAuth 2.1 authorization server for HTTP transports (sign-in, DCR/CIMD, PKCE) |
@@ -93,11 +94,21 @@ track, soft levels, clipping correction) → export (wav/mp3/vocal/midi via sign
 
 Adding an engine means implementing one render call and listing it in `list_singing_voices`.
 
+**Track rendering** (`renderers.py`) follows the same idea with a hard isolation rule: a
+`Renderer` is a **separate process** (today the FluidSynth CLI), never an imported library. That
+keeps crashing hosts from taking the server down, and it keeps differently licensed engines
+(GPL hosts such as pedalboard or sfizz) outside this MIT codebase — the server only ever spawns
+them and reads the wav they write. Per-track instrument specs (a `.sf2` per track, a trim) live
+in a JSON sidecar next to the MIDI file, and `render_audio` with `stems: true` renders each
+track with its own spec, then sums the stems.
+
 ## Where to extend
 
 - **A chord type**: add a `ChordType(...)` to `theory.CHORD_TYPES` and a case to
   `tests/test_theory.py`; it appears everywhere automatically (including spelling tests).
 - **A rhythm pattern**: extend `midi_writer.render_pattern` and `models.RhythmPattern`.
 - **A preset**: add an entry to `server.PRESETS` (voicing + rhythm) and a golden test.
+- **A render engine**: implement `renderers.Renderer` as a subprocess host, add it to
+  `RENDERERS`, and cover it with a golden test (duration, peak and loudness tolerances).
 - **A tool**: define it in `server.py` (or a module with a `register(mcp, store)` function) and
   add it to the stdio smoke test so CI exercises it end to end.

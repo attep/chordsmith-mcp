@@ -210,6 +210,7 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 | `format` | `"wav"` (default) or `"mp3"` (mp3 needs ffmpeg) |
 | `return_as` | Like [get_midi_file](#get_midi_file): `"base64"` or `"url"` |
 | `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
+| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs) and combine the stems into the mix. One render per track, so it is slower; the result then also lists every stem (name, track, gain, sha256, bytes or link) |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
@@ -219,6 +220,29 @@ The result includes `mime_type`, `size_bytes`, `sha256`, and for wav the rendere
 Renders use a General MIDI soundfont: no samples, sub/reese bass design, filter sweeps or
 production FX. Treat them as an audition of the notes, not a finished master — open the `.mid` in
 a DAW for the real sound. MIDI automation (volume curves, CC sweeps) is not written either.
+
+## set_track_instrument
+
+Stores per-track instrument specs for a MIDI file in a small JSON sidecar next to it
+(`<name>.instruments.json`); the MIDI itself is never modified.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | MIDI file in the output folder |
+| `tracks` (required) | Specs keyed by track name, e.g. `{"Bass": {"engine": "fluidsynth", "preset": "/sf2/MyBass.sf2", "gain_db": -3}}`. Entries merge into the existing map; a `null` value removes a track's spec |
+
+Fields: `engine` (only `"fluidsynth"` today), `preset` (a `.sf2` path for that track; omit for
+the server default), `gain_db` (trim used when stems are combined, −24 to +12). Unknown track
+names, missing soundfonts and unknown engines are rejected with a message that lists what is
+available. The specs follow the file when it is renamed or deleted, and `render_audio` uses them
+with `stems: true`.
+
+## list_instruments
+
+No options (or a `filename`). Read-only. Returns the rendering engines this server can run —
+their availability, the default soundfont and notes — and, with a filename, that file's note
+tracks and stored specs. Engines run as **separate processes**, so a crashing or differently
+licensed engine can never take the server down.
 
 ## list_chord_types
 

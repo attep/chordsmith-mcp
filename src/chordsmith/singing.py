@@ -980,18 +980,18 @@ def _mix_filters(vocal_gain: float, backing_volume: float, reverb: bool, output_
     return filters + "[m]"
 
 
-DUCK_DB = 4.0  # how far the backing steps back while the voice sings
 DUCK_THRESHOLD_DB = -36.0  # vocal block level that counts as "singing"
 DUCK_BLOCK_MS = 25.0
 
 
-def _duck_backing(backing: Path, vocal: Path, target: Path) -> None:
+def _duck_backing(backing: Path, vocal: Path, target: Path, duck_db: float) -> None:
     """Write the backing with a gain dip wherever the voice sings (ducking).
 
     ffmpeg's sidechaincompress truncates its output unpredictably, so the envelope is computed
     here instead: the vocal is measured in short blocks, the dip is smoothed with a fast attack
     and a slow release, and the backing is scaled per block with a linear ramp between blocks.
-    The measurement then sees the ducked backing, so the balance stays honest.
+    The dip must NOT be part of the balance measurement: it exists to add headroom for the
+    voice, so the mix is measured on the original backing and only this file carries the dip.
     """
     import array
     import math
@@ -1001,8 +1001,8 @@ def _duck_backing(backing: Path, vocal: Path, target: Path) -> None:
     block = max(1, round(rate * DUCK_BLOCK_MS / 1000.0))
     vocal_block = max(1, round(vocal_rate * DUCK_BLOCK_MS / 1000.0))
     frames = len(backing_samples) // channels
-    duck_gain = 10.0 ** (-DUCK_DB / 20.0)
-    attack = 1.0 - math.exp(-DUCK_BLOCK_MS / 1000.0 / 0.02)
+    duck_gain = 10.0 ** (-duck_db / 20.0)
+    attack = 1.0 - math.exp(-DUCK_BLOCK_MS / 1000.0 / 0.01)
     release = 1.0 - math.exp(-DUCK_BLOCK_MS / 1000.0 / 0.30)
     gains: list[float] = []
     gain = 1.0
@@ -1031,6 +1031,51 @@ def _duck_backing(backing: Path, vocal: Path, target: Path) -> None:
         handle.setsampwidth(2)
         handle.setframerate(rate)
         handle.writeframes(out.tobytes())
+
+
+def _float_peak_db(path: Path) -> float:
+    """Peak level (dBFS) of a raw f32le render; the sample peak decides s16 clamping.
+
+    ffmpeg's volumedetect misreports float wavs and Python's wave module cannot read them, so
+    the probe is written as headerless f32le and read with the stdlib array module.
+    """
+    import array
+
+    samples = array.array("f")
+    samples.frombytes(path.read_bytes())
+    peak = max((abs(value) for value in samples), default=0.0)
+    return 20.0 * math.log10(max(peak, 1e-9))
+
+
+def _f32_mix_energy_over_sung(vocal: Path, probe: Path, block_ms: float = 50.0, gate: float = 0.004) -> float:
+    """Mean square of a raw f32le stereo render over the vocal's blocks, in int16 units.
+
+    The probe is the uncorrected mix (gain 0), so comparing it against the backing's level is
+    honest even when the export is later normalized up or down.
+    """
+    import array
+
+    vocal_samples, vocal_channels, vocal_rate = _read_pcm(vocal)
+    probe_samples = array.array("f")
+    probe_samples.frombytes(probe.read_bytes())
+    probe_channels = 2  # the mix bus always renders stereo
+    vocal_block = max(1, round(vocal_rate * block_ms / 1000.0))
+    probe_block = max(1, round(44100 * block_ms / 1000.0))
+    frames = len(probe_samples) // probe_channels
+    total = 0.0
+    count = 0
+    for index in range(len(vocal_samples) // vocal_channels // vocal_block):
+        start = index * vocal_block
+        energy = _block_energy(vocal_samples, start, vocal_block, vocal_channels)
+        if math.sqrt(energy) / 32768.0 < gate:
+            continue
+        if start >= frames:
+            continue
+        block_energy = _block_energy(probe_samples, start, probe_block, probe_channels)
+        span = min(probe_block, frames - start)
+        total += block_energy * span * probe_channels
+        count += span * probe_channels
+    return (total / count) * (32768.0**2) if count else 0.0
 
 
 def gated_rms_db(path: Path, gate: float = 0.004) -> float:
@@ -1149,31 +1194,35 @@ def mix_tracks(
     backing_volume: float = 1.0,
     reverb: bool = False,
     normalize_peak_db: float | None = -1.0,
-    compress: bool = True,
+    compress: bool = False,
     ducking: bool = False,
+    duck_db: float = 4.0,
 ) -> dict:
     """Mix the vocal into the backing, balancing levels by measurement.
 
     ``vocal_level_db`` is the target level of the vocal *above the band*, both measured over the
     blocks where the voice is singing, so quiet backings and loud vocals are corrected instead
-    of being multiplied blindly. With ``compress`` (default) the vocal gets a gentle high-pass
-    and compressor before the measurement, so its per-note level swings (DiffSinger can move
-    ~6 dB between notes) are tamed and the balance is computed on what actually lands in the
-    file. ``ducking`` makes the vocal drive a compressor on the backing, so the band steps back
-    while the voice sings. The vocal is converted to the mix rate before measuring: the
-    resampler's anti-alias filter costs 24 kHz engine output a couple of dB, and the level that
-    matters is the one in the finished file. The finished mix is normalized to
-    ``normalize_peak_db`` (default -1 dBFS; pass None to keep the raw level) so exports are not
-    left very quiet.
+    of being multiplied blindly. With ``compress`` the vocal gets a gentle high-pass and
+    compressor before the measurement, so its per-note level swings are tamed and the balance is
+    computed on what actually lands in the file (off by default: it costs diction on dense
+    mixes). ``ducking`` dips the backing by ``duck_db`` while the voice sings: the dip is
+    applied *after* the gain is computed on the original backing, so it adds real headroom — the
+    vocal sits ``vocal_level_db + duck_db`` above the band during phrases and the band returns
+    between them. The vocal is converted to the mix rate before measuring: the resampler's
+    anti-alias filter costs 24 kHz engine output a couple of dB, and the level that matters is
+    the one in the finished file. The peak is measured on a float render, so the export is
+    corrected to ``normalize_peak_db`` (default -1 dBFS) from the true peak, or guarded to
+    -0.1 dBFS when normalization is off: a clipped file is never written.
     """
     original_vocal = vocal
     with tempfile.TemporaryDirectory() as scratch:
-        vocal = Path(scratch) / "vocal_mix_rate.wav"
+        scratch_path = Path(scratch)
+        vocal = scratch_path / "vocal_mix_rate.wav"
         _ffmpeg(
             ["-y", "-loglevel", "error", "-i", str(original_vocal), "-ac", "1", "-ar", "44100", str(vocal)]
         )
         if compress:
-            processed = Path(scratch) / "vocal_processed.wav"
+            processed = scratch_path / "vocal_processed.wav"
             _ffmpeg(
                 [
                     "-y",
@@ -1187,64 +1236,89 @@ def mix_tracks(
                 ]
             )
             vocal = processed
-        if ducking:
-            ducked = Path(scratch) / "backing_ducked.wav"
-            _duck_backing(backing, vocal, ducked)
-            backing = ducked
+        mix_backing = backing
+        effective_duck = 0.0
+        if ducking and duck_db > 0:
+            mix_backing = scratch_path / "backing_ducked.wav"
+            _duck_backing(backing, vocal, mix_backing, duck_db)
+            effective_duck = duck_db
         return _mix_tracks_at_mix_rate(
             backing,
+            mix_backing,
             vocal,
             target,
+            scratch_path,
             vocal_level_db=vocal_level_db,
             backing_volume=backing_volume,
             reverb=reverb,
             normalize_peak_db=normalize_peak_db,
+            duck_db=effective_duck,
         )
 
 
 def _mix_tracks_at_mix_rate(
-    backing: Path,
+    measure_backing: Path,
+    mix_backing: Path,
     vocal: Path,
     target: Path,
+    scratch: Path,
     *,
     vocal_level_db: float,
     backing_volume: float,
     reverb: bool,
     normalize_peak_db: float | None,
+    duck_db: float = 0.0,
 ) -> dict:
-    backing_db, vocal_db = active_levels(backing, vocal)
+    backing_db, vocal_db = active_levels(measure_backing, vocal)
     vocal_gain_db = (backing_db + vocal_level_db) - vocal_db
     vocal_gain = 10.0 ** (vocal_gain_db / 20.0)
     trim_db = 20.0 * math.log10(backing_volume) if backing_volume > 0 else -120.0
-    balance_db = (vocal_db + vocal_gain_db) - (backing_db + trim_db)
+    balance_db = (vocal_db + vocal_gain_db) - (backing_db + trim_db - duck_db)
 
-    def render(output_gain_db: float) -> None:
-        _ffmpeg(
-            [
-                "-y",
-                "-i",
-                str(backing),
-                "-i",
-                str(vocal),
-                "-filter_complex",
-                _mix_filters(vocal_gain, backing_volume, reverb, output_gain_db),
-                "-map",
-                "[m]",
-                "-ar",
-                "44100",
-                str(target),
-            ]
-        )
+    def render(output_gain_db: float, destination: Path, float_output: bool = False) -> None:
+        command = [
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(mix_backing),
+            "-i",
+            str(vocal),
+            "-filter_complex",
+            _mix_filters(vocal_gain, backing_volume, reverb, output_gain_db),
+            "-map",
+            "[m]",
+            "-ar",
+            "44100",
+        ]
+        if float_output:
+            command += ["-f", "f32le"]
+        command.append(str(destination))
+        _ffmpeg(command)
 
-    render(0.0)
+    # Measure the true peak on a float render: the 16-bit file clamps at 0 dBFS, so a clipped
+    # peak cannot be told apart from a loud one, and a correction computed from it only ever
+    # turns the file down by the 1 dB margin.
+    probe = scratch / "probe_f32.raw"
+    render(0.0, probe, float_output=True)
+    true_peak = _float_peak_db(probe)
+    if normalize_peak_db is not None:
+        correction = round(normalize_peak_db - true_peak, 2)
+    elif true_peak > -0.1:
+        correction = round(-0.1 - true_peak, 2)  # clipping guard: raw level, but never clipped
+    else:
+        correction = 0.0
+    render(correction, target)
     peak = _peak_db(target)
 
-    # verify the balance by measurement: the finished mix holds band + vocal (uncorrelated),
-    # so subtracting the band's energy leaves the vocal's energy
+    # verify the balance by measurement on the uncorrected probe: the mix holds band + vocal
+    # (uncorrelated), so subtracting the ducked band's energy leaves the vocal's energy
     measured_db: float | None = None
     if not reverb:
-        mix_energy = measure_over_sung(vocal, [target])[0]
-        band_energy = (10.0 ** (backing_db / 20.0) * 32768.0) ** 2 * (backing_volume**2)
+        mix_energy = _f32_mix_energy_over_sung(vocal, probe)
+        band_energy = (
+            (10.0 ** (backing_db / 20.0) * 32768.0) ** 2 * (backing_volume**2) * 10.0 ** (-duck_db / 10.0)
+        )
         if band_energy > 0 and mix_energy > band_energy:
             measured_db = 10.0 * math.log10((mix_energy - band_energy) / band_energy)
     if measured_db is None:
@@ -1254,19 +1328,15 @@ def _mix_tracks_at_mix_rate(
     else:
         balance_check = "mismatch"
 
-    correction = 0.0
-    if normalize_peak_db is not None:
-        correction = round(normalize_peak_db - peak, 2)
-        if abs(correction) > 0.05:
-            render(correction)
-            peak = _peak_db(target)
     with wave.open(str(target), "rb") as handle:
         duration = handle.getnframes() / handle.getframerate()
     return {
         "peak_db": peak,
-        "clipping": peak > -0.1,
+        # whether the export itself clips; a hot raw mix is turned down (gain_correction_db)
+        "clipping": peak > -0.05,
         "gain_correction_db": correction,
         "normalize_peak_db": normalize_peak_db,
+        "duck_db": duck_db if duck_db > 0 else None,
         "duration_seconds": round(duration, 3),
         "backing_rms_db": round(backing_db, 1),
         "vocal_rms_db": round(vocal_db, 1),
@@ -1612,18 +1682,28 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         compress: Annotated[
             bool,
             Field(
-                description="Gentle high-pass and compressor on the vocal (default true): tames "
-                "the voice's note-to-note level swings before the balance is measured. Set false "
-                "to mix the raw voice.",
+                description="Gentle high-pass and compressor on the vocal (off by default): tames "
+                "the voice's note-to-note level swings before the balance is measured, but can "
+                "cost diction on dense, loud mixes — compare both when words matter most.",
             ),
-        ] = True,
+        ] = False,
         ducking: Annotated[
             bool,
             Field(
-                description="Duck the backing under the vocal with a side-chain compressor "
-                "(off by default), so the band steps back while the voice sings.",
+                description="Dip the backing under the vocal (off by default) so the band steps "
+                "back while the voice sings; the dip is duck_db deep and adds real headroom "
+                "(the vocal sits vocal_level_db + duck_db above the band during phrases).",
             ),
         ] = False,
+        duck_db: Annotated[
+            float,
+            Field(
+                ge=0.0,
+                le=12.0,
+                description="How deep the backing dips when ducking is on, in dB (default 4). "
+                "Ignored when ducking is off.",
+            ),
+        ] = 4.0,
         output_filename: Annotated[
             str | None, Field(description="Name for the mix (default: <source>_mix).")
         ] = None,
@@ -1703,6 +1783,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 normalize_peak_db=normalize_peak_db,
                 compress=compress,
                 ducking=ducking,
+                duck_db=duck_db,
             )
         return {
             "filename": target.name,
@@ -1716,6 +1797,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "vocal_level_db": vocal_level_db,
                 "backing_volume": backing_volume,
                 "normalize_peak_db": normalize_peak_db,
+                "duck_db": duck_db if ducking else None,
             },
             "backing_levels": backing_levels,
             "compress": compress,

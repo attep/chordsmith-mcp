@@ -6,9 +6,12 @@ import argparse
 import json
 import logging
 import os
+import tempfile
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
+import mido
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
@@ -16,7 +19,7 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__, audio, delivery, results, singing
+from chordsmith import __version__, audio, delivery, renderers, results, singing
 from chordsmith.analysis import analyze_file
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
@@ -47,6 +50,9 @@ Workflow:
    mix_song_with_vocals -> export_vocal_song (VOICEVOX for hums/kana, DiffSinger for English).
 5. Share: get_midi_file returns the file itself (base64 or a signed link); export_vocal_song
    does the same for the mix, vocal and source MIDI.
+6. Shape the sound: set_track_instrument stores per-track instrument specs (a soundfont per
+   track, trims) and render_audio with stems=true renders every track on its own and combines
+   them; list_instruments shows the engines this server can run.
 
 Conventions:
 - Files live in the output folder (see list_generated_files); '.mid'/'.wav'/'.mp3' is added to
@@ -186,7 +192,10 @@ Instrument = Annotated[
         "25 steel guitar, 48 strings, 88 pad.",
     ),
 ]
-Overwrite = Annotated[bool, Field(description="Replace an existing file with the same name.")]
+Overwrite = Annotated[
+    bool,
+    Field(description="Replace an existing file with the same name; otherwise the new file gets a number."),
+]
 
 
 def _parse_time_signature(text: str) -> tuple[int, int]:
@@ -593,10 +602,12 @@ def delete_midi_file(
 ) -> results.DeleteResult:
     """Delete a MIDI file from the output folder.
 
-    Removes the file permanently and returns its name; use list_generated_files to confirm the
-    name first. Fails with a clear message when the file does not exist.
+    Removes the file permanently (and its per-track instrument sidecar, if any) and returns its
+    name; use list_generated_files to confirm the name first. Fails with a clear message when
+    the file does not exist.
     """
     path = store.remove(filename)
+    renderers.specs_path(path).unlink(missing_ok=True)
     return {"deleted": path.name}
 
 
@@ -608,9 +619,14 @@ def rename_midi_file(
     """Rename a MIDI file. Refuses to overwrite an existing file.
 
     Changes the file's name in place and returns the new name/path. If the target name exists,
-    the call fails and nothing changes.
+    the call fails and nothing changes. A per-track instrument sidecar (set_track_instrument)
+    moves with the file.
     """
+    source = store.existing_path(filename)
     target = store.rename(filename, new_name)
+    sidecar = renderers.specs_path(source)
+    if sidecar.is_file():
+        sidecar.replace(renderers.specs_path(target))
     return {"filename": target.name, "path": str(target), "uri": f"midi://{target.name}"}
 
 
@@ -625,6 +641,15 @@ def render_audio(
             description="Path to a .sf2 soundfont. Default: CHORDSMITH_SOUNDFONT or a standard system path."
         ),
     ] = None,
+    stems: Annotated[
+        bool,
+        Field(
+            description="Render each track as its own wav stem (using set_track_instrument "
+            "specs) and combine them into the mix. Slower: one render per track; stems always "
+            "get unique names and are returned in the 'stems' list (URL delivery is recommended "
+            "when there is more than one)."
+        ),
+    ] = False,
     output_filename: FileName = None,
     expires_in: Annotated[
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
@@ -635,10 +660,14 @@ def render_audio(
 
     Creates an audio file next to the MIDI files and returns it like get_midi_file (base64 bytes
     or a signed, expiring URL), plus the source name and, for wav, the duration in seconds. MP3
-    needs ffmpeg; FluidSynth and a soundfont are required (both are in the Docker image). On
-    failure a clear error explains what is missing and no file is left behind.
+    needs ffmpeg; FluidSynth and a soundfont are required (both are in the Docker image). With
+    ``stems``, each track is rendered on its own (per-track soundfont/gain from
+    set_track_instrument) and the stems are combined into the mix; the result then also lists
+    every stem. On failure a clear error explains what is missing and no file is left behind.
     """
     source = store.existing_path(filename)
+    if stems:
+        return _render_stems(source, format, return_as, expires_in, output_filename, overwrite, soundfont)
     with store.claimed_path(
         output_filename or source.stem, f"{source.stem}_{format}", overwrite, f".{format}"
     ) as target:
@@ -652,6 +681,64 @@ def render_audio(
     result["source"] = source.name
     if format == "wav":
         result["duration_seconds"] = round(audio.wav_duration(target), 2)
+    return result
+
+
+def _render_stems(
+    source: Path,
+    audio_format: str,
+    return_as: str,
+    expires_in: int,
+    output_filename: str | None,
+    overwrite: bool,
+    soundfont: str | None,
+) -> dict[str, Any]:
+    """Render every note track on its own and combine the stems into the mix."""
+    midi = mido.MidiFile(source)
+    specs = renderers.load_specs(source)
+    names = renderers.track_names(midi)
+    tracks = renderers.note_tracks(midi)
+    if not tracks:
+        raise ValueError("This file has no note tracks to render.")
+    stems: list[renderers.Stem] = []
+    with tempfile.TemporaryDirectory() as scratch:
+        for index in tracks:
+            name = names[index]
+            stem_midi = Path(scratch) / f"stem_{index}.mid"
+            singing.extract_track(source, stem_midi, index)
+            spec = specs.get(name) or renderers.InstrumentSpec(preset=soundfont)
+            renderer = renderers.get_renderer(spec.engine)
+            with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
+                try:
+                    renderer.render(stem_midi, spec, stem_wav)
+                except renderers.RenderError as exc:
+                    raise ValueError(f"Track '{name}': {exc}") from None
+            stems.append(renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db))
+        with store.claimed_path(
+            output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
+        ) as target:
+            combined = target if audio_format == "wav" else Path(scratch) / "mix.wav"
+            try:
+                renderers.combine_stems(stems, combined)
+                if audio_format == "mp3":
+                    singing.to_mp3(combined, target)
+            except renderers.RenderError as exc:
+                raise ValueError(str(exc)) from None
+    data = target.read_bytes()
+    result = delivery.deliver_file(target.name, data, return_as, expires_in)
+    result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
+    result["source"] = source.name
+    if audio_format == "wav":
+        result["duration_seconds"] = round(audio.wav_duration(target), 2)
+    result["stems"] = [
+        {
+            **delivery.deliver_file(stem.path.name, stem.path.read_bytes(), return_as, expires_in),
+            "mime_type": "audio/wav",
+            "track": stem.track,
+            "gain_db": stem.gain_db,
+        }
+        for stem in stems
+    ]
     return result
 
 
@@ -770,6 +857,7 @@ def _configure_transport_security(public_url: str) -> None:
 
 
 singing.register(mcp, lambda: store)
+renderers.register(mcp, lambda: store)
 
 
 def main() -> None:

@@ -12,6 +12,32 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.8.0] - 2026-10-10
+
+### Added
+
+- **Per-track rendering and stems.** `render_audio` with `stems: true` renders every track on
+  its own and sums the stems into the mix; the result lists each stem with track name, gain,
+  sha256 and bytes or a signed link. `set_track_instrument` stores per-track specs (a `.sf2`
+  soundfont per track, a trim) in a JSON sidecar that follows the file through rename and
+  delete; `list_instruments` reports the engines this server can run. Engines are invoked as
+  **separate processes**, so a crashing or differently licensed (GPL) host can never take the
+  server down or enter this MIT codebase.
+- **Ducking depth (`duck_db`, 0–12 dB, default 4).** With ducking on, the vocal now sits
+  `vocal_level_db + duck_db` above the band while singing: the dip is applied *after* the gain
+  is computed on the original backing. The previous version measured the ducked backing, so the
+  vocal was turned down by the same amount and the dip cancelled itself out.
+- **True-peak clipping guard.** The peak is measured on a float render before the 16-bit
+  export, so a hot mix is turned down from its true peak and a clipped file is never written —
+  even with `normalize_peak_db: null`.
+
+### Changed
+
+- `compress` now defaults to **false**: it halves the voice's level swings (measured ~±4.5 dB
+  to ~±2.5) but costs diction on dense, loud mixes (89/102 against 95/102 on a death-metal
+  test), so it is opt-in.
+- The `overwrite` option's description now mentions the numbered-name fallback (`song_2.wav`).
+
 ## [0.7.1] - 2026-10-10
 
 ### Fixed

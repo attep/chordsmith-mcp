@@ -34,7 +34,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 18
+    assert len(tools) == 20
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

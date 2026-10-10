@@ -184,22 +184,25 @@ finished mix by subtracting the band's energy) with a `balance_check` flag (`ok`
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.
 
-The mix has level, per-stem trims, a vocal compressor and ducking, plus normalization — no EQ.
-When the band masks the voice (cymbals are the usual culprit), shape it in the arrangement (keep
-cymbals out from under the vocal, write softer velocities), raise `vocal_level_db`, trim the
-offending track with `backing_levels`, or turn on `ducking`.
+The mix has level, per-stem trims, an optional vocal compressor, optional ducking, and
+normalization — no EQ. The peak is measured on a float render before the 16-bit export, so a hot
+mix is turned down from its true peak and a clipped file is never written (`clipping` reports
+whether the export clips; `gain_correction_db` shows the correction). When the band masks the
+voice (cymbals are the usual culprit), shape it in the arrangement (keep cymbals out from under
+the vocal, write softer velocities), raise `vocal_level_db`, trim the offending track with
+`backing_levels`, or turn on `ducking`.
 
-**Vocal dynamics (`compress`, default on):** the vocal gets a gentle high-pass and compressor
-before the balance is measured, because DiffSinger can swing about 6 dB between notes — measured
-in half-second windows, the raw voice moves ±6 dB while the compressed one stays within ~±2. Set
-`compress: false` to mix the raw voice. On dense, loud mixes the compressor can cost a few words
-of diction (on a death-metal test it scored 89/102 compressed against 95/102 raw), so compare
-both when the words matter most.
+**Vocal dynamics (`compress`, off by default):** the vocal gets a gentle high-pass and compressor
+before the balance is measured, which roughly halves its note-to-note level swings (measured on
+two songs: about ±4.5 dB raw, ±2.5 dB compressed). It can cost diction on dense, loud mixes (a
+death-metal test scored 89/102 compressed against 95/102 raw), so it is off by default — turn it
+on when smoothness matters more than the last few words.
 
-**Ducking (`ducking`, default off):** the vocal's envelope dips the backing about 4 dB with a
-fast attack and a slow release, so the band steps back while the voice sings and recovers
-between phrases. The dip is computed from the vocal before the balance measurement, so the
-reported balance stays honest.
+**Ducking (`ducking`, off by default; `duck_db`, default 4):** the vocal's envelope dips the
+backing `duck_db` dB while the voice sings, with a fast attack and a slow release. The dip is
+applied **after** the balance is computed on the original backing, so it adds real headroom: the
+vocal sits `vocal_level_db + duck_db` above the band during phrases (reported as
+`vocal_to_backing_db`), and the band returns to its own level between phrases.
 
 **Per-stem levels:** `backing_levels` takes per-track dB trims keyed by track name, e.g.
 `{"Drums": -4, "Pad": 2}`. Each backing track is rendered separately and mixed with its trim, so
