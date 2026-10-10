@@ -12,6 +12,27 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.6.0] - 2026-10-10
+
+### Added
+
+- **Loop patterns in `add_track`**: `loop: {"length_beats": 4, "times": 48}` writes a one-bar
+  drum or bass groove once and tiles it across the song, instead of hundreds of hand-written
+  notes (up to 20 000 notes after tiling; notes must fit inside the pattern window).
+- **Chord hit positions**: `rhythm.hits` places the chord at explicit beats inside each chord,
+  e.g. `[0, 0.75, 1.5, 2.25]` for off-beat stabs, chugs and gallops. Overrides
+  pattern/subdivision/swing; gate, velocity and humanize still apply.
+- **Per-stem backing levels**: `mix_song_with_vocals` accepts `backing_levels`, dB trims keyed
+  by track name (`{"Drums": -4, "Pad": 2}`). Each backing track is rendered separately and mixed
+  with its trim, so drums, bass and pads can be balanced against each other; it costs one render
+  per track. The result echoes the trims.
+- **Rate limiting** on the MCP endpoint, per the specification's security requirements: requests
+  are capped per client (`CHORDSMITH_RATE_LIMIT`, default 120 per minute, `0` disables) and
+  over-limit calls get `429` with `Retry-After`. Clients are told apart by a hash of their bearer
+  token, so the limit works behind the tunnel; stdio is unaffected.
+- Docs: `add_track` loop example, `rhythm.hits` reference, per-stem mixing notes, and the
+  `CHORDSMITH_RATE_LIMIT` setting.
+
 ## [0.5.4] - 2026-10-10
 
 ### Fixed
