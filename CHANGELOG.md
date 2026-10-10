@@ -12,6 +12,17 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.6.1] - 2026-10-10
+
+### Fixed
+
+- **Concurrent mixes no longer share a backing file.** The backing wav/midi are internal
+  intermediates, but they were claimed with the caller's `overwrite` flag, so two mixes of the
+  same song running at once with `overwrite: true` both wrote `song_backing.wav` — one could
+  read a half-written file. The backing is now always claimed under a unique name; `overwrite`
+  applies only to the final mix. A regression test runs two concurrent overwriting mixes and
+  asserts distinct backings.
+
 ## [0.6.0] - 2026-10-10
 
 ### Added

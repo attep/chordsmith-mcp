@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import asyncio
 import base64
 import hashlib
 import io
@@ -1030,6 +1031,48 @@ async def test_mix_per_stem_levels_render_each_track(store, monkeypatch):
     # two stems (Chords and Bass); the guide (Melody) is left out and unlisted Chords keeps 0 dB
     assert len(rendered) == 2 and len(mixed["stems"]) == 2
     assert mixed["levels"] == [0.0, -6.0]
+
+
+async def test_concurrent_mixes_get_distinct_backings(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    backings = []
+
+    def fake_render(source, target, audio_format, soundfont=None):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        backings.append(backing.name)
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+
+    async def mix_once(name):
+        return await _call(
+            "mix_song_with_vocals",
+            {"source": song, "vocal": "vocal.wav", "output_filename": name, "overwrite": True},
+        )
+
+    first, second = await asyncio.gather(mix_once("mix_a"), mix_once("mix_b"))
+    assert not first.isError and not second.isError
+    # even with overwrite=true, each mix renders its own backing (no shared intermediate)
+    assert first.structuredContent["backing"] != second.structuredContent["backing"]
+    assert len(set(backings)) == 2
+    assert (store.root / first.structuredContent["backing"]).is_file()
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")

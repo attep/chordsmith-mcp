@@ -1576,12 +1576,15 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 available = ", ".join(names[index] for index in note_tracks) or "(none)"
                 raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
         with (
-            store.claimed_path(None, f"{source_path.stem}_backing", overwrite, ".wav") as backing_wav,
+            # The backing is an internal intermediate: always claim a unique name, even when the
+            # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
+            # the same backing file.
+            store.claimed_path(None, f"{source_path.stem}_backing", extension=".wav") as backing_wav,
             store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
         ):
             if backing_levels is None:
                 with store.claimed_path(
-                    None, f"{source_path.stem}_backing", overwrite, ".mid"
+                    None, f"{source_path.stem}_backing", extension=".mid"
                 ) as backing_midi:
                     remove_track(source_path, backing_midi, track_index)
                     audio.render(backing_midi, backing_wav, "wav")
