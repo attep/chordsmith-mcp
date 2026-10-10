@@ -276,6 +276,8 @@ class MixResult(TypedDict):
     backing: str
     levels: MixLevels
     backing_levels: dict[str, float] | None
+    compress: bool | None
+    ducking: bool | None
     guide_removed: str
     peak_db: float
     clipping: bool

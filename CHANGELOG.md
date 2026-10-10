@@ -12,6 +12,21 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.7.0] - 2026-10-10
+
+### Added
+
+- **Vocal dynamics (`compress`, default on)**: the vocal gets a gentle high-pass and compressor
+  before the balance is measured, because DiffSinger can swing about 6 dB between notes —
+  measured in half-second windows. `compress: false` mixes the raw voice.
+- **Ducking (`ducking`, default off)**: the vocal's envelope dips the backing about 4 dB with a
+  fast attack and a slow release, so the band steps back while the voice sings. The dip is
+  computed in Python before the balance measurement (ffmpeg's `sidechaincompress` truncates its
+  output unpredictably), so the reported balance stays honest.
+- A gentle safety limiter on the mix bus under the -1 dBFS export level, so transient peaks are
+  caught before the export normalization.
+- The mix result echoes `compress` and `ducking`.
+
 ## [0.6.1] - 2026-10-10
 
 ### Fixed

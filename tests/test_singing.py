@@ -466,7 +466,7 @@ def test_mix_balances_levels_by_measurement(tmp_path):
     _write_sine_wav(backing, 440.0, 3000, channels=2)
     _write_sine_wav(vocal, 660.0, 24000)
     target = tmp_path / "mix.wav"
-    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0)
+    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, compress=False)
     backing_db, vocal_db = singing.active_levels(backing, vocal)
     expected_gain = backing_db + 6.0 - vocal_db
     assert abs(info["vocal_gain_db"] - expected_gain) <= 0.2  # the loud vocal is turned down
@@ -489,7 +489,7 @@ def test_mix_vocal_level_is_exact_after_stereo_pan(tmp_path):
     _write_constant_wav(vocal, 12000)
     target = tmp_path / "mix.wav"
     info = singing.mix_tracks(
-        backing, vocal, target, vocal_level_db=6.0, backing_volume=0.0, normalize_peak_db=None
+        backing, vocal, target, vocal_level_db=6.0, backing_volume=0.0, normalize_peak_db=None, compress=False
     )
     backing_db, vocal_db = singing.active_levels(backing, vocal)
     expected_mix_vocal_db = vocal_db + info["vocal_gain_db"]
@@ -516,6 +516,113 @@ def test_mix_measures_the_vocal_at_the_mix_rate(tmp_path):
     info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0)
     assert info["balance_check"] == "ok"
     assert abs(info["vocal_to_backing_measured_db"] - 6.0) <= 1.0
+
+
+def _window_rms_db(path, start_s, end_s, rate=44100):
+    with wave.open(str(path), "rb") as handle:
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+        channels = handle.getnchannels()
+    frames = len(samples) // channels
+    start = max(0, round(start_s * rate))
+    end = min(frames, round(end_s * rate))
+    total = 0.0
+    count = 0
+    for frame in range(start, end, 4):
+        for channel in range(channels):
+            value = samples[frame * channels + channel] / 32768.0
+            total += value * value
+            count += 1
+    return 20 * math.log10(max(math.sqrt(total / count), 1e-9)) if count else -120.0
+
+
+def _write_block_vocal(path, amplitudes, block_s=0.5, rate=44100, frequency=440.0):
+    samples = array.array("h")
+    for amplitude in amplitudes:
+        frames = round(block_s * rate)
+        samples.extend(round(amplitude * math.sin(2 * math.pi * frequency * i / rate)) for i in range(frames))
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_compressor_tames_the_vocal_dynamics(tmp_path):
+    # DiffSinger can swing ~6 dB between notes; the default vocal chain (high-pass + gentle
+    # compressor) must reduce that swing before the balance is measured
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 1500, seconds=4.0, channels=2)
+    _write_block_vocal(vocal, [24000, 2400] * 4)
+    plain = tmp_path / "plain.wav"
+    compressed = tmp_path / "compressed.wav"
+    singing.mix_tracks(backing, vocal, plain, compress=False)
+    singing.mix_tracks(backing, vocal, compressed, compress=True)
+
+    def swing(path):
+        levels = [_window_rms_db(path, start, start + 0.4) for start in (0.05, 0.55, 1.05, 1.55)]
+        return max(levels) - min(levels)
+
+    assert swing(compressed) < swing(plain) - 2.0
+    assert swing(compressed) < 8.0
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_ducking_lowers_the_backing_under_the_voice(tmp_path):
+    # the vocal's envelope dips the backing: right after the voice stops, the backing must still
+    # be recovering (slow release), so the ducked mix is lower than the plain one
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 8000, seconds=2.0, channels=2)
+    _write_block_vocal(vocal, [20000, 0], block_s=1.0)
+    plain = tmp_path / "plain.wav"
+    ducked = tmp_path / "ducked.wav"
+    singing.mix_tracks(backing, vocal, plain, compress=False, normalize_peak_db=None)
+    singing.mix_tracks(backing, vocal, ducked, compress=False, ducking=True, normalize_peak_db=None)
+    plain_tail = _window_rms_db(plain, 1.05, 1.35)
+    ducked_tail = _window_rms_db(ducked, 1.05, 1.35)
+    assert ducked_tail < plain_tail - 1.0
+    # and the quiet part is untouched once the compressor has released
+    assert abs(_window_rms_db(plain, 1.8, 2.0) - _window_rms_db(ducked, 1.8, 2.0)) < 0.5
+
+
+async def test_mix_echoes_compress_and_ducking(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    captured = {}
+
+    def fake_render(source, target, audio_format, soundfont=None):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        captured.update(kwargs)
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    result = await _call(
+        "mix_song_with_vocals",
+        {"source": song, "vocal": "vocal.wav", "compress": False, "ducking": True},
+    )
+    assert not result.isError
+    assert result.structuredContent["compress"] is False
+    assert result.structuredContent["ducking"] is True
+    assert captured["compress"] is False and captured["ducking"] is True
 
 
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")

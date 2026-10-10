@@ -977,7 +977,62 @@ def _mix_filters(vocal_gain: float, backing_volume: float, reverb: bool, output_
     )
     if output_gain_db:
         filters += f",volume={output_gain_db:.2f}dB"
+    # a gentle safety limiter under the -1 dBFS export level; it only attenuates above the limit
+    filters += ",alimiter=limit=0.891:level=disabled:attack=5:release=80"
     return filters + "[m]"
+
+
+DUCK_DB = 4.0  # how far the backing steps back while the voice sings
+DUCK_THRESHOLD_DB = -36.0  # vocal block level that counts as "singing"
+DUCK_BLOCK_MS = 25.0
+
+
+def _duck_backing(backing: Path, vocal: Path, target: Path) -> None:
+    """Write the backing with a gain dip wherever the voice sings (ducking).
+
+    ffmpeg's sidechaincompress truncates its output unpredictably, so the envelope is computed
+    here instead: the vocal is measured in short blocks, the dip is smoothed with a fast attack
+    and a slow release, and the backing is scaled per block with a linear ramp between blocks.
+    The measurement then sees the ducked backing, so the balance stays honest.
+    """
+    import array
+    import math
+
+    vocal_samples, vocal_channels, vocal_rate = _read_pcm(vocal)
+    backing_samples, channels, rate = _read_pcm(backing)
+    block = max(1, round(rate * DUCK_BLOCK_MS / 1000.0))
+    vocal_block = max(1, round(vocal_rate * DUCK_BLOCK_MS / 1000.0))
+    frames = len(backing_samples) // channels
+    duck_gain = 10.0 ** (-DUCK_DB / 20.0)
+    attack = 1.0 - math.exp(-DUCK_BLOCK_MS / 1000.0 / 0.02)
+    release = 1.0 - math.exp(-DUCK_BLOCK_MS / 1000.0 / 0.30)
+    gains: list[float] = []
+    gain = 1.0
+    blocks = (frames + block - 1) // block
+    for index in range(blocks):
+        start = index * vocal_block
+        energy = _block_energy(vocal_samples, start, vocal_block, vocal_channels, stride=1)
+        level_db = 20.0 * math.log10(math.sqrt(energy) / 32768.0) if energy > 0 else -120.0
+        target_gain = duck_gain if level_db > DUCK_THRESHOLD_DB else 1.0
+        gain += (target_gain - gain) * (attack if target_gain < gain else release)
+        gains.append(gain)
+    out = array.array("h", bytes(2 * len(backing_samples)))
+    for index in range(blocks):
+        start = index * block
+        end = min(start + block, frames)
+        previous = gains[index - 1] if index else gains[0]
+        current = gains[index]
+        span = max(1, end - start)
+        for frame in range(start, end):
+            value = previous + (current - previous) * (frame - start) / span
+            offset = frame * channels
+            for channel in range(channels):
+                out[offset + channel] = int(backing_samples[offset + channel] * value)
+    with wave.open(str(target), "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(out.tobytes())
 
 
 def gated_rms_db(path: Path, gate: float = 0.004) -> float:
@@ -1096,12 +1151,18 @@ def mix_tracks(
     backing_volume: float = 1.0,
     reverb: bool = False,
     normalize_peak_db: float | None = -1.0,
+    compress: bool = True,
+    ducking: bool = False,
 ) -> dict:
     """Mix the vocal into the backing, balancing levels by measurement.
 
     ``vocal_level_db`` is the target level of the vocal *above the band*, both measured over the
     blocks where the voice is singing, so quiet backings and loud vocals are corrected instead
-    of being multiplied blindly. The vocal is converted to the mix rate before measuring: the
+    of being multiplied blindly. With ``compress`` (default) the vocal gets a gentle high-pass
+    and compressor before the measurement, so its per-note level swings (DiffSinger can move
+    ~6 dB between notes) are tamed and the balance is computed on what actually lands in the
+    file. ``ducking`` makes the vocal drive a compressor on the backing, so the band steps back
+    while the voice sings. The vocal is converted to the mix rate before measuring: the
     resampler's anti-alias filter costs 24 kHz engine output a couple of dB, and the level that
     matters is the one in the finished file. The finished mix is normalized to
     ``normalize_peak_db`` (default -1 dBFS; pass None to keep the raw level) so exports are not
@@ -1113,6 +1174,25 @@ def mix_tracks(
         _ffmpeg(
             ["-y", "-loglevel", "error", "-i", str(original_vocal), "-ac", "1", "-ar", "44100", str(vocal)]
         )
+        if compress:
+            processed = Path(scratch) / "vocal_processed.wav"
+            _ffmpeg(
+                [
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(vocal),
+                    "-af",
+                    "highpass=f=75,acompressor=threshold=-24dB:ratio=3:attack=10:release=250:makeup=2",
+                    str(processed),
+                ]
+            )
+            vocal = processed
+        if ducking:
+            ducked = Path(scratch) / "backing_ducked.wav"
+            _duck_backing(backing, vocal, ducked)
+            backing = ducked
         return _mix_tracks_at_mix_rate(
             backing,
             vocal,
@@ -1531,6 +1611,21 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "(default -1.0); set null to keep the raw level.",
             ),
         ] = -1.0,
+        compress: Annotated[
+            bool,
+            Field(
+                description="Gentle high-pass and compressor on the vocal (default true): tames "
+                "the voice's note-to-note level swings before the balance is measured. Set false "
+                "to mix the raw voice.",
+            ),
+        ] = True,
+        ducking: Annotated[
+            bool,
+            Field(
+                description="Duck the backing under the vocal with a side-chain compressor "
+                "(off by default), so the band steps back while the voice sings.",
+            ),
+        ] = False,
         output_filename: Annotated[
             str | None, Field(description="Name for the mix (default: <source>_mix).")
         ] = None,
@@ -1608,6 +1703,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 backing_volume=backing_volume,
                 reverb=reverb,
                 normalize_peak_db=normalize_peak_db,
+                compress=compress,
+                ducking=ducking,
             )
         return {
             "filename": target.name,
@@ -1623,6 +1720,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "normalize_peak_db": normalize_peak_db,
             },
             "backing_levels": backing_levels,
+            "compress": compress,
+            "ducking": ducking,
             "guide_removed": _track_names(midi)[track_index],
             **info,
         }

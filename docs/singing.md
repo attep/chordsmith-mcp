@@ -184,10 +184,20 @@ finished mix by subtracting the band's energy) with a `balance_check` flag (`ok`
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.
 
-The mix has level, reverb and normalization only — no ducking or EQ. When the band masks the
-voice (cymbals are the usual culprit), shape it in the arrangement (keep cymbals out from under
-the vocal, write softer velocities), raise `vocal_level_db`, or trim the offending track with
-`backing_levels` below.
+The mix has level, per-stem trims, a vocal compressor and ducking, plus normalization — no EQ.
+When the band masks the voice (cymbals are the usual culprit), shape it in the arrangement (keep
+cymbals out from under the vocal, write softer velocities), raise `vocal_level_db`, trim the
+offending track with `backing_levels`, or turn on `ducking`.
+
+**Vocal dynamics (`compress`, default on):** the vocal gets a gentle high-pass and compressor
+before the balance is measured, because DiffSinger can swing about 6 dB between notes — measured
+in half-second windows, the raw voice moves ±6 dB while the compressed one stays within ~±2. Set
+`compress: false` to mix the raw voice.
+
+**Ducking (`ducking`, default off):** the vocal's envelope dips the backing about 4 dB with a
+fast attack and a slow release, so the band steps back while the voice sings and recovers
+between phrases. The dip is computed from the vocal before the balance measurement, so the
+reported balance stays honest.
 
 **Per-stem levels:** `backing_levels` takes per-track dB trims keyed by track name, e.g.
 `{"Drums": -4, "Pad": 2}`. Each backing track is rendered separately and mixed with its trim, so
