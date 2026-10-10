@@ -965,6 +965,86 @@ async def test_mix_accepts_a_job_id(store, fake_engine, monkeypatch):
     assert result.structuredContent["vocal"] == job["filename"]
 
 
+async def _make_band_song(store):
+    """A song with chords, a Bass track and a Melody track (for backing-level tests)."""
+    song = await _make_song(store)
+    notes = [
+        {"pitch": pitch, "start_beat": start, "beats": 1.0, "velocity": 80}
+        for pitch, start in [("C2", 0), ("F2", 1), ("C2", 2), ("G2", 3)]
+    ]
+    result = await _call("add_track", {"filename": song, "track_name": "Bass", "notes": notes})
+    return result.structuredContent["filename"]
+
+
+async def test_mix_per_stem_levels_validate_track_names(store):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    result = await _call(
+        "mix_song_with_vocals",
+        {"source": song, "vocal": "vocal.wav", "backing_levels": {"Nope": -3}},
+    )
+    assert result.isError
+    assert "Nope" in result.content[0].text and "Bass" in result.content[0].text
+
+
+async def test_mix_per_stem_levels_render_each_track(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    rendered = []
+    mixed = {}
+
+    def fake_render(source, target, audio_format, soundfont=None):
+        rendered.append(source.name)
+        target.write_bytes(b"RIFF0000")
+
+    def fake_stems(stems, levels, target):
+        mixed["stems"] = list(stems)
+        mixed["levels"] = list(levels)
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "_mix_stems", fake_stems)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    result = await _call(
+        "mix_song_with_vocals",
+        {"source": song, "vocal": "vocal.wav", "backing_levels": {"Bass": -6}},
+    )
+    assert not result.isError
+    assert result.structuredContent["backing_levels"] == {"Bass": -6.0}
+    # two stems (Chords and Bass); the guide (Melody) is left out and unlisted Chords keeps 0 dB
+    assert len(rendered) == 2 and len(mixed["stems"]) == 2
+    assert mixed["levels"] == [0.0, -6.0]
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_stems_applies_levels(tmp_path):
+    loud = tmp_path / "a.wav"
+    quiet = tmp_path / "b.wav"
+    _write_constant_wav(loud, 8000, channels=2)
+    _write_constant_wav(quiet, 8000, channels=2)
+    full = tmp_path / "full.wav"
+    trimmed = tmp_path / "trimmed.wav"
+    singing._mix_stems([loud, quiet], [0.0, 0.0], full)
+    singing._mix_stems([loud, quiet], [0.0, -20.0], trimmed)
+    assert singing.gated_rms_db(trimmed) < singing.gated_rms_db(full) - 2.0
+
+
 def test_patch_graph_seeds_random_nodes():
     onnx = pytest.importorskip("onnx")
     node = onnx.helper.make_node("RandomNormal", [], ["out"], shape=[2, 2])

@@ -275,6 +275,7 @@ class MixResult(TypedDict):
     vocal: str
     backing: str
     levels: MixLevels
+    backing_levels: dict[str, float] | None
     guide_removed: str
     peak_db: float
     clipping: bool

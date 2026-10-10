@@ -184,9 +184,15 @@ finished mix by subtracting the band's energy) with a `balance_check` flag (`ok`
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.
 
-The mix has level, reverb and normalization only — no ducking, EQ or per-track levels. When the
-band masks the voice (cymbals are the usual culprit), shape it in the arrangement (keep cymbals
-out from under the vocal, write softer velocities) or raise `vocal_level_db`.
+The mix has level, reverb and normalization only — no ducking or EQ. When the band masks the
+voice (cymbals are the usual culprit), shape it in the arrangement (keep cymbals out from under
+the vocal, write softer velocities), raise `vocal_level_db`, or trim the offending track with
+`backing_levels` below.
+
+**Per-stem levels:** `backing_levels` takes per-track dB trims keyed by track name, e.g.
+`{"Drums": -4, "Pad": 2}`. Each backing track is rendered separately and mixed with its trim, so
+a loud drum track can sit under the pad without touching the arrangement; tracks not listed keep
+their level. It costs one render per track, so the mix takes longer.
 
 ## Settings
 

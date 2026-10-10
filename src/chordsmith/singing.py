@@ -1219,6 +1219,27 @@ def remove_track(source: Path, target: Path, track_index: int) -> None:
     midi.save(target)
 
 
+def extract_track(source: Path, target: Path, track_index: int) -> None:
+    """Write a copy of ``source`` with the conductor track and one note track (a stem)."""
+    midi = mido.MidiFile(source)
+    keep = [0, track_index] if track_index != 0 else [0]
+    midi.tracks = [midi.tracks[index] for index in keep]
+    midi.save(target)
+
+
+def _mix_stems(stems: list[Path], levels_db: list[float], target: Path) -> None:
+    """Combine rendered stems into one backing wav, applying a dB trim per stem."""
+    args = ["-y"]
+    for stem in stems:
+        args += ["-i", str(stem)]
+    filters = ";".join(
+        f"[{index}:a]volume={10 ** (level / 20.0):.4f}[s{index}]" for index, level in enumerate(levels_db)
+    )
+    inputs = "".join(f"[s{index}]" for index in range(len(stems)))
+    filters += f";{inputs}amix=inputs={len(stems)}:duration=longest:normalize=0[m]"
+    _ffmpeg([*args, "-filter_complex", filters, "-map", "[m]", "-ar", "44100", str(target)])
+
+
 # ------------------------------------------------------------------ MCP tools
 
 
@@ -1489,6 +1510,15 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         backing_volume: Annotated[
             float, Field(ge=0.0, le=2.0, description="Backing trim (1.0 = the rendered level).")
         ] = 1.0,
+        backing_levels: Annotated[
+            dict[str, Annotated[float, Field(ge=-24.0, le=12.0)]] | None,
+            Field(
+                description="Per-track backing trims in dB, keyed by track name, e.g. "
+                "{'Drums': -4, 'Pad': 2}. Each track is rendered separately and mixed with its "
+                "trim, so the mix is slower; tracks not listed keep their level. Omit for a "
+                "single backing render."
+            ),
+        ] = None,
         reverb: Annotated[
             bool, Field(description="Gentle reverb on the vocal (off by default: clarity first).")
         ] = False,
@@ -1511,11 +1541,13 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         Creates the backing and mix wavs (guide track left out). Levels are balanced by
         measurement: the vocal is placed ``vocal_level_db`` above the backing's active level,
         measured over the blocks where the voice sings, so quiet backings and loud vocals are
-        corrected instead of multiplied blindly. The result reports the achieved
-        vocal_to_backing_db and a balance_check of 'ok'/'mismatch'/'unavailable' (unavailable when
-        reverb is on: the measurement assumes dry signals). The mix is normalized to
-        normalize_peak_db unless null, and clipped exports are turned down (see clipping and
-        gain_correction_db).
+        corrected instead of multiplied blindly. With ``backing_levels`` each backing track is
+        rendered separately and trimmed by its dB value before mixing, so drums, bass and pads
+        can be balanced against each other (slower: one render per track). The result reports the
+        achieved vocal_to_backing_db and a balance_check of 'ok'/'mismatch'/'unavailable'
+        (unavailable when reverb is on: the measurement assumes dry signals). The mix is
+        normalized to normalize_peak_db unless null, and clipped exports are turned down (see
+        clipping and gain_correction_db).
         """
         store = _get_store()
         assert store is not None
@@ -1530,13 +1562,41 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             vocal_path = store.existing_media_path(vocal)
         midi = mido.MidiFile(source_path)
         track_index = find_track(midi, guide_track)
+        names = _track_names(midi)
+        note_tracks = [
+            index
+            for index, track in enumerate(midi.tracks)
+            if index != track_index and any(msg.type == "note_on" and msg.velocity > 0 for msg in track)
+        ]
+        if backing_levels is not None:
+            if midi.type == 0:
+                raise SingingError("Per-stem levels need a type-1 file with separate tracks.")
+            unknown = sorted(set(backing_levels) - {names[index] for index in note_tracks})
+            if unknown:
+                available = ", ".join(names[index] for index in note_tracks) or "(none)"
+                raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
         with (
-            store.claimed_path(None, f"{source_path.stem}_backing", overwrite, ".mid") as backing_midi,
             store.claimed_path(None, f"{source_path.stem}_backing", overwrite, ".wav") as backing_wav,
             store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
         ):
-            remove_track(source_path, backing_midi, track_index)
-            audio.render(backing_midi, backing_wav, "wav")
+            if backing_levels is None:
+                with store.claimed_path(
+                    None, f"{source_path.stem}_backing", overwrite, ".mid"
+                ) as backing_midi:
+                    remove_track(source_path, backing_midi, track_index)
+                    audio.render(backing_midi, backing_wav, "wav")
+            else:
+                with tempfile.TemporaryDirectory() as scratch:
+                    stems: list[Path] = []
+                    levels: list[float] = []
+                    for index in note_tracks:
+                        stem_midi = Path(scratch) / f"stem_{index}.mid"
+                        stem_wav = Path(scratch) / f"stem_{index}.wav"
+                        extract_track(source_path, stem_midi, index)
+                        audio.render(stem_midi, stem_wav, "wav")
+                        stems.append(stem_wav)
+                        levels.append(backing_levels.get(names[index], 0.0))
+                    _mix_stems(stems, levels, backing_wav)
             info = mix_tracks(
                 backing_wav,
                 vocal_path,
@@ -1559,6 +1619,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "backing_volume": backing_volume,
                 "normalize_peak_db": normalize_peak_db,
             },
+            "backing_levels": backing_levels,
             "guide_removed": _track_names(midi)[track_index],
             **info,
         }
