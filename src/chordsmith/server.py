@@ -21,7 +21,7 @@ from chordsmith.analysis import analyze_file
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
 from chordsmith.midi_writer import transpose_file, write_progression
-from chordsmith.models import ChordEvent, Humanize, NoteInput, NumeralEvent, Rhythm, Voicing
+from chordsmith.models import ChordEvent, Humanize, LoopSpec, NoteInput, NumeralEvent, Rhythm, Voicing
 from chordsmith.storage import FileStore, StorageError
 from chordsmith.theory import (
     CHORD_TYPES,
@@ -74,6 +74,8 @@ DESTRUCTIVE = ToolAnnotations(
 DESTRUCTIVE_IDEMPOTENT = ToolAnnotations(
     readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
 )
+
+MAX_TILED_NOTES = 20000  # cap after a loop pattern is tiled, so one call cannot write forever
 
 PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
     "lofi": (
@@ -513,6 +515,14 @@ def add_track(
     ],
     instrument: Instrument = 0,
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
+    loop: Annotated[
+        LoopSpec | None,
+        Field(
+            description="Repeat a short pattern across the song: the notes are positions inside "
+            "the pattern window and repeat back to back, so a one-bar drum or bass groove is "
+            "written once. Omit to place the notes as given."
+        ),
+    ] = None,
     output_filename: FileName = None,
     overwrite: Overwrite = False,
 ) -> results.AddTrackResult:
@@ -521,7 +531,8 @@ def add_track(
     Creates a new file; the original is never modified. The copy keeps all existing tracks and
     gets the new one on the chosen channel (a type 0 file is promoted to type 1). Returns the new
     file's name/path and how many notes/tracks it has. Pitches outside 0-127 and overlapping
-    notes are fine; the track is as monophonic or polyphonic as you write it.
+    notes are fine; the track is as monophonic or polyphonic as you write it. With ``loop``, a
+    short pattern (for example one bar of drums) is tiled across the song in one call.
     """
     source = store.existing_path(filename)
     with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
@@ -534,6 +545,29 @@ def add_track(
             except MusicTheoryError as exc:
                 raise ValueError(str(exc)) from None
             parsed.append((pitch, note.start_beat, note.beats, note.velocity))
+        if loop is not None:
+            for _, start, beats, _ in parsed:
+                if start >= loop.length_beats:
+                    raise ValueError(
+                        f"A loop note starts at beat {start:g}, but the pattern is only "
+                        f"{loop.length_beats:g} beats long."
+                    )
+                if start + beats > loop.length_beats + 1e-9:
+                    raise ValueError(
+                        f"A loop note ends at beat {start + beats:g}, past the pattern length "
+                        f"{loop.length_beats:g}."
+                    )
+            total = len(parsed) * loop.times
+            if total > MAX_TILED_NOTES:
+                raise ValueError(
+                    f"The loop would produce {total} notes (limit {MAX_TILED_NOTES}); "
+                    "reduce the pattern or the repeat count."
+                )
+            parsed = [
+                (pitch, start + repeat * loop.length_beats, beats, velocity)
+                for repeat in range(loop.times)
+                for pitch, start, beats, velocity in parsed
+            ]
         info = add_track_midi(
             source,
             target,

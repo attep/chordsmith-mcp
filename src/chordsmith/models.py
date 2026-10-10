@@ -35,6 +35,19 @@ class NoteInput(BaseModel):
     velocity: int = Field(90, ge=1, le=127, description="Loudness, 1-127.")
 
 
+class LoopSpec(BaseModel):
+    """Tile a short pattern across the song, e.g. one bar of drums repeated 32 times.
+
+    The notes are positions inside the pattern window (beat 0 up to ``length_beats``); the
+    whole pattern repeats back to back ``times`` times, so a drum groove is written once.
+    """
+
+    length_beats: float = Field(
+        gt=0, le=256, description="Pattern length in beats: one 4/4 bar = 4, one 2/4 bar = 2."
+    )
+    times: int = Field(ge=1, le=512, description="How many times the pattern repeats back to back.")
+
+
 class Humanize(BaseModel):
     """Deterministic timing and velocity variation, so repeated renders sound identical."""
 

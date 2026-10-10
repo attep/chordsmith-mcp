@@ -173,8 +173,13 @@ original is never modified. A type 0 file is promoted to type 1.
 | `notes` (required) | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes |
 | `instrument` | General MIDI program for the track (0 piano, 24 nylon guitar, …) |
 | `channel` | MIDI channel 1–16 (10 = drums) |
+| `loop` | `{"length_beats": 4, "times": 36}`: the notes are positions inside the pattern window and repeat back to back, so a drum or bass groove is written once. The notes must fit inside `length_beats`; up to 20 000 notes after tiling |
 | `output_filename` | Default: `<name>_<track_name>.mid` |
 | `overwrite` | Replace an existing output file |
+
+**Example:** a one-bar drum groove (kick on 1, snare on 2 and 4, hats on the offbeats) for a
+48-bar song: write the notes once inside beats 0–4 and pass
+`"loop": {"length_beats": 4, "times": 48}` instead of 192 hand-written notes.
 
 ## get_midi_file
 

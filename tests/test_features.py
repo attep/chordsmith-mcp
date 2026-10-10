@@ -226,6 +226,83 @@ async def test_add_track_drums_channel(store):
     assert 9 in channels
 
 
+async def test_add_track_loop_tiles_the_pattern(store):
+    store.ensure_root()
+    _write(store.root / "groove.mid")
+    pattern = [
+        {"pitch": 36, "start_beat": 0, "beats": 0.25, "velocity": 100},
+        {"pitch": 38, "start_beat": 2, "beats": 0.25, "velocity": 100},
+        {"pitch": 42, "start_beat": 3.5, "beats": 0.25, "velocity": 80},
+    ]
+    result = await _call(
+        "add_track",
+        {
+            "filename": "groove.mid",
+            "track_name": "Drums",
+            "notes": pattern,
+            "channel": 10,
+            "loop": {"length_beats": 4, "times": 3},
+        },
+    )
+    assert not result.isError
+    assert result.structuredContent["notes_added"] == 9
+    copy = store.root / result.structuredContent["filename"]
+    midi = mido.MidiFile(copy)
+    track = next(t for t in midi.tracks if any(m.type == "track_name" and m.name == "Drums" for m in t))
+    starts = []
+    tick = 0
+    for message in track:
+        tick += message.time
+        if message.type == "note_on" and message.velocity > 0:
+            starts.append(tick / midi.ticks_per_beat)
+    # three bars of the same pattern: kick, snare, hat; then the next bar starts 4 beats later
+    assert starts == [0, 2, 3.5, 4, 6, 7.5, 8, 10, 11.5]
+
+
+async def test_add_track_loop_validates_the_window(store):
+    store.ensure_root()
+    _write(store.root / "bad.mid")
+    starts_outside = [{"pitch": 36, "start_beat": 4, "beats": 0.5}]
+    result = await _call(
+        "add_track",
+        {
+            "filename": "bad.mid",
+            "track_name": "Drums",
+            "notes": starts_outside,
+            "loop": {"length_beats": 4, "times": 2},
+        },
+    )
+    assert result.isError and "pattern is only 4 beats long" in result.content[0].text
+
+    spills_over = [{"pitch": 36, "start_beat": 3.75, "beats": 0.5}]
+    result = await _call(
+        "add_track",
+        {
+            "filename": "bad.mid",
+            "track_name": "Drums",
+            "notes": spills_over,
+            "loop": {"length_beats": 4, "times": 2},
+        },
+    )
+    assert result.isError and "past the pattern length" in result.content[0].text
+
+
+async def test_add_track_loop_caps_the_total(store):
+    store.ensure_root()
+    _write(store.root / "huge.mid")
+    pattern = [{"pitch": 36, "start_beat": 0, "beats": 0.25} for _ in range(40)]
+    result = await _call(
+        "add_track",
+        {
+            "filename": "huge.mid",
+            "track_name": "Drums",
+            "notes": pattern,
+            "loop": {"length_beats": 4, "times": 512},
+        },
+    )
+    assert result.isError and "limit 20000" in result.content[0].text
+
+
 # ------------------------------------------------------------------ midi_type
 
 
