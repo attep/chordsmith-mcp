@@ -24,12 +24,13 @@ logger = logging.getLogger(__name__)
 try:
     import cmudict
     import numpy as np
+    import onnx
     import onnxruntime as ort
     import yaml
 
     _IMPORT_ERROR: ImportError | None = None
 except ImportError as exc:  # pragma: no cover - exercised when the extra is not installed
-    cmudict = np = ort = yaml = None
+    cmudict = np = onnx = ort = yaml = None
     _IMPORT_ERROR = exc
 
 SAMPLE_RATE = 44100
@@ -108,6 +109,36 @@ class NoteSpec:
     seconds: float
     midi: int
     is_rest: bool = False
+
+
+_RANDOM_OPS = ("RandomNormal", "RandomNormalLike", "RandomUniform", "RandomUniformLike")
+
+
+def _patch_graph(graph, seed: int, counter: list[int]) -> None:
+    """Give every random node a deterministic seed attribute (ONNX's standard 'seed')."""
+    for node in graph.node:
+        if node.op_type in _RANDOM_OPS:
+            counter[0] += 1
+            value = float((seed * 1000003 + counter[0] * 7919) % (2**31 - 1) + 1)
+            for attribute in node.attribute:
+                if attribute.name == "seed":
+                    attribute.f = value
+                    break
+            else:
+                node.attribute.append(onnx.helper.make_attribute("seed", value))
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                _patch_graph(attribute.g, seed, counter)
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attribute.graphs:
+                    _patch_graph(subgraph, seed, counter)
+
+
+def seeded_model_bytes(path: Path, seed: int) -> bytes:
+    """Load a model and fix the seed of its random sampling ops, in memory only."""
+    model = onnx.load_model(str(path))
+    _patch_graph(model.graph, seed, [0])
+    return model.SerializeToString()
 
 
 @dataclass
@@ -555,9 +586,14 @@ def render(
     gender: float = 0.0,
     expr: float = 1.0,
     energy: float = 1.0,
+    seed: int | None = None,
     total_seconds: float | None = None,
 ) -> dict:
-    """Render the notes to a 44.1 kHz mono wav with the voicebank."""
+    """Render the notes to a 44.1 kHz mono wav with the voicebank.
+
+    ``seed`` fixes the sampling noise of the diffusion models (patched into the ONNX graphs in
+    memory), so the same input renders identical audio; None draws fresh noise every run.
+    """
     if mode not in MODES:
         raise DiffSingerError(f"Unknown mode '{mode}'; use one of {', '.join(MODES)}.")
     if not notes:
@@ -565,6 +601,23 @@ def render(
     if any(note.is_rest for note in notes):
         raise DiffSingerError("Rest notes are not supported yet; drop silent notes instead.")
     bank = get_voicebank()
+
+    if seed is None:
+
+        def session_for(rel: str):
+            return bank.session(rel)
+    else:
+        # ORT's random generators live inside the session: a fresh session starts from the
+        # patched seeds' initial state, while a reused one keeps advancing. So seeded renders
+        # build fresh sessions (cached per render, not across renders) and are reproducible.
+        created: dict[str, ort.InferenceSession] = {}
+
+        def session_for(rel: str):
+            if rel not in created:
+                created[rel] = ort.InferenceSession(
+                    seeded_model_bytes(bank.path / rel, seed), providers=["CPUExecutionProvider"]
+                )
+            return created[rel]
 
     # --- duration prediction
     segments: list[dict] = [{"phoneme": "SP", "note": -1, "kind": "pad"}]
@@ -581,7 +634,7 @@ def render(
     vowel_ids = [i for i, s in enumerate(segments) if bank.is_vowel(s["phoneme"])]
     word_div = [vowel_ids[0]] + [vowel_ids[i + 1] - vowel_ids[i] for i in range(len(vowel_ids) - 1)]
     word_div.append(tokens.shape[1] - vowel_ids[-1])
-    encoder_out, x_masks = bank.session("dsmain/linguistic.onnx").run(
+    encoder_out, x_masks = session_for("dsmain/linguistic.onnx").run(
         None,
         {
             "tokens": tokens,
@@ -593,7 +646,7 @@ def render(
         [[notes[s["note"]].midi if s["note"] >= 0 else 0 for s in segments]], dtype=np.int64
     )
     variance_embed = bank.embed("dsmain/embeds/variance", mode)
-    predicted_flat = bank.session("dsdur/dur.onnx").run(
+    predicted_flat = session_for("dsdur/dur.onnx").run(
         None,
         {
             "encoder_out": encoder_out,
@@ -618,13 +671,13 @@ def render(
 
     # --- pitch
     note_dur, note_midis, note_rests = _note_partition(timeline, notes)
-    pitch_enc = bank.session("dspitch/linguistic.onnx").run(None, {"tokens": tokens, "ph_dur": ph_dur})[0]
+    pitch_enc = session_for("dspitch/linguistic.onnx").run(None, {"tokens": tokens, "ph_dur": ph_dur})[0]
     pitch_base = np.zeros(total_frames, dtype=np.float32)
     frame = 0
     for frames, midi in zip(note_dur, note_midis, strict=True):
         pitch_base[frame : frame + frames] = midi
         frame += frames
-    pitch_out = bank.session("dspitch/pitch.onnx").run(
+    pitch_out = session_for("dspitch/pitch.onnx").run(
         None,
         {
             "encoder_out": pitch_enc,
@@ -648,7 +701,7 @@ def render(
     f0 = (440.0 * np.power(2.0, (pitch_out - 69.0) / 12.0)).astype(np.float32).reshape(1, -1)
 
     # --- acoustic + vocoder
-    mel = bank.session("dsmain/acoustic.onnx").run(
+    mel = session_for("dsmain/acoustic.onnx").run(
         None,
         {
             "tokens": tokens,
@@ -661,7 +714,7 @@ def render(
             "steps": np.array(steps, dtype=np.int64),
         },
     )[0]
-    samples = bank.session("dsvocoder/aidolgan.onnx").run(None, {"mel": mel, "f0": f0})[0][0]
+    samples = session_for("dsvocoder/aidolgan.onnx").run(None, {"mel": mel, "f0": f0})[0][0]
     if not np.isfinite(samples).all():
         raise DiffSingerError("The vocoder produced invalid samples.")
     samples = samples.astype(np.float32) * float(energy)

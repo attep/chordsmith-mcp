@@ -117,10 +117,14 @@ voice.
 
 **Settings** (inside `settings`): `velocity` (0.5–2.0, singing speed), `gender` (−1..1 formant
 shift; **default 0** keeps the voicebank's own character — large values sound unnatural),
-`expr` (0–1 pitch expressiveness), `steps` (diffusion steps, default 20) and `depth` (≤ 0.6).
-`energy` works as output gain; `breathiness` is refused (this voicebank has none).
-Rendering takes tens of seconds on CPU for a full song — it runs in the same background job flow
-as VOICEVOX.
+`expr` (0–1 pitch expressiveness), `steps` (diffusion steps, default 20), `depth` (≤ 0.6) and
+`seed`. DiffSinger sampling is stochastic, so without a seed the same input renders slightly
+different audio each time; setting `seed` patches the diffusion noise deterministically and the
+same input then renders **identical bytes** (fair A/B tests). VOICEVOX has no seed control and can
+also vary slightly between renders — repeat an identical request to get the cached job's file.
+`energy` works as output gain; `breathiness` is refused (this voicebank has none). Rendering takes
+tens of seconds on CPU for a full song — it runs in the same background job flow as VOICEVOX. The
+job record echoes the full settings (defaults included), so it always shows what was used.
 
 **Licence layers** (for Hanami ~AI❤dol~): the voicebank models are under the Team L❤VE Voicebank
 License (any creative use including commercial, credit required); the bundled AI❤dolGAN vocoder
@@ -143,16 +147,25 @@ apart ("so-di ... um"). Practical guidance, drawn from listening tests:
   lasts a quarter second; spell a word differently or give it a longer note.
 - **Clarity first, softness later**: mix with the default `vocal_level_db: 6` and reverb **off**
   to judge diction, then add reverb or lower the vocal if the song needs it.
+- **When the melody fights the stress**: if the mapper warns that a stressed syllable got a short
+  note (the classic "SO-di-um" case), swap the note lengths in that phrase or respell the word so
+  a consonant separates the vowels; no setting fixes this automatically.
+
+**Evaluating clarity fairly** (for A/B tests, human or Whisper): render the **vocal alone** with a
+fixed `seed`, keep the same lyric, and run each version **two or three times**, scoring the median
+— DiffSinger without a seed varies run to run, and one-run verdicts mostly measure chance.
 
 ## Mixing and export
 
 `mix_song_with_vocals` measures the active level of both stems **over the blocks where the voice
-is singing** (the band is not dragged down by long instrumental sections) and places the vocal
+is singing** (all channels, so a stereo band is judged as a whole) and places the vocal
 `vocal_level_db` dB above it (default `6`). The mono vocal is panned to stereo before mixing, so
 the measured balance is the real one; `backing_volume` trims the backing (default `1.0`) and
 `reverb` is **off** by default. The finished mix is normalized to `normalize_peak_db` (default
 `-1` dBFS; set null to keep the raw level), so exports are not left very quiet. The result reports
-`backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`, `vocal_to_backing_db`, the applied
+`backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`, the calculated `vocal_to_backing_db`, the
+**measured** `vocal_to_backing_measured_db` (taken from the finished mix by subtracting the band's
+energy) with a `balance_check` flag (`ok` / `mismatch` / `unavailable` with reverb), the applied
 `gain_correction_db` and the final `peak_db`. The guide track (usually `Melody`) is left out of
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.

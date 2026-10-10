@@ -164,6 +164,7 @@ class SingingJob:
     settings: dict
     cache_key: str
     created_at: float
+    echo_settings: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
 
@@ -648,6 +649,13 @@ class SoftSettings(BaseModel):
     depth: float = Field(
         0.6, ge=0.05, le=0.6, description="DiffSinger only: diffusion depth (voicebank max 0.6)."
     )
+    seed: int | None = Field(
+        None,
+        ge=0,
+        le=2**31 - 1,
+        description="DiffSinger only: fix the engine's sampling noise so the same input renders "
+        "identical audio (fair A/B tests). None draws fresh noise on every render.",
+    )
 
 
 def parse_voice_id(voice_id: str, singers: list[dict] | None = None) -> int:
@@ -699,7 +707,7 @@ def _settings_dict(settings: SoftSettings | None, engine: str) -> dict:
                 "Use energy/volume_cap (VOICEVOX) or velocity/gender/expr (DiffSinger)."
             )
     if engine == "voicevox":
-        for diffsinger_only in ("velocity", "gender", "expr", "steps", "depth"):
+        for diffsinger_only in ("velocity", "gender", "expr", "steps", "depth", "seed"):
             if diffsinger_only in data:
                 raise SingingError(
                     f"'{diffsinger_only}' is a DiffSinger setting; VOICEVOX uses energy/volume_cap."
@@ -770,6 +778,7 @@ def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore) -
         gender=float(job.settings.get("gender", 0.0)),
         expr=float(job.settings.get("expr", 1.0)),
         energy=float(job.settings.get("energy", 1.0)),
+        seed=job.settings.get("seed"),
         total_seconds=mapping.total_seconds,
     )
     return {"path": path, "info": info}
@@ -817,7 +826,11 @@ def _run_job(
 
 
 def start_job(
-    mapping: VocalMapping, score: VocalScore, voice_id: str, settings: dict
+    mapping: VocalMapping,
+    score: VocalScore,
+    voice_id: str,
+    settings: dict,
+    echo_settings: dict | None = None,
 ) -> tuple[SingingJob, bool]:
     cache_key = json.dumps(
         {"mapping": mapping.mapping_id, "voice": voice_id, "settings": settings}, sort_keys=True
@@ -842,6 +855,7 @@ def start_job(
         settings=settings,
         cache_key=cache_key,
         created_at=time.time(),
+        echo_settings=echo_settings if echo_settings is not None else dict(settings),
     )
     with _registry.lock:
         _registry.jobs[job.job_id] = job
@@ -855,7 +869,8 @@ def _job_payload(job: SingingJob) -> dict:
         "job_id": job.job_id,
         "status": job.status,
         "voice_id": job.voice_id,
-        "settings": job.settings,  # echo what was used, so the server's record is self-contained
+        # the full settings (defaults included), so the record shows exactly what was used
+        "settings": job.echo_settings or job.settings,
     }
     if job.result is not None:
         payload.update(job.result)
@@ -929,6 +944,66 @@ def gated_rms_db(path: Path, gate: float = 0.004) -> float:
     return 20.0 * math.log10(math.sqrt(total / count))
 
 
+def _read_pcm(path: Path):
+    import array
+
+    with wave.open(str(path), "rb") as handle:
+        if handle.getsampwidth() != 2:
+            raise SingingError("Mixing expects 16-bit audio files.")
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+        return samples, handle.getnchannels(), handle.getframerate()
+
+
+def _block_energy(samples, start_frame: int, block_frames: int, channels: int, stride: int = 4) -> float:
+    """Mean square over a block, averaged across every channel (stride is in frames)."""
+    total = 0.0
+    count = 0
+    end = min(start_frame + block_frames, len(samples) // channels)
+    for frame in range(start_frame, end, stride):
+        offset = frame * channels
+        for channel in range(channels):
+            value = samples[offset + channel]
+            total += value * value
+            count += 1
+    return total / count if count else 0.0
+
+
+def measure_over_sung(
+    vocal: Path, targets: list[Path], block_ms: float = 50.0, gate: float = 0.004
+) -> list[float]:
+    """Mean square (linear, channels averaged) of each target over the blocks where the voice sings.
+
+    All channels are measured, so a stereo band is not judged by its left channel alone.
+    """
+    import math
+
+    vocal_samples, vocal_channels, vocal_rate = _read_pcm(vocal)
+    vocal_block = max(1, round(vocal_rate * block_ms / 1000.0))
+    vocal_frames = len(vocal_samples) // vocal_channels
+    loaded = []
+    for target in targets:
+        samples, channels, rate = _read_pcm(target)
+        block = max(1, round(rate * block_ms / 1000.0))
+        loaded.append((samples, channels, block))
+    totals = [0.0] * len(targets)
+    counts = [0] * len(targets)
+    for block_index in range(vocal_frames // vocal_block):
+        start_frame = block_index * vocal_block
+        vocal_energy = _block_energy(vocal_samples, start_frame, vocal_block, vocal_channels)
+        if math.sqrt(vocal_energy) / 32768.0 < gate:
+            continue
+        for target_index, (samples, channels, block) in enumerate(loaded):
+            frames = len(samples) // channels
+            if start_frame >= frames:
+                continue
+            energy = _block_energy(samples, start_frame, block, channels)
+            span = min(block, frames - start_frame)
+            totals[target_index] += energy * span * channels
+            counts[target_index] += span * channels
+    return [totals[i] / counts[i] if counts[i] else 0.0 for i in range(len(targets))]
+
+
 def active_levels(
     backing: Path, vocal: Path, block_ms: float = 50.0, gate: float = 0.004
 ) -> tuple[float, float]:
@@ -937,47 +1012,15 @@ def active_levels(
     This is the level the tool's description promises: the band is measured only while the
     vocal is active, not over the whole song (long instrumental sections would drag it down).
     """
-    import array
     import math
 
-    def read(path: Path) -> tuple[array.array, int, int]:
-        with wave.open(str(path), "rb") as handle:
-            if handle.getsampwidth() != 2:
-                raise SingingError("Mixing expects 16-bit audio files.")
-            samples = array.array("h")
-            samples.frombytes(handle.readframes(handle.getnframes()))
-            return samples, handle.getnchannels(), handle.getframerate()
-
-    backing_samples, backing_channels, backing_rate = read(backing)
-    vocal_samples, vocal_channels, vocal_rate = read(vocal)
-    vocal_block = max(1, round(vocal_rate * block_ms / 1000.0))
-    backing_block = max(1, round(backing_rate * block_ms / 1000.0))
-    vocal_frames = len(vocal_samples) // vocal_channels
-    vocal_total = 0.0
-    vocal_count = 0
-    backing_total = 0.0
-    backing_count = 0
-    for block in range(vocal_frames // vocal_block):
-        start = block * vocal_block * vocal_channels
-        chunk = vocal_samples[start : start + vocal_block * vocal_channels : 4]
-        energy = sum(sample * sample for sample in chunk) / max(1, len(chunk))
-        if math.sqrt(energy) / 32768.0 < gate:
-            continue
-        vocal_total += energy * len(chunk)
-        vocal_count += len(chunk)
-        backing_start = block * backing_block * backing_channels
-        if backing_start < len(backing_samples):
-            backing_chunk = backing_samples[
-                backing_start : backing_start + backing_block * backing_channels : 4
-            ]
-            backing_total += sum(sample * sample for sample in backing_chunk)
-            backing_count += len(backing_chunk)
-    if vocal_count == 0:
+    energies = measure_over_sung(vocal, [backing, vocal], block_ms, gate)
+    if energies[1] == 0.0:
         return gated_rms_db(backing), gated_rms_db(vocal)
-    vocal_db = 20.0 * math.log10(math.sqrt(vocal_total / vocal_count) / 32768.0)
-    if backing_count == 0 or backing_total == 0:
+    vocal_db = 20.0 * math.log10(math.sqrt(energies[1]) / 32768.0)
+    if energies[0] == 0.0:
         return -120.0, vocal_db
-    backing_db = 20.0 * math.log10(math.sqrt(backing_total / backing_count) / 32768.0)
+    backing_db = 20.0 * math.log10(math.sqrt(energies[0]) / 32768.0)
     return backing_db, vocal_db
 
 
@@ -1024,6 +1067,22 @@ def mix_tracks(
 
     render(0.0)
     peak = _peak_db(target)
+
+    # verify the balance by measurement: the finished mix holds band + vocal (uncorrelated),
+    # so subtracting the band's energy leaves the vocal's energy
+    measured_db: float | None = None
+    if not reverb:
+        mix_energy = measure_over_sung(vocal, [target])[0]
+        band_energy = (10.0 ** (backing_db / 20.0) * 32768.0) ** 2 * (backing_volume**2)
+        if band_energy > 0 and mix_energy > band_energy:
+            measured_db = 10.0 * math.log10((mix_energy - band_energy) / band_energy)
+    if measured_db is None:
+        balance_check = "unavailable"
+    elif abs(measured_db - balance_db) <= 1.5:
+        balance_check = "ok"
+    else:
+        balance_check = "mismatch"
+
     correction = 0.0
     if normalize_peak_db is not None:
         correction = round(normalize_peak_db - peak, 2)
@@ -1042,6 +1101,8 @@ def mix_tracks(
         "vocal_rms_db": round(vocal_db, 1),
         "vocal_gain_db": round(vocal_gain_db, 1),
         "vocal_to_backing_db": round(balance_db, 1),
+        "vocal_to_backing_measured_db": None if measured_db is None else round(measured_db, 1),
+        "balance_check": balance_check,
     }
 
 
@@ -1266,7 +1327,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             raise SingingError(f"Mapping '{mapping_id}' not found (mappings expire after 24 hours).")
         engine, _ = parse_voice_engine(voice_id)
         settings_dict = _settings_dict(settings, engine)
-        job, reused = start_job(mapping, score, voice_id, settings_dict)
+        echo_settings = (settings or SoftSettings()).model_dump(exclude_none=True)
+        job, reused = start_job(mapping, score, voice_id, settings_dict, echo_settings)
         return {"job_id": job.job_id, "status": job.status, "reused": reused}
 
     @mcp.tool()

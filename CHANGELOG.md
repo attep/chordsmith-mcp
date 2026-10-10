@@ -7,8 +7,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
+(jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
+export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
+(CONTRIBUTING, SECURITY, pre-commit, mypy).
+
+## [0.5.0] - 2026-10-10
+
 ### Added
 
+- **Reproducible renders (`seed`)**: DiffSinger sampling is stochastic; setting `seed` in
+  `render_singing` patches the diffusion noise in the ONNX graphs (in memory) so the same input
+  renders **identical bytes** — fair A/B tests. `null` (default) keeps fresh noise per run.
+  VOICEVOX has no seed control and may also vary slightly; identical requests reuse the cached job.
+- **Measured balance check**: `mix_song_with_vocals` reports
+  `vocal_to_backing_measured_db`, computed from the finished mix (band energy subtracted over the
+  sung blocks), next to the calculated value, with a `balance_check` flag.
+- **Full settings echo**: render jobs record the complete settings including defaults (`gender 0`,
+  `steps 20`, ...), not just the overrides.
 - **Whole-word English lookup**: hyphen-joined syllables ("so- di- um", "yel- low") are looked up
   as one word and its sounds are split across the word's notes (one vowel per syllable, maximal
   onset principle), fixing fragments, double consonants and weak vowels; vowel-count mismatches
@@ -24,12 +40,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Mixing balances levels by measurement.** `mix_song_with_vocals` measures the active level of
-  both stems **over the blocks where the voice is singing** and places the vocal
-  `vocal_level_db` (default 6 dB) above the band; the mono vocal is panned to stereo first, so
-  the measured balance is real (previously a hidden ~3 dB mono-to-stereo loss made 6 dB read as
-  ~3.8 dB). `vocal_to_backing_db` now includes the `backing_volume` trim, reverb defaults to
-  off, and the result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`,
-  `gain_correction_db` and the final `peak_db`.
+  both stems **over the blocks where the voice is singing, across all channels** and places the
+  vocal `vocal_level_db` (default 6 dB) above the band; the mono vocal is panned to stereo first,
+  so the measured balance is real (previously a hidden ~3 dB mono-to-stereo loss made 6 dB read
+  as ~3.8 dB, and a one-sided stereo band was judged by its left channel alone).
+  `vocal_to_backing_db` includes the `backing_volume` trim, reverb defaults to off, and the result
+  reports the levels, gains and the final `peak_db`.
 - **Slurs no longer close and reopen a syllable**: `+` moves the previous syllable's closing
   consonants to the last note of the slur ("still +" sings s-t-ih then ih-l, not "stil-i").
 - **English lyric mapping no longer crashes on fewer syllables than notes** (the extra notes
@@ -40,11 +56,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Vocal scores spell notes to match the key** (Eb/Ab/Bb in flat keys, like the chord tools,
   instead of D#/G#/A#).
 - Rests created from missing syllables carry no pitch, and render jobs echo their settings.
-
-Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
-(jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
-export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
-(CONTRIBUTING, SECURITY, pre-commit, mypy).
 
 ## [0.4.0] - 2026-10-10
 
@@ -107,7 +118,8 @@ export, Roman-numeral analysis, an `explain_progression` tool, and contributor h
   `create_progression_from_roman`, `list_chord_types`, `transpose_midi`, `analyze_midi`,
   `list_generated_files`).
 
-[Unreleased]: https://github.com/attep/chordsmith-mcp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/attep/chordsmith-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/attep/chordsmith-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/attep/chordsmith-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/attep/chordsmith-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/attep/chordsmith-mcp/compare/v0.1.0...v0.2.0

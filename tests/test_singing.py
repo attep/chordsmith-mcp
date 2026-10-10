@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import math
 import time
@@ -231,6 +232,8 @@ async def test_render_job_lifecycle_and_reuse(store, fake_engine):
     assert job["duration_seconds"] > 0
     assert job["start_offset_seconds"] == 0.0
     assert job["settings"]["volume_cap"] == 0.6  # the job echoes what was used
+    assert job["settings"]["gender"] == 0.0  # defaults are included, not just the overrides
+    assert job["settings"]["steps"] == 20
     assert fake_engine.renders == 1
     assert fake_engine.query_speakers == [6000]
     assert fake_engine.synth_speakers == [6000]
@@ -393,6 +396,22 @@ def test_active_levels_measure_only_sung_parts(tmp_path):
     assert abs(vocal_db - 20 * math.log10(12000 / 32768)) < 0.3
 
 
+def test_active_levels_average_all_channels(tmp_path):
+    backing = tmp_path / "band.wav"
+    vocal = tmp_path / "vocal.wav"
+    # a band that is only in the left channel: both channels must count, not just the left
+    frame = (24000).to_bytes(2, "little") + (0).to_bytes(2, "little")
+    with wave.open(str(backing), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(44100)
+        handle.writeframes(frame * 22050)
+    _write_constant_wav(vocal, 12000)
+    backing_db, _ = singing.active_levels(backing, vocal)
+    expected = 20 * math.log10(24000 / math.sqrt(2) / 32768)  # energy averaged over both channels
+    assert abs(backing_db - expected) < 0.3
+
+
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
 def test_mix_corrects_clipping_and_normalizes(tmp_path):
     backing = tmp_path / "backing.wav"
@@ -419,6 +438,10 @@ def test_mix_balances_levels_by_measurement(tmp_path):
     assert abs(info["vocal_gain_db"] - expected_gain) <= 0.2  # the loud vocal is turned down
     assert info["vocal_gain_db"] < 0
     assert abs(info["vocal_to_backing_db"] - 6.0) <= 0.2
+    # the balance is also measured from the finished mix, not just calculated
+    assert info["balance_check"] == "ok"
+    assert info["vocal_to_backing_measured_db"] is not None
+    assert abs(info["vocal_to_backing_measured_db"] - 6.0) <= 0.6
     assert info["clipping"] is False
 
 
@@ -751,3 +774,35 @@ async def test_stress_warning_when_stressed_syllable_gets_a_short_note(store, fa
     warning = next((w for w in mapping["warnings"] if "stressed" in w), None)
     assert warning is not None
     assert "'sodium'" in warning and "'so'" in warning and "'di'" in warning
+
+
+def test_patch_graph_seeds_random_nodes():
+    onnx = pytest.importorskip("onnx")
+    node = onnx.helper.make_node("RandomNormal", [], ["out"], shape=[2, 2])
+    graph = onnx.helper.make_graph(
+        [node], "g", [], [onnx.helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [2, 2])]
+    )
+    diffsinger._patch_graph(graph, 42, [0])
+    seeds = [attribute.f for attribute in graph.node[0].attribute if attribute.name == "seed"]
+    assert len(seeds) == 1 and seeds[0] > 0
+    diffsinger._patch_graph(graph, 42, [0])  # patching again replaces, never duplicates
+    seeds = [attribute.f for attribute in graph.node[0].attribute if attribute.name == "seed"]
+    assert len(seeds) == 1
+
+
+@needs_voicebank
+def test_diffsinger_seed_is_deterministic(tmp_path):
+    pytest.importorskip("onnx")
+    specs = [
+        diffsinger.NoteSpec(phonemes=["s", "ow"], start_seconds=0.0, seconds=0.5, midi=60),
+        diffsinger.NoteSpec(phonemes=["g", "ow", "l", "d"], start_seconds=0.5, seconds=0.5, midi=62),
+    ]
+    first = tmp_path / "seed_a.wav"
+    second = tmp_path / "seed_b.wav"
+    third = tmp_path / "seed_c.wav"
+    diffsinger.render(specs, first, mode="nectar", steps=4, seed=7)
+    diffsinger.render(specs, second, mode="nectar", steps=4, seed=7)
+    diffsinger.render(specs, third, mode="nectar", steps=4, seed=8)
+    digest_first = hashlib.sha256(first.read_bytes()).digest()
+    assert digest_first == hashlib.sha256(second.read_bytes()).digest()  # same seed, same bytes
+    assert digest_first != hashlib.sha256(third.read_bytes()).digest()  # different seed, different
