@@ -73,7 +73,7 @@ Turns chord symbols into a MIDI file.
 | `rhythm` | object | block chords | See [Rhythm options](#rhythm-options) |
 | `preset` | text | none | `"lofi"`: voice leading on, soft swung repeated chord hits (pulse pattern) and light humanization |
 | `seed` | number | none | Fix the humanization randomness so the same call writes identical bytes (used with a preset or a `rhythm.humanize`; overrides its `seed`) |
-| `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
+| `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard; the first track carries the file's title, tempo and chord-name markers). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
 | `overwrite` | true/false | `false` | Replace a file with the same name |
 
 **Example call**
@@ -207,6 +207,10 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 
 The result includes `mime_type`, `size_bytes`, `sha256`, and for wav the rendered
 `duration_seconds`.
+
+Renders use a General MIDI soundfont: no samples, sub/reese bass design, filter sweeps or
+production FX. Treat them as an audition of the notes, not a finished master — open the `.mid` in
+a DAW for the real sound. MIDI automation (volume curves, CC sweeps) is not written either.
 
 ## list_chord_types
 

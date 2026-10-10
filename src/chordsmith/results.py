@@ -162,7 +162,7 @@ class VoiceEntry(_VoiceBase, total=False):
     licence: str | None
     credit: str | None
     commercial_status: str | None
-    soft_controls: dict[str, bool]
+    soft_controls: dict[str, bool] | None
 
 
 class EngineVoices(TypedDict, total=False):
@@ -173,7 +173,7 @@ class EngineVoices(TypedDict, total=False):
     credit: str | None
     licence: str | None
     commercial_status: str | None
-    voices: list[VoiceEntry]
+    voices: list[VoiceEntry] | None
 
 
 class VoicesResult(EngineVoices, total=False):

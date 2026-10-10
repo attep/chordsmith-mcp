@@ -12,6 +12,22 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.5.4] - 2026-10-10
+
+### Fixed
+
+- **`list_singing_voices` with the default engine works again.** With `engine: "all"` the tool
+  failed output validation (`None is not of type 'array'`) because the top-level `voices` field
+  of its result schema was not nullable; single-engine calls were unaffected. A regression test
+  now calls the default.
+
+### Added
+
+- Docs: the singing guide covers the voicebank's tested range (F4–Eb5) and style character, the
+  "leave a breath before a consonant cluster" tip, and scoring long songs in halves (Whisper can
+  repeat the first half after an instrumental drop); the tools reference states the General MIDI
+  rendering ceiling and the mix's lack of ducking, EQ and per-track levels.
+
 ## [0.5.3] - 2026-10-10
 
 ### Fixed

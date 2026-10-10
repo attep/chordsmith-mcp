@@ -115,6 +115,12 @@ Voices: `diffsinger:hanami/root`, `diffsinger:hanami/fragrance` and `diffsinger:
 (the soft one). `list_singing_voices` reports the credit line and the licence layers with every
 voice.
 
+Character and range: **root** is the brightest and holds up best on loud material, **nectar** is
+the soft one, **fragrance** sits between. The tested clean range is **F4–Eb5**; C4 worked in one
+song but lower notes are untested, and words on the top notes (Eb5) can be fragile — if one word
+at the very top keeps failing ("glow" is the known case), lower that note or choose another word.
+DiffSinger sings clean: no growl or scream.
+
 **Settings** (inside `settings`): `velocity` (0.5–2.0, singing speed), `gender` (−1..1 formant
 shift; **default 0** keeps the voicebank's own character — large values sound unnatural),
 `expr` (0–1 pitch expressiveness), `steps` (diffusion steps, default 20), `depth` (≤ 0.6) and
@@ -145,6 +151,9 @@ apart ("so-di ... um"). Practical guidance, drawn from listening tests:
   stressed syllable gets a much shorter note than a weak one in the same word.
 - **Simplify short notes**: avoid dense consonant clusters ("streets", "lights") when a note only
   lasts a quarter second; spell a word differently or give it a longer note.
+- **Leave a breath before a cluster**: when a word starts with a consonant cluster right after a
+  stop-ending word ("foot steps"), leave a small rest before it — otherwise the stop elides into
+  the cluster and the first word disappears ("for steps"). A quarter-beat rest is enough.
 - **Clarity first, softness later**: mix with the default `vocal_level_db: 6` and reverb **off**
   to judge diction, then add reverb or lower the vocal if the song needs it.
 - **When the melody fights the stress**: if the mapper warns that a stressed syllable got a short
@@ -153,7 +162,9 @@ apart ("so-di ... um"). Practical guidance, drawn from listening tests:
 
 **Evaluating clarity fairly** (for A/B tests, human or Whisper): render the **vocal alone** with a
 fixed `seed`, keep the same lyric, and run each version **two or three times**, scoring the median
-— DiffSinger without a seed varies run to run, and one-run verdicts mostly measure chance.
+— DiffSinger without a seed varies run to run, and one-run verdicts mostly measure chance. Songs
+with a long instrumental section (a drop or breakdown): score the parts **split at the gap**, or
+Whisper can repeat the first half after the silence and drag the whole-file number down.
 
 ## Mixing and export
 
@@ -172,6 +183,10 @@ finished mix by subtracting the band's energy) with a `balance_check` flag (`ok`
 `gain_correction_db` and the final `peak_db`. The guide track (usually `Melody`) is left out of
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.
+
+The mix has level, reverb and normalization only — no ducking, EQ or per-track levels. When the
+band masks the voice (cymbals are the usual culprit), shape it in the arrangement (keep cymbals
+out from under the vocal, write softer velocities) or raise `vocal_level_db`.
 
 ## Settings
 
