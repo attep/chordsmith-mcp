@@ -87,13 +87,14 @@ async def test_set_track_instrument_merges_and_removes(store, engine_available):
         {
             "filename": song,
             "tracks": {
-                "Bass": {"engine": "fluidsynth", "gain_db": -3.0},
+                "Bass": {"engine": "fluidsynth", "program": 38, "gain_db": -3.0},
                 "Melody": {"engine": "fluidsynth", "gain_db": 1.0},
             },
         },
     )
     assert not result.isError, result.content[0].text
     assert result.structuredContent["tracks"]["Bass"]["gain_db"] == -3.0
+    assert result.structuredContent["tracks"]["Bass"]["program"] == 38
 
     # merge: updating one track keeps the other, and null removes an entry
     merged = await _call(
@@ -157,10 +158,45 @@ async def test_list_instruments_reports_engines_and_specs(store, engine_availabl
     engines_only = (await _call("list_instruments", {})).structuredContent
     assert [engine["name"] for engine in engines_only["engines"]] == ["fluidsynth"]
     assert engines_only["file"] is None
+    assert len(engines_only["programs"]["melodic"]) == 128
+    assert engines_only["programs"]["melodic"][38] == "Synth Bass 1"
+    assert engines_only["programs"]["drums"]["Power"] == 16
 
     with_file = (await _call("list_instruments", {"filename": song})).structuredContent
     assert set(with_file["file"]["tracks"]) == {"Chords", "Bass", "Melody"}
     assert with_file["file"]["specs"]["Bass"]["gain_db"] == -4.0
+
+
+async def test_override_program_rewrites_the_stem_midi(store, engine_available):
+    from chordsmith.singing import extract_track
+
+    song = await _make_band(store)
+    stem = store.root / "stem.mid"
+    extract_track(store.root / song, stem, 2)  # the Bass track
+
+    plain = renderers.override_program(stem, renderers.InstrumentSpec())
+    assert plain == stem  # nothing to apply, the original file is rendered
+
+    rewritten = renderers.override_program(stem, renderers.InstrumentSpec(program=38))
+    file = mido.MidiFile(rewritten)
+    programs = [
+        message.program for track in file.tracks for message in track if message.type == "program_change"
+    ]
+    assert programs == [38]  # the file's own program change is replaced
+
+    banked = renderers.override_program(stem, renderers.InstrumentSpec(program=38, bank=2))
+    file = mido.MidiFile(banked)
+    controls = [
+        (message.control, message.value)
+        for track in file.tracks
+        for message in track
+        if message.type == "control_change"
+    ]
+    assert (0, 2) in controls and (32, 0) in controls
+    programs = [
+        message.program for track in file.tracks for message in track if message.type == "program_change"
+    ]
+    assert programs == [38]
 
 
 class _FakeRenderer:
@@ -214,6 +250,28 @@ async def test_concurrent_stem_renders_get_distinct_files(store, monkeypatch):
     names_a = {stem["filename"] for stem in first.structuredContent["stems"]}
     names_b = {stem["filename"] for stem in second.structuredContent["stems"]}
     assert not names_a & names_b  # every stem claimed its own file
+
+
+@pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
+async def test_program_choice_changes_the_stem_audio(store):
+    song = await _make_band(store)
+    await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "program": 38}}},
+    )
+    synth = (
+        await _call("render_audio", {"filename": song, "stems": True, "output_filename": "prog38"})
+    ).structuredContent
+    await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "program": 33}}},
+    )
+    finger = (
+        await _call("render_audio", {"filename": song, "stems": True, "output_filename": "prog33"})
+    ).structuredContent
+    bass_synth = next(stem for stem in synth["stems"] if stem["track"] == "Bass")
+    bass_finger = next(stem for stem in finger["stems"] if stem["track"] == "Bass")
+    assert bass_synth["sha256"] != bass_finger["sha256"]
 
 
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")

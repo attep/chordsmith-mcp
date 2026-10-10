@@ -1,3 +1,3 @@
 """ChordSmith: an MCP server that writes chord progressions to MIDI files."""
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

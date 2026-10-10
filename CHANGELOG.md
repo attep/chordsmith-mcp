@@ -12,6 +12,19 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.9.0] - 2026-10-10
+
+### Added
+
+- **Per-track General MIDI instruments.** `set_track_instrument` specs gain `program` (0–127)
+  and `bank` (CC0 bank select), so each track can play a different GM instrument from the same
+  soundfont — or a drum kit on a drum track — next to the existing per-track `preset` (`.sf2`)
+  and `gain_db`. The override replaces the stem's own program change and applies to that stem
+  only; `render_audio` with `stems: true` renders and combines it like any other spec.
+- `list_instruments` now also returns the instrument catalog: the 128 GM melodic program names
+  (index = `program` number) and the standard drum kits (name → kit number), so the numbers
+  `set_track_instrument` takes are discoverable from the API itself.
+
 ## [0.8.0] - 2026-10-10
 
 ### Added

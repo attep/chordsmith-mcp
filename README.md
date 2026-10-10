@@ -91,7 +91,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `add_track` | Adds a note-level track (melody, bass, drums) to a copy of a file |
 | `get_midi_file` | Hands the actual file back (base64 or a signed download link) |
 | `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app (or per-track stems with `stems: true`) |
-| `set_track_instrument` / `list_instruments` | Per-track instrument specs (a soundfont per track, trims) and the engines this server can run |
+| `set_track_instrument` / `list_instruments` | Per-track instrument specs (a soundfont, a GM program or drum kit, trims per track) and the engines + instrument catalog this server can run |
 | `list_chord_types` | Shows every chord type ChordSmith understands (30) |
 | `transpose_midi` | Moves a file up/down, or from one key to another |
 | `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key |

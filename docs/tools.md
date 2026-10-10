@@ -210,7 +210,7 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 | `format` | `"wav"` (default) or `"mp3"` (mp3 needs ffmpeg) |
 | `return_as` | Like [get_midi_file](#get_midi_file): `"base64"` or `"url"` |
 | `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
-| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs) and combine the stems into the mix. One render per track, so it is slower; the result then also lists every stem (name, track, gain, sha256, bytes or link) |
+| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. One render per track, so it is slower; the result then also lists every stem (name, track, gain, sha256, bytes or link) |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
@@ -224,25 +224,53 @@ a DAW for the real sound. MIDI automation (volume curves, CC sweeps) is not writ
 ## set_track_instrument
 
 Stores per-track instrument specs for a MIDI file in a small JSON sidecar next to it
-(`<name>.instruments.json`); the MIDI itself is never modified.
+(`<name>.instruments.json`); the MIDI itself is never modified. Use it to give a track its own
+soundfont, to pick a different General MIDI instrument (or drum kit), and to trim its level in
+the stem mix — then render with [`render_audio`](#render_audio) and `stems: true` and audition
+the stems.
 
 | Option | Description |
 |---|---|
 | `filename` (required) | MIDI file in the output folder |
-| `tracks` (required) | Specs keyed by track name, e.g. `{"Bass": {"engine": "fluidsynth", "preset": "/sf2/MyBass.sf2", "gain_db": -3}}`. Entries merge into the existing map; a `null` value removes a track's spec |
+| `tracks` (required) | Specs keyed by track name; entries merge into the existing map, a `null` value removes a track's spec |
 
-Fields: `engine` (only `"fluidsynth"` today), `preset` (a `.sf2` path for that track; omit for
-the server default), `gain_db` (trim used when stems are combined, −24 to +12). Unknown track
-names, missing soundfonts and unknown engines are rejected with a message that lists what is
-available. The specs follow the file when it is renamed or deleted, and `render_audio` uses them
-with `stems: true`.
+Each spec has:
+
+| Field | Description |
+|---|---|
+| `engine` | Which renderer to use; only `"fluidsynth"` today |
+| `preset` | Path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
+| `bank` | CC0 bank select, 0–127 (`0` is the GM melodic bank); omit to keep the file's bank |
+| `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the full catalog |
+| `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
+
+Example — a synth bass, a power drum kit, and the keys pulled back:
+
+```json
+{"filename": "song.mid", "tracks": {
+  "Bass":   {"engine": "fluidsynth", "program": 38, "gain_db": -3},
+  "Drums":  {"engine": "fluidsynth", "program": 16},
+  "Chords": {"engine": "fluidsynth", "gain_db": -6}
+}}
+```
+
+Then `render_audio` with `stems: true` renders each track through its spec and sums the stems
+(each with its `gain_db`) into the mix; the result lists every stem so you can listen one by one.
+Unknown track names, missing soundfonts and unknown engines are rejected with a message that
+lists what is available. The specs follow the file through rename and delete.
+
+To use your own `.sf2` files, put them where the server can read them and pass that path as
+`preset`: drop them into the output folder (visible to the server as `/data/…` in the Docker
+image) or mount a folder into the container and use its container path, e.g. `/sf2/MyBass.sf2`.
 
 ## list_instruments
 
 No options (or a `filename`). Read-only. Returns the rendering engines this server can run —
-their availability, the default soundfont and notes — and, with a filename, that file's note
-tracks and stored specs. Engines run as **separate processes**, so a crashing or differently
-licensed engine can never take the server down.
+their availability, the default soundfont and notes — plus the instrument catalog: the 128 GM
+melodic program names (index = `program` number) and the standard drum kits (name → kit number
+for a drum track). With a filename, also returns that file's note tracks and stored specs.
+Engines run as **separate processes**, so a crashing or differently licensed engine can never
+take the server down.
 
 ## list_chord_types
 

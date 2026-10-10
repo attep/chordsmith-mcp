@@ -151,7 +151,14 @@ class EngineEntry(TypedDict):
 class InstrumentTrack(TypedDict):
     engine: str
     preset: str | None
+    bank: int | None
+    program: int | None
     gain_db: float
+
+
+class ProgramCatalog(TypedDict):
+    melodic: list[str]
+    drums: dict[str, int]
 
 
 class InstrumentsFile(TypedDict):
@@ -162,6 +169,7 @@ class InstrumentsFile(TypedDict):
 
 class InstrumentsResult(TypedDict):
     engines: list[EngineEntry]
+    programs: ProgramCatalog
     file: InstrumentsFile | None
 
 
