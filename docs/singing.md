@@ -184,6 +184,11 @@ finished mix by subtracting the band's energy) with a `balance_check` flag (`ok`
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.
 
+The backing honors per-track `set_track_instrument` specs: a track's soundfont, GM program and
+`gain_db` are applied when its stem is rendered (the result lists the `instruments` used).
+`backing_levels` entries override a spec's `gain_db`. Without specs or levels the backing renders
+in one pass; otherwise each track renders on its own, several at a time.
+
 The mix has level, per-stem trims, an optional vocal compressor, optional ducking, and
 normalization — no EQ. The peak is measured on a float render before the 16-bit export, so a hot
 mix is turned down from its true peak and a clipped file is never written (`clipping` reports
@@ -200,15 +205,16 @@ raw) but can help a quieter vocal over a loud backing (61/88 raw against 82/88 c
 vocal +6 dB), so it is off by default — judge each song by ear.
 
 **Ducking (`ducking`, off by default; `duck_db`, default 4):** the vocal's envelope dips the
-backing `duck_db` dB while the voice sings, with a fast attack and a slow release. The dip is
-applied **after** the balance is computed on the original backing, so it adds real headroom: the
-vocal sits `vocal_level_db + duck_db` above the band during phrases (reported as
-`vocal_to_backing_db`), and the band returns to its own level between phrases.
+backing `duck_db` dB while the voice sings, with a fast attack and a slow release, and the vocal
+gain is reduced by the same amount, so `vocal_level_db` stays the level you hear over the dipped
+band during phrases (reported as `vocal_to_backing_db`); against the untouched backing the vocal
+sits `duck_db` lower (`vocal_to_original_backing_db`), and the band returns to its own level
+between phrases.
 
 **Per-stem levels:** `backing_levels` takes per-track dB trims keyed by track name, e.g.
 `{"Drums": -4, "Pad": 2}`. Each backing track is rendered separately and mixed with its trim, so
 a loud drum track can sit under the pad without touching the arrangement; tracks not listed keep
-their level. It costs one render per track, so the mix takes longer.
+their level (or a spec's `gain_db`). It costs one render per track, so the mix takes longer.
 
 ## Settings
 

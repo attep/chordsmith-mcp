@@ -32,7 +32,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from chordsmith import audio, delivery, diffsinger, results
+from chordsmith import audio, delivery, diffsinger, renderers, results
+from chordsmith.offload import offloaded
 from chordsmith.storage import FileStore
 from chordsmith.theory import midi_note_name
 
@@ -990,8 +991,8 @@ def _duck_backing(backing: Path, vocal: Path, target: Path, duck_db: float) -> N
     ffmpeg's sidechaincompress truncates its output unpredictably, so the envelope is computed
     here instead: the vocal is measured in short blocks, the dip is smoothed with a fast attack
     and a slow release, and the backing is scaled per block with a linear ramp between blocks.
-    The dip must NOT be part of the balance measurement: it exists to add headroom for the
-    voice, so the mix is measured on the original backing and only this file carries the dip.
+    Only this file carries the dip; the vocal gain is targeted against the original backing minus
+    ``duck_db``, so ``vocal_level_db`` is the ratio the listener hears over the dipped band.
     """
     import array
     import math
@@ -1200,15 +1201,15 @@ def mix_tracks(
 ) -> dict:
     """Mix the vocal into the backing, balancing levels by measurement.
 
-    ``vocal_level_db`` is the target level of the vocal *above the band*, both measured over the
-    blocks where the voice is singing, so quiet backings and loud vocals are corrected instead
-    of being multiplied blindly. With ``compress`` the vocal gets a gentle high-pass and
+    ``vocal_level_db`` is the target level of the vocal *above the band as heard* — both measured
+    over the blocks where the voice is singing, so quiet backings and loud vocals are corrected
+    instead of being multiplied blindly. With ``compress`` the vocal gets a gentle high-pass and
     compressor before the measurement, so its per-note level swings are tamed and the balance is
     computed on what actually lands in the file (off by default: it costs diction on dense
-    mixes). ``ducking`` dips the backing by ``duck_db`` while the voice sings: the dip is
-    applied *after* the gain is computed on the original backing, so it adds real headroom — the
-    vocal sits ``vocal_level_db + duck_db`` above the band during phrases and the band returns
-    between them. The vocal is converted to the mix rate before measuring: the resampler's
+    mixes). ``ducking`` dips the backing by ``duck_db`` while the voice sings and the vocal gain
+    is reduced by the same amount, so ``vocal_level_db`` is what the listener hears over the
+    dipped band; against the original backing the vocal sits ``vocal_level_db - duck_db`` (both
+    ratios are reported). The vocal is converted to the mix rate before measuring: the resampler's
     anti-alias filter costs 24 kHz engine output a couple of dB, and the level that matters is
     the one in the finished file. The peak is measured on a float render, so the export is
     corrected to ``normalize_peak_db`` (default -1 dBFS) from the true peak, or guarded to
@@ -1270,7 +1271,10 @@ def _mix_tracks_at_mix_rate(
     duck_db: float = 0.0,
 ) -> dict:
     backing_db, vocal_db = active_levels(measure_backing, vocal)
-    vocal_gain_db = (backing_db + vocal_level_db) - vocal_db
+    # vocal_level_db means the level the listener hears over the band during phrases. With
+    # ducking the band dips by duck_db, so the vocal is targeted duck_db lower against the
+    # original backing and lands at vocal_level_db above the dipped band.
+    vocal_gain_db = (backing_db + vocal_level_db - duck_db) - vocal_db
     vocal_gain = 10.0 ** (vocal_gain_db / 20.0)
     trim_db = 20.0 * math.log10(backing_volume) if backing_volume > 0 else -120.0
     balance_db = (vocal_db + vocal_gain_db) - (backing_db + trim_db - duck_db)
@@ -1342,6 +1346,7 @@ def _mix_tracks_at_mix_rate(
         "vocal_rms_db": round(vocal_db, 1),
         "vocal_gain_db": round(vocal_gain_db, 1),
         "vocal_to_backing_db": round(balance_db, 1),
+        "vocal_to_original_backing_db": round(balance_db - duck_db, 1),
         "vocal_to_backing_measured_db": None if measured_db is None else round(measured_db, 1),
         "balance_check": balance_check,
     }
@@ -1639,6 +1644,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         return _job_payload(job)
 
     @mcp.tool(title="Mix song with vocals", annotations=_CREATES)
+    @offloaded
     def mix_song_with_vocals(
         source: Annotated[str, Field(description="The MIDI file the score came from.")],
         vocal: Annotated[str, Field(description="Vocal filename from a finished job, or the job id.")],
@@ -1651,8 +1657,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             Field(
                 ge=-12.0,
                 le=18.0,
-                description="How loud the vocal sits above the backing, in dB, measured over the "
-                "sung parts (default 6: clearly on top but not overpowering).",
+                description="How loud the vocal sits over the band as heard, in dB, measured "
+                "over the sung parts (default 6: clearly on top but not overpowering). With "
+                "ducking, this is the level over the dipped band during phrases.",
             ),
         ] = 6.0,
         backing_volume: Annotated[
@@ -1662,9 +1669,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             dict[str, Annotated[float, Field(ge=-24.0, le=12.0)]] | None,
             Field(
                 description="Per-track backing trims in dB, keyed by track name, e.g. "
-                "{'Drums': -4, 'Pad': 2}. Each track is rendered separately and mixed with its "
-                "trim, so the mix is slower; tracks not listed keep their level. Omit for a "
-                "single backing render."
+                "{'Drums': -4, 'Pad': 2}. Each track is rendered separately (per-track "
+                "set_track_instrument specs apply) and mixed with its trim; trims here override "
+                "a spec's gain_db. Omit to use only the specs (single pass when there are none)."
             ),
         ] = None,
         reverb: Annotated[
@@ -1691,8 +1698,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             bool,
             Field(
                 description="Dip the backing under the vocal (off by default) so the band steps "
-                "back while the voice sings; the dip is duck_db deep and adds real headroom "
-                "(the vocal sits vocal_level_db + duck_db above the band during phrases).",
+                "back while the voice sings; the dip is duck_db deep and the vocal is targeted "
+                "vocal_level_db over the dipped band (what you hear).",
             ),
         ] = False,
         duck_db: Annotated[
@@ -1712,15 +1719,16 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         """Render the backing without the guide track, mix in the vocal, and check the balance (step 4).
 
         Creates the backing and mix wavs (guide track left out). Levels are balanced by
-        measurement: the vocal is placed ``vocal_level_db`` above the backing's active level,
-        measured over the blocks where the voice sings, so quiet backings and loud vocals are
-        corrected instead of multiplied blindly. With ``backing_levels`` each backing track is
-        rendered separately and trimmed by its dB value before mixing, so drums, bass and pads
-        can be balanced against each other (slower: one render per track). The result reports the
-        achieved vocal_to_backing_db and a balance_check of 'ok'/'mismatch'/'unavailable'
-        (unavailable when reverb is on: the measurement assumes dry signals). The mix is
-        normalized to normalize_peak_db unless null, and clipped exports are turned down (see
-        clipping and gain_correction_db).
+        measurement: the vocal is placed ``vocal_level_db`` over the band as heard (over the
+        dipped band when ducking is on), measured over the blocks where the voice sings, so
+        quiet backings and loud vocals are corrected instead of multiplied blindly. Per-track
+        set_track_instrument specs (soundfont, GM program, gain) are honored for the backing;
+        with ``backing_levels`` each backing track is rendered separately and trimmed by its dB
+        value, which overrides a spec's gain (renders run several at a time). The result reports
+        the achieved vocal_to_backing_db (during phrases) and vocal_to_original_backing_db, plus
+        a balance_check of 'ok'/'mismatch'/'unavailable' (unavailable when reverb is on: the
+        measurement assumes dry signals). The mix is normalized to normalize_peak_db unless
+        null, and clipped exports are turned down (see clipping and gain_correction_db).
         """
         store = _get_store()
         assert store is not None
@@ -1748,6 +1756,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             if unknown:
                 available = ", ".join(names[index] for index in note_tracks) or "(none)"
                 raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
+        specs = renderers.load_specs(source_path)
+        use_stems = backing_levels is not None or bool(specs)
         with (
             # The backing is an internal intermediate: always claim a unique name, even when the
             # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
@@ -1755,7 +1765,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             store.claimed_path(None, f"{source_path.stem}_backing", extension=".wav") as backing_wav,
             store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
         ):
-            if backing_levels is None:
+            instruments: dict[str, dict] | None = None
+            if not use_stems:
                 with store.claimed_path(
                     None, f"{source_path.stem}_backing", extension=".mid"
                 ) as backing_midi:
@@ -1763,16 +1774,34 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                     audio.render(backing_midi, backing_wav, "wav")
             else:
                 with tempfile.TemporaryDirectory() as scratch:
-                    stems: list[Path] = []
-                    levels: list[float] = []
-                    for index in note_tracks:
+
+                    def render_backing_track(index: int) -> tuple[str, Path, float, renderers.InstrumentSpec]:
+                        name = names[index]
+                        spec = specs.get(name) or renderers.InstrumentSpec()
+                        gain_db = (
+                            backing_levels.get(name, spec.gain_db)
+                            if backing_levels is not None
+                            else spec.gain_db
+                        )
                         stem_midi = Path(scratch) / f"stem_{index}.mid"
                         stem_wav = Path(scratch) / f"stem_{index}.wav"
                         extract_track(source_path, stem_midi, index)
-                        audio.render(stem_midi, stem_wav, "wav")
-                        stems.append(stem_wav)
-                        levels.append(backing_levels.get(names[index], 0.0))
-                    _mix_stems(stems, levels, backing_wav)
+                        renderer = renderers.get_renderer(spec.engine)
+                        try:
+                            renderer.render(stem_midi, spec, stem_wav)
+                        except renderers.RenderError as exc:
+                            raise SingingError(f"Track '{name}': {exc}") from None
+                        return name, stem_wav, gain_db, spec
+
+                    rendered = renderers.parallel_map(render_backing_track, note_tracks)
+                    _mix_stems(
+                        [stem_wav for _, stem_wav, _, _ in rendered],
+                        [gain_db for _, _, gain_db, _ in rendered],
+                        backing_wav,
+                    )
+                    instruments = {
+                        name: {**spec.model_dump(), "gain_db": gain_db} for name, _, gain_db, spec in rendered
+                    }
             info = mix_tracks(
                 backing_wav,
                 vocal_path,
@@ -1800,6 +1829,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "duck_db": duck_db if ducking else None,
             },
             "backing_levels": backing_levels,
+            "instruments": instruments,
             "compress": compress,
             "ducking": ducking,
             "guide_removed": _track_names(midi)[track_index],

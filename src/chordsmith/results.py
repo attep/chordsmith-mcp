@@ -321,6 +321,7 @@ class MixResult(TypedDict):
     backing: str
     levels: MixLevels
     backing_levels: dict[str, float] | None
+    instruments: dict[str, InstrumentTrack] | None
     compress: bool | None
     ducking: bool | None
     guide_removed: str
@@ -333,5 +334,6 @@ class MixResult(TypedDict):
     vocal_rms_db: float
     vocal_gain_db: float
     vocal_to_backing_db: float
+    vocal_to_original_backing_db: float
     vocal_to_backing_measured_db: float | None
     balance_check: str

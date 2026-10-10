@@ -9,6 +9,7 @@ tools/list stays cheap to load.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 
@@ -89,6 +90,15 @@ async def test_every_tool_has_an_object_output_schema():
         assert schema, f"{tool.name} has no outputSchema"
         assert schema.get("type") == "object", f"{tool.name} outputSchema is not an object"
         assert schema.get("properties"), f"{tool.name} outputSchema has no properties"
+
+
+async def test_heavy_tools_do_not_block_the_event_loop():
+    # FastMCP calls sync tool bodies on the event loop; a long render would freeze every other
+    # request (status checks, list calls) for its whole duration, so these must be offloaded.
+    manager = server.mcp._tool_manager
+    for name in ("render_audio", "mix_song_with_vocals"):
+        tool = manager.get_tool(name)
+        assert tool is not None and inspect.iscoroutinefunction(tool.fn), f"{name} would block the server"
 
 
 async def test_structured_content_matches_the_schema(store):

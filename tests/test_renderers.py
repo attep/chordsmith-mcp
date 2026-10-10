@@ -252,6 +252,21 @@ async def test_concurrent_stem_renders_get_distinct_files(store, monkeypatch):
     assert not names_a & names_b  # every stem claimed its own file
 
 
+async def test_render_audio_stems_use_signed_urls_when_configured(store, monkeypatch):
+    song = await _make_band(store)
+    fake = _FakeRenderer()
+    monkeypatch.setitem(renderers.RENDERERS, "fluidsynth", fake)
+    monkeypatch.setattr(renderers, "combine_stems", lambda stems, target: _write_tiny_wav(target))
+    monkeypatch.setenv("CHORDSMITH_PUBLIC_URL", "https://example.test")
+    result = await _call("render_audio", {"filename": song, "stems": True})
+    assert not result.isError, result.content[0].text
+    data = result.structuredContent
+    assert data["data_base64"]  # the mix still follows return_as (base64 by default)
+    for stem in data["stems"]:
+        assert "data_base64" not in stem  # stems are megabytes each; links keep them off the wire
+        assert stem["download_url"].startswith("https://example.test/")
+
+
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
 async def test_program_choice_changes_the_stem_audio(store):
     song = await _make_band(store)

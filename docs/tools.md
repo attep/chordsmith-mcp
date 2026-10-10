@@ -210,7 +210,7 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 | `format` | `"wav"` (default) or `"mp3"` (mp3 needs ffmpeg) |
 | `return_as` | Like [get_midi_file](#get_midi_file): `"base64"` or `"url"` |
 | `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
-| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. One render per track, so it is slower; the result then also lists every stem (name, track, gain, sha256, bytes or link) |
+| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. Several renders run at once, but it is still slower than one pass; the result then also lists every stem (name, track, gain, sha256). Stem entries use signed URLs whenever a public URL is configured (they are megabytes each), otherwise they follow `return_as`; the mix always follows `return_as` |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
@@ -256,8 +256,10 @@ Example — a synth bass, a power drum kit, and the keys pulled back:
 
 Then `render_audio` with `stems: true` renders each track through its spec and sums the stems
 (each with its `gain_db`) into the mix; the result lists every stem so you can listen one by one.
-Unknown track names, missing soundfonts and unknown engines are rejected with a message that
-lists what is available. The specs follow the file through rename and delete.
+[`mix_song_with_vocals`](singing.md#mixing-and-export) honors the same specs for the backing
+(with `backing_levels` overriding a spec's gain). Unknown track names, missing soundfonts and
+unknown engines are rejected with a message that lists what is available. The specs follow the
+file through rename and delete.
 
 To use your own `.sf2` files, put them where the server can read them and pass that path as
 `preset`: drop them into the output folder (visible to the server as `/data/…` in the Docker

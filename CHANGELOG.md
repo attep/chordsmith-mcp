@@ -12,6 +12,31 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.10.0] - 2026-10-10
+
+### Fixed
+
+- **Vocal level with ducking.** `vocal_level_db` is again the level you hear over the band
+  during phrases: the vocal gain is reduced by `duck_db` against the original backing (v0.8.0
+  measured the original backing instead, so the vocal landed `duck_db` louder than requested).
+  The result now reports `vocal_to_original_backing_db` next to `vocal_to_backing_db`.
+- **The server stays responsive during renders.** FastMCP runs synchronous tool bodies on the
+  event loop, so a long stem render froze every other request (status checks failed with
+  "unhandled errors in a TaskGroup" while it ran); `render_audio` and `mix_song_with_vocals` are
+  now executed on worker threads.
+
+### Changed
+
+- **Stem renders run several at a time** (a bounded pool): a nine-track, 99-second song took
+  ~2m20s sequentially — past any client's tool timeout — and renders in a fraction of that now;
+  the per-track backing renders in `mix_song_with_vocals` are parallel too.
+- **Stems are delivered as signed URLs whenever `CHORDSMITH_PUBLIC_URL` is configured**: a
+  nine-track song inlined ~230 MB of base64 wavs, which no client can take in time; the mix
+  still follows `return_as`.
+- **`mix_song_with_vocals` honors `set_track_instrument` specs for the backing** (soundfont, GM
+  program, gain — `backing_levels` overrides a spec's gain) and reports the `instruments` used,
+  so a mix and a stems render of the same file agree.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

@@ -16,7 +16,7 @@ import mido
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from chordsmith import audio, diffsinger, server, singing
+from chordsmith import audio, diffsinger, renderers, server, singing
 
 pytestmark = pytest.mark.anyio
 
@@ -572,9 +572,10 @@ def test_mix_compressor_tames_the_vocal_dynamics(tmp_path):
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
-def test_mix_ducking_adds_headroom_for_the_voice(tmp_path):
-    # the dip is applied after the gain is computed on the ORIGINAL backing, so the vocal keeps
-    # its gain and the band steps back: vocal over band while singing = vocal_level_db + duck_db
+def test_mix_ducking_dips_the_band_and_keeps_the_requested_level(tmp_path):
+    # vocal_level_db is the ratio the listener hears over the dipped band: the vocal gain is
+    # reduced by duck_db against the original backing, so the band steps back without the vocal
+    # growing louder (against the original backing it sits duck_db lower).
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
     _write_constant_wav(backing, 8000, seconds=2.0, channels=2)
@@ -585,8 +586,9 @@ def test_mix_ducking_adds_headroom_for_the_voice(tmp_path):
     ducked_info = singing.mix_tracks(
         backing, vocal, ducked, compress=False, ducking=True, duck_db=4.0, normalize_peak_db=None
     )
-    assert ducked_info["vocal_gain_db"] == plain_info["vocal_gain_db"]  # the vocal keeps its gain
-    assert ducked_info["vocal_to_backing_db"] == 10.0  # 6 requested + 4 dip while singing
+    assert ducked_info["vocal_gain_db"] == plain_info["vocal_gain_db"] - 4.0  # the vocal steps back too
+    assert ducked_info["vocal_to_backing_db"] == 6.0  # what you hear over the dipped band
+    assert ducked_info["vocal_to_original_backing_db"] == 2.0
     assert ducked_info["balance_check"] == "ok"
     assert ducked_info["duck_db"] == 4.0
     assert plain_info["duck_db"] is None
@@ -660,6 +662,7 @@ async def test_mix_echoes_compress_and_ducking(store, monkeypatch):
             "vocal_rms_db": -24.0,
             "vocal_gain_db": 0.0,
             "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
             "vocal_to_backing_measured_db": 6.0,
             "balance_check": "ok",
         }
@@ -1110,6 +1113,7 @@ async def test_mix_accepts_a_job_id(store, fake_engine, monkeypatch):
             "vocal_rms_db": -24.0,
             "vocal_gain_db": 0.0,
             "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
             "vocal_to_backing_measured_db": 6.0,
             "balance_check": "ok",
         }
@@ -1152,9 +1156,15 @@ async def test_mix_per_stem_levels_render_each_track(store, monkeypatch):
     rendered = []
     mixed = {}
 
-    def fake_render(source, target, audio_format, soundfont=None):
-        rendered.append(source.name)
-        target.write_bytes(b"RIFF0000")
+    class FakeRenderer:
+        name = "fluidsynth"
+
+        def available(self):
+            return True
+
+        def render(self, midi, spec, out):
+            rendered.append(Path(midi).name)
+            out.write_bytes(b"RIFF0000")
 
     def fake_stems(stems, levels, target):
         mixed["stems"] = list(stems)
@@ -1173,11 +1183,12 @@ async def test_mix_per_stem_levels_render_each_track(store, monkeypatch):
             "vocal_rms_db": -24.0,
             "vocal_gain_db": 0.0,
             "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
             "vocal_to_backing_measured_db": 6.0,
             "balance_check": "ok",
         }
 
-    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setitem(renderers.RENDERERS, "fluidsynth", FakeRenderer())
     monkeypatch.setattr(singing, "_mix_stems", fake_stems)
     monkeypatch.setattr(singing, "mix_tracks", fake_mix)
     result = await _call(
@@ -1189,6 +1200,73 @@ async def test_mix_per_stem_levels_render_each_track(store, monkeypatch):
     # two stems (Chords and Bass); the guide (Melody) is left out and unlisted Chords keeps 0 dB
     assert len(rendered) == 2 and len(mixed["stems"]) == 2
     assert mixed["levels"] == [0.0, -6.0]
+
+
+async def test_mix_uses_sidecar_instrument_specs(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    captured = []
+
+    class FakeRenderer:
+        name = "fluidsynth"
+
+        def available(self):
+            return True
+
+        def render(self, midi, spec, out):
+            captured.append((Path(midi).name, spec.program, spec.gain_db))
+            out.write_bytes(b"RIFF0000")
+
+    def fake_stems(stems, levels, target):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setitem(renderers.RENDERERS, "fluidsynth", FakeRenderer())
+    monkeypatch.setattr(singing, "_mix_stems", fake_stems)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {
+                "Chords": {"engine": "fluidsynth", "program": 89},
+                "Bass": {"engine": "fluidsynth", "program": 38, "gain_db": -3.0},
+            },
+        },
+    )
+    result = await _call("mix_song_with_vocals", {"source": song, "vocal": "vocal.wav"})
+    assert not result.isError, result.content[0].text
+    data = result.structuredContent
+    # specs force the per-track path even without backing_levels, and reach the renderer
+    assert len(captured) == 2
+    assert {program for _, program, _ in captured} == {89, 38}
+    assert data["instruments"]["Bass"]["program"] == 38
+    assert data["instruments"]["Bass"]["gain_db"] == -3.0
+    assert data["instruments"]["Chords"]["program"] == 89
+
+    overridden = await _call(
+        "mix_song_with_vocals",
+        {"source": song, "vocal": "vocal.wav", "backing_levels": {"Bass": -6}},
+    )
+    # an explicit backing_levels entry overrides the spec's gain, the program still applies
+    assert overridden.structuredContent["instruments"]["Bass"]["gain_db"] == -6.0
+    assert overridden.structuredContent["instruments"]["Bass"]["program"] == 38
 
 
 async def test_concurrent_mixes_get_distinct_backings(store, monkeypatch):
@@ -1212,6 +1290,7 @@ async def test_concurrent_mixes_get_distinct_backings(store, monkeypatch):
             "vocal_rms_db": -24.0,
             "vocal_gain_db": 0.0,
             "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
             "vocal_to_backing_measured_db": 6.0,
             "balance_check": "ok",
         }

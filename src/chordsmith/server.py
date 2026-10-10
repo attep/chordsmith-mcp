@@ -25,6 +25,7 @@ from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
 from chordsmith.midi_writer import transpose_file, write_progression
 from chordsmith.models import ChordEvent, Humanize, LoopSpec, NoteInput, NumeralEvent, Rhythm, Voicing
+from chordsmith.offload import offloaded
 from chordsmith.storage import FileStore, StorageError
 from chordsmith.theory import (
     CHORD_TYPES,
@@ -631,6 +632,7 @@ def rename_midi_file(
 
 
 @mcp.tool(title="Render audio", annotations=CREATES)
+@offloaded
 def render_audio(
     filename: Annotated[str, Field(description="MIDI file in the output folder to render.")],
     format: Annotated[Literal["wav", "mp3"], Field(description="Audio format.")] = "wav",
@@ -645,9 +647,9 @@ def render_audio(
         bool,
         Field(
             description="Render each track as its own wav stem (using set_track_instrument "
-            "specs) and combine them into the mix. Slower: one render per track; stems always "
-            "get unique names and are returned in the 'stems' list (URL delivery is recommended "
-            "when there is more than one)."
+            "specs) and combine them into the mix. One render per track (several at once), so "
+            "it is slower; stems always get unique names. Stem entries are delivered as signed "
+            "URLs when a public URL is configured, else like return_as."
         ),
     ] = False,
     output_filename: FileName = None,
@@ -700,9 +702,9 @@ def _render_stems(
     tracks = renderers.note_tracks(midi)
     if not tracks:
         raise ValueError("This file has no note tracks to render.")
-    stems: list[renderers.Stem] = []
     with tempfile.TemporaryDirectory() as scratch:
-        for index in tracks:
+
+        def render_track(index: int) -> renderers.Stem:
             name = names[index]
             stem_midi = Path(scratch) / f"stem_{index}.mid"
             singing.extract_track(source, stem_midi, index)
@@ -713,7 +715,9 @@ def _render_stems(
                     renderer.render(stem_midi, spec, stem_wav)
                 except renderers.RenderError as exc:
                     raise ValueError(f"Track '{name}': {exc}") from None
-            stems.append(renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db))
+                return renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db)
+
+        stems = renderers.parallel_map(render_track, tracks)
         with store.claimed_path(
             output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
         ) as target:
@@ -730,9 +734,13 @@ def _render_stems(
     result["source"] = source.name
     if audio_format == "wav":
         result["duration_seconds"] = round(audio.wav_duration(target), 2)
+    # Stems are big (a minute of stereo wav is ~10 MB each), so with a public URL configured
+    # they are always delivered as signed links: inlining ten of them can outsize any client's
+    # tool timeout. The mix above still follows return_as.
+    stem_return = "url" if delivery.public_url() else return_as
     result["stems"] = [
         {
-            **delivery.deliver_file(stem.path.name, stem.path.read_bytes(), return_as, expires_in),
+            **delivery.deliver_file(stem.path.name, stem.path.read_bytes(), stem_return, expires_in),
             "mime_type": "audio/wav",
             "track": stem.track,
             "gain_db": stem.gain_db,

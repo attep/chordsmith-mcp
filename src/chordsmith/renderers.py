@@ -10,6 +10,7 @@ never modified.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from chordsmith.storage import FileStore
 
 SPECS_SUFFIX = ".instruments.json"
 FFMPEG_TIMEOUT_SECONDS = 300
+STEM_WORKERS = max(2, min(6, os.cpu_count() or 4))
 
 GM_PROGRAMS = [
     "Acoustic Grand Piano",
@@ -350,6 +352,18 @@ def note_tracks(midi: mido.MidiFile) -> list[int]:
         for index, track in enumerate(midi.tracks)
         if any(message.type == "note_on" and message.velocity > 0 for message in track)
     ]
+
+
+def parallel_map(worker, items: list) -> list:
+    """Run ``worker`` over ``items`` in a bounded thread pool; results stay in input order.
+
+    Each stem render is an independent engine process, so rendering several tracks at once
+    divides the wall time; the pool is bounded because every engine loads its own soundfont.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=STEM_WORKERS) as pool:
+        return list(pool.map(worker, items))
 
 
 def track_names(midi: mido.MidiFile) -> list[str]:
