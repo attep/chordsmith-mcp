@@ -120,6 +120,25 @@ def render_pattern(
             t += step
             index += 1
 
+    if rhythm.hits is not None:
+        positions = sorted(rhythm.hits)
+        length_beats = length / TICKS_PER_BEAT
+        for index, position in enumerate(positions):
+            if position >= length_beats:
+                raise ValueError(
+                    f"A rhythm hit at beat {position:g} is past the chord length ({length_beats:g} beats)."
+                )
+            t = start + round(position * TICKS_PER_BEAT)
+            end = (
+                start + round(positions[index + 1] * TICKS_PER_BEAT)
+                if index + 1 < len(positions)
+                else start + length
+            )
+            span = max(1, end - t)
+            dur = max(1, round(span * rhythm.gate))
+            events += [NoteEvent(t, dur, n, vel) for n in all_notes]
+        return events
+
     if rhythm.pattern == "block":
         dur = max(1, round(length * rhythm.gate))
         events += [NoteEvent(start, dur, n, vel) for n in all_notes]

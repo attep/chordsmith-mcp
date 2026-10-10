@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -111,4 +111,11 @@ class Rhythm(BaseModel):
     )
     humanize: Humanize | None = Field(
         None, description="Adds small, seed-controlled timing/velocity variation for a less robotic feel."
+    )
+    hits: list[Annotated[float, Field(ge=0)]] | None = Field(
+        None,
+        max_length=64,
+        description="Explicit chord hit positions in beats, e.g. [0, 0.75, 1.5, 2.25] for off-beat "
+        "stabs, chugs or gallops. Overrides pattern/subdivision/swing; gate, velocity and "
+        "humanize still apply.",
     )

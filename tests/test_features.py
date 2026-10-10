@@ -337,6 +337,31 @@ def test_swing_moves_only_offbeats(tmp_path):
     assert on_beats(0.5) == [0, 360, 480, 840, 960, 1320, 1440, 1800]
 
 
+def test_rhythm_hits_place_stabs(tmp_path):
+    path = tmp_path / "stabs.mid"
+    _write(
+        path,
+        chords=("C",),
+        rhythm=Rhythm(hits=[0, 0.75, 1.5, 2.25], gate=0.5, velocity=88),
+    )
+    ticks = _note_on_ticks(path)
+    # three chord notes at each of the four hit positions (0.75 beat = 360 ticks)
+    assert ticks == [0, 360, 720, 1080]
+
+
+def test_rhythm_hits_validate_chord_length(tmp_path):
+    with pytest.raises(ValueError, match="past the chord"):
+        _write(tmp_path / "bad.mid", chords=("C",), rhythm=Rhythm(hits=[0, 4.5]))
+
+
+async def test_rhythm_hits_past_the_chord_are_rejected(store):
+    result = await _call(
+        "create_chord_progression",
+        {"chords": ["C"], "rhythm": {"hits": [0, 4.5]}},
+    )
+    assert result.isError and "past the chord" in result.content[0].text
+
+
 def test_humanize_is_deterministic_and_in_range(tmp_path):
     def render(seed):
         path = tmp_path / f"h{seed}.mid"

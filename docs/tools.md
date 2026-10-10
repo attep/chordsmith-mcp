@@ -141,6 +141,7 @@ Pass these inside `"rhythm": {...}`. All are optional.
 | Option | Default | Description |
 |---|---|---|
 | `pattern` | `"block"` | See below |
+| `hits` | off | `[0, 0.75, 1.5, 2.25]`: play the chord at exactly these beats inside each chord — off-beat stabs, chugs and gallops. Overrides `pattern`/`subdivision`/`swing`; `gate`, `velocity` and `humanize` still apply |
 | `subdivision` | `0.5` | Step length in beats for patterns that repeat. `1` = quarter notes, `0.5` = eighths, `0.25` = sixteenths |
 | `velocity` | `90` | Loudness 1–127 |
 | `gate` | `0.95` | How long each note sounds within its step (`1.0` = fully connected) |
