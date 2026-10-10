@@ -210,6 +210,7 @@ metadata; compliant clients then walk the OAuth flow automatically.
 | `CHORDSMITH_HOST` | `127.0.0.1` (Docker: set `0.0.0.0`) | Bind address. |
 | `CHORDSMITH_PORT` | `8000` | Bind port. |
 | `CHORDSMITH_TRANSPORT` | `stdio` | `streamable-http` for remote use (or pass `--transport`). |
+| `CHORDSMITH_RATE_LIMIT` | `120` | Requests per minute per client on the MCP endpoint (clients are told apart by their token, so the limit works behind the tunnel). `0` disables it. Over-limit requests get `429` with `Retry-After`. |
 
 ## Security notes
 

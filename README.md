@@ -153,8 +153,8 @@ server). See [docs/architecture.md](docs/architecture.md) for the design.
 
 Contributions are welcome — these are the areas where help is wanted most:
 
-- **Limits & hardening**: per-client rate limits, quotas (bars/tracks/file size/storage) and a
-  storage TTL cleanup for long-running servers
+- **Limits & hardening**: quotas (bars/tracks/file size/storage) and a storage TTL cleanup for
+  long-running servers (per-client rate limiting shipped in v0.6.0)
 - **More music helpers**: bass-line generation from the chords, drum-pattern presets, genre
   presets (jazz, pop, bossa, trap), section-based songs (verse/chorus/bridge)
 - **Interchange**: MusicXML export for MuseScore, multi-track naming polish

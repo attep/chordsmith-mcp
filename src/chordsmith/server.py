@@ -799,6 +799,21 @@ def main() -> None:
             )
         else:
             enable_auth(mcp, auth_config)
+    if args.transport == "streamable-http":
+        import uvicorn
+
+        from chordsmith.ratelimit import RateLimitMiddleware, TokenBucketLimiter, rate_limit_from_env
+
+        try:
+            limit = rate_limit_from_env()
+        except ValueError as exc:
+            parser.error(str(exc))
+        app = mcp.streamable_http_app()
+        if limit > 0:
+            logger.info("Rate limit: %d requests per minute per client.", limit)
+            app = RateLimitMiddleware(app, TokenBucketLimiter(limit), mcp.settings.streamable_http_path)
+        uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
+        return
     mcp.run(transport=args.transport)
 
 

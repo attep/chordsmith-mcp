@@ -50,9 +50,11 @@ When something is wrong, the call comes back as an **error the assistant can act
 The tool definitions follow the MCP
 [tools specification](https://modelcontextprotocol.io/specification/2026-07-28/server/tools):
 `name`, `title`, `description`, `inputSchema`, `outputSchema`, `annotations`, and results with
-`structuredContent` / `isError`. On the wire, ChordSmith currently negotiates protocol revision
-**2025-11-25**, the latest supported by the official MCP Python SDK v1.x; the tool fields above
-are common to both revisions (icons are optional and not used yet).
+`structuredContent` / `isError`. Tool calls are rate limited per client (`CHORDSMITH_RATE_LIMIT`,
+default 120 requests per minute; over-limit requests get `429` with `Retry-After`). On the wire,
+ChordSmith currently negotiates protocol revision **2025-11-25**, the latest supported by the
+official MCP Python SDK v1.x; the tool fields above are common to both revisions (icons are
+optional and not used yet).
 
 ---
 
