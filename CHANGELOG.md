@@ -12,6 +12,15 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.10.1] - 2026-10-10
+
+### Fixed
+
+- **The guide track default is deterministic.** With no `guide_track`, an exact `Vocal`,
+  `Voice` or `Melody` track name now wins (in that order) before falling back to the first
+  melody-like name — a file holding both `Lead` and `Vocal` used to resolve to whichever came
+  first in the file. Documented in the singing guide and the tool descriptions.
+
 ## [0.10.0] - 2026-10-10
 
 ### Fixed

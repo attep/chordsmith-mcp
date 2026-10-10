@@ -180,9 +180,12 @@ are not left very quiet. The result reports `backing_rms_db`, `vocal_rms_db`, `v
 calculated `vocal_to_backing_db`, the **measured** `vocal_to_backing_measured_db` (taken from the
 finished mix by subtracting the band's energy) with a `balance_check` flag (`ok` / `mismatch` /
 `unavailable` — the measurement assumes dry stems, so reverb makes it unavailable), the applied
-`gain_correction_db` and the final `peak_db`. The guide track (usually `Melody`) is left out of
-the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
-all via base64 or signed links.
+`gain_correction_db` and the final `peak_db`. The guide track is left out of the backing: by
+default an exact `Vocal`, `Voice` or `Melody` track name wins (in that order), otherwise the
+first name mentioning melody/vocal/lead/voice/sing — so pass `guide_track` when the file has
+several melody-like tracks (a file with both `Lead` and `Vocal` needs `guide_track: "Vocal"`).
+Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`, all via base64 or
+signed links.
 
 The backing honors per-track `set_track_instrument` specs: a track's soundfont, GM program and
 `gain_db` are applied when its stem is rendered (the result lists the `instruments` used).

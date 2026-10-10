@@ -1128,6 +1128,29 @@ async def test_mix_accepts_a_job_id(store, fake_engine, monkeypatch):
     assert result.structuredContent["vocal"] == job["filename"]
 
 
+def test_find_track_prefers_exact_guide_names(tmp_path):
+    midi = mido.MidiFile()
+    for name in ("Chords", "Lead", "Vocal", "Melody"):
+        track = mido.MidiTrack()
+        track.append(mido.MetaMessage("track_name", name=name, time=0))
+        track.append(mido.Message("note_on", note=60, velocity=80, time=0))
+        midi.tracks.append(track)
+    # an exact guide name wins over earlier melody-like names (Lead comes first in the file)
+    assert singing.find_track(midi, None) == 2  # 'Vocal'
+
+    only_lead = mido.MidiFile()
+    for name in ("Chords", "Lead"):
+        track = mido.MidiTrack()
+        track.append(mido.MetaMessage("track_name", name=name, time=0))
+        track.append(mido.Message("note_on", note=60, velocity=80, time=0))
+        only_lead.tracks.append(track)
+    assert singing.find_track(only_lead, None) == 1  # the regex fallback still finds 'Lead'
+    assert singing.find_track(only_lead, "Lead") == 1
+    assert singing.find_track(only_lead, 2) == 1
+    with pytest.raises(singing.SingingError):
+        singing.find_track(only_lead, "Nope")
+
+
 async def _make_band_song(store):
     """A song with chords, a Bass track and a Melody track (for backing-level tests)."""
     song = await _make_song(store)

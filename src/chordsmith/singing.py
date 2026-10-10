@@ -211,9 +211,19 @@ def _track_names(midi: mido.MidiFile) -> list[str]:
 
 
 def find_track(midi: mido.MidiFile, track: str | int | None) -> int:
-    """Resolve a track reference: 1-based index, name, or a melody-like name when None."""
+    """Resolve a track reference: 1-based index, name, or the guide track when None.
+
+    The default prefers an exact ``Vocal``, ``Voice`` or ``Melody`` name (in that order — the
+    guide is what the voice replaces), then the first track whose name merely mentions
+    melody/vocal/lead/voice/sing. Without the exact pass, a file holding both ``Lead`` and
+    ``Vocal`` resolves to whichever comes first in the file.
+    """
     names = _track_names(midi)
     if track is None:
+        for wanted in ("vocal", "voice", "melody"):
+            for index, name in enumerate(names):
+                if name.lower() == wanted:
+                    return index
         for index, name in enumerate(names):
             if _MELODY_NAME_RE.search(name):
                 return index
@@ -1502,8 +1512,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         track: Annotated[
             str | int | None,
             Field(
-                description="Melody track: a name, a 1-based index, or omit to auto-pick a track named "
-                "like 'Melody'/'Vocal'."
+                description="Melody track: a name, a 1-based index, or omit to auto-pick (an "
+                "exact 'Vocal'/'Voice'/'Melody' name first, else the first melody-like name)."
             ),
         ] = None,
         transpose: Annotated[
@@ -1650,7 +1660,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         vocal: Annotated[str, Field(description="Vocal filename from a finished job, or the job id.")],
         guide_track: Annotated[
             str | int | None,
-            Field(description="Track to leave out of the backing (default: the same melody track)."),
+            Field(
+                description="Track to leave out of the backing. Default: auto — an exact "
+                "'Vocal'/'Voice'/'Melody' name first, else the first melody-like name; pass the "
+                "name explicitly when the file has several (e.g. both 'Lead' and 'Vocal')."
+            ),
         ] = None,
         vocal_level_db: Annotated[
             float,

@@ -127,7 +127,9 @@ Wordless hums and Japanese kana work with the bundled VOICEVOX engine
 (`docker compose --profile singing up -d`). English lyrics need a DiffSinger voicebank that you
 download and mount yourself — it is never bundled or committed. The mixer measures the vocal
 against the band, can compress the voice or duck the band under it, and renders per-track stems
-you can balance with `backing_levels`. See [docs/singing.md](docs/singing.md).
+you can balance with `backing_levels`. The guide track is auto-picked (an exact
+`Vocal`/`Voice`/`Melody` name first, else the first melody-like name); pass `guide_track` when
+your file has several. See [docs/singing.md](docs/singing.md).
 
 ## Documentation
 
