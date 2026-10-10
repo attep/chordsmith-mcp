@@ -22,7 +22,7 @@ backing. Two engines are supported:
 1. `prepare_vocal_score` reads a **monophonic** melody track from a MIDI file, turns gaps into
    rests and converts the timing to VOICEVOX frames (93.75 per second). Default transposition is
    **-12** (one octave down), which suits a soft, light voice. The source file is never changed.
-2. `map_vocal_lyrics` attaches one token per note. Omit the lyrics for a wordless hum ("う" on
+2. `map_vocal_lyrics` attaches one token per sung note (rests take none). Omit the lyrics for a wordless hum ("う" on
    every note), pass Japanese kana (`う う う`), or English words/syllables with `language: "en"`
    (`so- di- um gold`; `+` continues the previous note, `-` is a pause, `br` a breath). Syllables
    joined by hyphens are looked up as the **whole word** and its sounds are split between the

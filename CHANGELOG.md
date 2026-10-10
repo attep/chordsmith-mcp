@@ -12,6 +12,14 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.5.3] - 2026-10-10
+
+### Fixed
+
+- **Lyric tokens: one per sung note.** The `map_vocal_lyrics` description and the singing guide
+  now say that rests take no token, instead of the ambiguous "one token per note" — building a
+  song with rests previously required guessing.
+
 ## [0.5.2] - 2026-10-10
 
 ### Fixed

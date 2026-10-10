@@ -1369,7 +1369,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         lyrics: Annotated[
             str | None,
             Field(
-                description="One token per note. English: words or syllables, e.g. 'sodium gold' or "
+                description="One token per sung note (rests take none). English: words or syllables, "
+                "e.g. 'sodium gold' or "
                 "'so- di- um gold'; '+' continues the previous note, '-' is a pause, 'br' a breath. "
                 "Japanese: kana, e.g. 'う う う'. Omit for a wordless hum."
             ),
@@ -1394,7 +1395,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             ),
         ] = False,
     ) -> results.MappingResult:
-        """Attach one token per note (step 2 of singing) and dry-run the phonemization.
+        """Attach one token per sung note (rests take none) and dry-run the phonemization.
 
         Read-only: registers the mapping in memory and returns the per-note plan (tokens,
         phonemes, timings) plus warnings, so mistakes are caught before rendering. The mapping is
