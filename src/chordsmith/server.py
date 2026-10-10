@@ -11,11 +11,12 @@ from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__, audio, delivery, singing
+from chordsmith import __version__, audio, delivery, results, singing
 from chordsmith.analysis import analyze_file
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
@@ -35,18 +36,44 @@ from chordsmith.theory import (
     split_numerals,
 )
 
-INSTRUCTIONS = """ChordSmith writes chord progressions to MIDI (.mid) files.
-You choose the harmony; ChordSmith turns it into notes and saves the file.
-Typical flow: (optional) read scales://{key} for the diatonic chords of a key ->
-create_chord_progression or create_progression_from_roman -> tell the user the file path.
-Use the 'voicing' and 'rhythm' options for inversions, voice leading, arpeggios or strumming.
-get_midi_file hands the actual file to tool-only clients; add_track adds melodies and other
-tracks; render_audio turns a file into wav/mp3 so it can be heard without a music app."""
+INSTRUCTIONS = """ChordSmith turns musical choices into MIDI and audio files on this computer.
+
+Workflow:
+1. Create: create_chord_progression (chord symbols) or create_progression_from_roman
+   (numerals + key). Read scales://{key} first to see the diatonic chords of a key.
+2. Extend: add_track adds a melody/bass/drum track to a copy of a file.
+3. Listen: render_audio renders a file to wav/mp3 without a music app.
+4. Sing: prepare_vocal_score -> map_vocal_lyrics -> render_singing -> get_singing_job ->
+   mix_song_with_vocals -> export_vocal_song (VOICEVOX for hums/kana, DiffSinger for English).
+5. Share: get_midi_file returns the file itself (base64 or a signed link); export_vocal_song
+   does the same for the mix, vocal and source MIDI.
+
+Conventions:
+- Files live in the output folder (see list_generated_files); '.mid'/'.wav'/'.mp3' is added to
+  names automatically, and an existing name is never replaced unless overwrite=true (otherwise
+  a '_2' suffix is used).
+- Everything is deterministic for the same input and settings; create tools accept 'seed' for
+  reproducible humanized renders, and render_singing accepts 'seed' to fix DiffSinger noise.
+- Errors are tool results with isError=true and a readable message that names the problem and
+  the fix (for example an unknown chord with a 'Did you mean' suggestion)."""
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("ChordSmith", instructions=INSTRUCTIONS)
 store = FileStore()
+
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+CREATES = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+)
+DESTRUCTIVE_IDEMPOTENT = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+)
 
 PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
     "lofi": (
@@ -82,6 +109,21 @@ Seed = Annotated[
         le=2**31 - 1,
         description="Fix the humanize random seed (overrides the preset's seed). The same seed "
         "always writes the same bytes; has no effect on rhythms without humanize.",
+    ),
+]
+VoicingOption = Annotated[
+    Voicing | None,
+    Field(
+        description="How each chord is arranged: style (close/open/drop2), inversion, octave, "
+        "voice_leading, add_bass. Omit for close root position."
+    ),
+]
+RhythmOption = Annotated[
+    Rhythm | None,
+    Field(
+        description="How the chords move in time: pattern (block, pulse, arpeggio_up/down/updown, "
+        "alberti, strum), subdivision, velocity, gate, swing, humanize. Omit for one held block "
+        "chord per chord."
     ),
 ]
 
@@ -186,19 +228,19 @@ def _render(
     overwrite: bool,
     midi_type: int = 1,
 ) -> dict[str, Any]:
-    path = store.new_path(filename, default_stem, overwrite)
-    result = write_progression(
-        path,
-        chords,
-        tempo_bpm=tempo,
-        time_signature=time_signature,
-        voicing=voicing or Voicing(),
-        rhythm=rhythm or Rhythm(),
-        program=instrument,
-        repeat=repeat,
-        title=path.stem,
-        midi_type=midi_type,
-    )
+    with store.claimed_path(filename, default_stem, overwrite) as path:
+        result = write_progression(
+            path,
+            chords,
+            tempo_bpm=tempo,
+            time_signature=time_signature,
+            voicing=voicing or Voicing(),
+            rhythm=rhythm or Rhythm(),
+            program=instrument,
+            repeat=repeat,
+            title=path.stem,
+            midi_type=midi_type,
+        )
     return {
         "filename": path.name,
         "path": str(path),
@@ -213,7 +255,7 @@ def _stem(symbols: list[str]) -> str:
     return "_".join(symbols[:8]).replace("#", "s").replace("/", "-over-") or "progression"
 
 
-@mcp.tool()
+@mcp.tool(title="Create chord progression", annotations=CREATES)
 def create_chord_progression(
     chords: ChordList,
     filename: FileName = None,
@@ -222,17 +264,20 @@ def create_chord_progression(
     beats_per_chord: BeatsPerChord = None,
     repeat: Repeat = 1,
     instrument: Instrument = 0,
-    voicing: Voicing | None = None,
-    rhythm: Rhythm | None = None,
+    voicing: VoicingOption = None,
+    rhythm: RhythmOption = None,
     preset: Preset = None,
     seed: Seed = None,
     midi_type: MidiType = 1,
     overwrite: Overwrite = False,
-) -> dict[str, Any]:
-    """Write chord symbols (e.g. ["Am", "F", "C", "G"]) to a MIDI file.
+) -> results.ProgressionResult:
+    """Write chord symbols (e.g. ["Am", "F", "C", "G"]) to a new MIDI file.
 
-    Supports slash chords (C/E) and many qualities (see list_chord_types). Returns the file path,
-    the notes used for every chord and the length in seconds.
+    Use this to start a song from chord names; for Roman numerals use
+    create_progression_from_roman instead. Slash chords (C/E) and 30 qualities are supported
+    (see list_chord_types). Creates a file in the output folder and returns the file name/path,
+    the notes used for every chord, tempo, length in seconds and bars. Errors name the bad chord
+    (with a suggestion); on failure no file is left behind.
     """
     ts = _parse_time_signature(time_signature)
     default_beats = beats_per_chord or ts[0] * 4 / ts[1]
@@ -259,7 +304,7 @@ def create_chord_progression(
     )
 
 
-@mcp.tool()
+@mcp.tool(title="Create progression from Roman numerals", annotations=CREATES)
 def create_progression_from_roman(
     numerals: Annotated[
         str | list[str | NumeralEvent],
@@ -277,16 +322,19 @@ def create_progression_from_roman(
     beats_per_chord: BeatsPerChord = None,
     repeat: Repeat = 1,
     instrument: Instrument = 0,
-    voicing: Voicing | None = None,
-    rhythm: Rhythm | None = None,
+    voicing: VoicingOption = None,
+    rhythm: RhythmOption = None,
     preset: Preset = None,
     seed: Seed = None,
     midi_type: MidiType = 1,
     overwrite: Overwrite = False,
-) -> dict[str, Any]:
-    """Write a Roman-numeral progression in a given key (e.g. i-VI-III-VII in A minor) to a MIDI file.
+) -> results.RomanProgressionResult:
+    """Write a Roman-numeral progression in a key (e.g. i-VI-III-VII in A minor) to a new MIDI file.
 
-    The response includes the resolved chord symbols, e.g. Am, F, C, G.
+    Use this when the key and numerals are known; for chord names use
+    create_chord_progression instead. Creates a file in the output folder and returns the key,
+    the numerals, the resolved chord symbols (e.g. Am, F, C, G) and the same file details as
+    create_chord_progression. Unknown modes and numerals are rejected with a suggestion.
     """
     parsed_key = parse_key(key)
     ts = _parse_time_signature(time_signature)
@@ -345,13 +393,18 @@ def _chord_type_rows() -> list[dict]:
     return rows
 
 
-@mcp.tool()
-def list_chord_types() -> list[dict[str, Any]]:
-    """List every supported chord quality with the symbols you can write and its notes in C."""
+@mcp.tool(title="List chord types", annotations=READ_ONLY)
+def list_chord_types() -> list[results.ChordTypeRow]:
+    """Return every supported chord quality, with the symbols you can write and its notes in C.
+
+    Each row gives the quality name, all accepted symbols, an example spelling, intervals in
+    semitones and the notes in C. Read-only; call this when a chord symbol was rejected or before
+    inventing spellings.
+    """
     return _chord_type_rows()
 
 
-@mcp.tool()
+@mcp.tool(title="Transpose MIDI", annotations=CREATES)
 def transpose_midi(
     filename: Annotated[str, Field(description="File in the output folder, e.g. 'Am_F_C_G.mid'.")],
     semitones: Annotated[
@@ -363,10 +416,12 @@ def transpose_midi(
     to_key: Annotated[str | None, Field(description="Target key, e.g. 'C minor'.")] = None,
     output_filename: FileName = None,
     overwrite: Overwrite = False,
-) -> dict[str, Any]:
+) -> results.TransposeResult:
     """Transpose a MIDI file by semitones, or from one key to another. Drums (channel 10) are untouched.
 
-    Writes a new file; the original is kept.
+    Creates a new file (the original is kept) and returns its name/path plus how many notes
+    moved. Give either 'semitones' or both 'from_key' and 'to_key'; with keys, the smallest move
+    (up to 6 semitones either way) is chosen. Chord-name markers are transposed too.
     """
     source = store.existing_path(filename)
     if semitones is None:
@@ -375,10 +430,10 @@ def transpose_midi(
         shift = (parse_key(to_key).tonic - parse_key(from_key).tonic) % 12
         semitones = shift - 12 if shift > 6 else shift
     direction = f"up{semitones}" if semitones >= 0 else f"down{-semitones}"
-    target = store.new_path(output_filename, f"{source.stem}_{direction}", overwrite)
-    if target == source:
-        raise ValueError("Choose a different output_filename; the original file is never replaced.")
-    info = transpose_file(source, target, semitones)
+    with store.claimed_path(output_filename, f"{source.stem}_{direction}", overwrite) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never replaced.")
+        info = transpose_file(source, target, semitones)
     return {
         "source": source.name,
         "filename": target.name,
@@ -389,25 +444,31 @@ def transpose_midi(
     }
 
 
-@mcp.tool()
+@mcp.tool(title="Analyze MIDI", annotations=READ_ONLY)
 def analyze_midi(
     filename: Annotated[str, Field(description="File in the output folder to analyse.")],
     window_beats: Annotated[
         float | None,
         Field(gt=0, le=64, description="Analysis window in beats. Default: one bar."),
     ] = None,
-) -> dict[str, Any]:
-    """Guess the chord in each bar (or window) of a MIDI file.
+) -> results.AnalyzeResult:
+    """Guess the chords, tempo and key of a MIDI file, window by window.
 
-    Works best on files with one chord per window (like files ChordSmith creates). Returns
-    tempo, time signature, markers and the detected progression.
+    Read-only; useful to check what a file (or a transposed copy) actually contains. Chord-name
+    markers written by ChordSmith are used when their notes match the window, so inversions and
+    added melody notes still read back as the original chords. Works best with one chord per
+    window; with fast changes it may return '?' or 'N.C.'.
     """
     return analyze_file(store.existing_path(filename), window_beats)
 
 
-@mcp.tool()
-def list_generated_files() -> dict[str, Any]:
-    """List the MIDI files in the ChordSmith output folder (newest first)."""
+@mcp.tool(title="List generated files", annotations=READ_ONLY)
+def list_generated_files() -> results.ListFilesResult:
+    """Return the MIDI files in the output folder (newest first) and the folder path.
+
+    Read-only; use it to find file names for get_midi_file, analyze_midi, transpose_midi or the
+    singing tools.
+    """
     root = store.ensure_root()
     return {"output_dir": str(root), "files": store.list_files()}
 
@@ -415,18 +476,20 @@ def list_generated_files() -> dict[str, Any]:
 ReturnAs = delivery.ReturnAs
 
 
-@mcp.tool()
+@mcp.tool(title="Get MIDI file", annotations=READ_ONLY)
 def get_midi_file(
     filename: Annotated[str, Field(description="File in the output folder, e.g. 'melancholy.mid'.")],
     return_as: ReturnAs = "base64",
     expires_in: Annotated[
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
     ] = delivery.DEFAULT_TTL_SECONDS,
-) -> dict[str, Any]:
+) -> results.GetMidiFileResult:
     """Return the MIDI file itself so tool-only clients can hand it to the user.
 
-    Use return_as='base64' for the bytes inline, or return_as='url' for a signed link that can
-    be opened without the OAuth login and expires after expires_in seconds.
+    Read-only. Use return_as='base64' for the bytes inline (with size and sha256), or
+    return_as='url' for a signed link that expires after expires_in seconds (needs
+    CHORDSMITH_PUBLIC_URL). The link is a capability URL: anyone holding it can download until
+    it expires, and '../' style names are rejected.
     """
     path = store.existing_path(filename)
     data = path.read_bytes()
@@ -435,7 +498,7 @@ def get_midi_file(
     return result
 
 
-@mcp.tool()
+@mcp.tool(title="Add track", annotations=CREATES)
 def add_track(
     filename: Annotated[str, Field(description="Existing file to copy and extend.")],
     track_name: Annotated[str, Field(description="Name of the new track, e.g. 'Melody'.")],
@@ -452,31 +515,33 @@ def add_track(
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
     output_filename: FileName = None,
     overwrite: Overwrite = False,
-) -> dict[str, Any]:
+) -> results.AddTrackResult:
     """Add a note-level track (melody, bass, drums, ...) to a copy of an existing MIDI file.
 
-    The original file is never modified. The copy keeps all existing tracks and gets the new one
-    on the chosen channel; a type 0 file is promoted to type 1.
+    Creates a new file; the original is never modified. The copy keeps all existing tracks and
+    gets the new one on the chosen channel (a type 0 file is promoted to type 1). Returns the new
+    file's name/path and how many notes/tracks it has. Pitches outside 0-127 and overlapping
+    notes are fine; the track is as monophonic or polyphonic as you write it.
     """
     source = store.existing_path(filename)
-    target = store.new_path(output_filename, f"{source.stem}_{track_name}", overwrite)
-    if target == source:
-        raise ValueError("Choose a different output_filename; the original file is never modified.")
-    parsed: list[tuple[int, float, float, int]] = []
-    for note in notes:
-        try:
-            pitch = parse_pitch(note.pitch)
-        except MusicTheoryError as exc:
-            raise ValueError(str(exc)) from None
-        parsed.append((pitch, note.start_beat, note.beats, note.velocity))
-    info = add_track_midi(
-        source,
-        target,
-        track_name=track_name,
-        program=instrument,
-        channel=channel - 1,
-        notes=parsed,
-    )
+    with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        parsed: list[tuple[int, float, float, int]] = []
+        for note in notes:
+            try:
+                pitch = parse_pitch(note.pitch)
+            except MusicTheoryError as exc:
+                raise ValueError(str(exc)) from None
+            parsed.append((pitch, note.start_beat, note.beats, note.velocity))
+        info = add_track_midi(
+            source,
+            target,
+            track_name=track_name,
+            program=instrument,
+            channel=channel - 1,
+            notes=parsed,
+        )
     return {
         "source": source.name,
         "filename": target.name,
@@ -488,26 +553,34 @@ def add_track(
     }
 
 
-@mcp.tool()
+@mcp.tool(title="Delete MIDI file", annotations=DESTRUCTIVE_IDEMPOTENT)
 def delete_midi_file(
     filename: Annotated[str, Field(description="File in the output folder to delete.")],
-) -> dict[str, Any]:
-    """Delete a MIDI file from the output folder."""
+) -> results.DeleteResult:
+    """Delete a MIDI file from the output folder.
+
+    Removes the file permanently and returns its name; use list_generated_files to confirm the
+    name first. Fails with a clear message when the file does not exist.
+    """
     path = store.remove(filename)
     return {"deleted": path.name}
 
 
-@mcp.tool()
+@mcp.tool(title="Rename MIDI file", annotations=DESTRUCTIVE)
 def rename_midi_file(
     filename: Annotated[str, Field(description="File in the output folder to rename.")],
     new_name: Annotated[str, Field(description="New name, e.g. 'lofi_sketch'. '.mid' is added.")],
-) -> dict[str, Any]:
-    """Rename a MIDI file. Refuses to overwrite an existing file."""
+) -> results.RenameResult:
+    """Rename a MIDI file. Refuses to overwrite an existing file.
+
+    Changes the file's name in place and returns the new name/path. If the target name exists,
+    the call fails and nothing changes.
+    """
     target = store.rename(filename, new_name)
     return {"filename": target.name, "path": str(target), "uri": f"midi://{target.name}"}
 
 
-@mcp.tool()
+@mcp.tool(title="Render audio", annotations=CREATES)
 def render_audio(
     filename: Annotated[str, Field(description="MIDI file in the output folder to render.")],
     format: Annotated[Literal["wav", "mp3"], Field(description="Audio format.")] = "wav",
@@ -523,20 +596,22 @@ def render_audio(
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
     ] = delivery.DEFAULT_TTL_SECONDS,
     overwrite: Overwrite = False,
-) -> dict[str, Any]:
+) -> results.RenderAudioResult:
     """Render a MIDI file to audio (wav or mp3) with FluidSynth so it can be heard without a music app.
 
-    The audio file is written next to the MIDI files and returned like get_midi_file
-    (base64 bytes or a signed, expiring download URL).
+    Creates an audio file next to the MIDI files and returns it like get_midi_file (base64 bytes
+    or a signed, expiring URL), plus the source name and, for wav, the duration in seconds. MP3
+    needs ffmpeg; FluidSynth and a soundfont are required (both are in the Docker image). On
+    failure a clear error explains what is missing and no file is left behind.
     """
     source = store.existing_path(filename)
-    target = store.new_path(
+    with store.claimed_path(
         output_filename or source.stem, f"{source.stem}_{format}", overwrite, f".{format}"
-    )
-    try:
-        audio.render(source, target, format, soundfont)
-    except audio.AudioError as exc:
-        raise ValueError(str(exc)) from None
+    ) as target:
+        try:
+            audio.render(source, target, format, soundfont)
+        except audio.AudioError as exc:
+            raise ValueError(str(exc)) from None
     data = target.read_bytes()
     result = delivery.deliver_file(target.name, data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if format == "wav" else "audio/mpeg"

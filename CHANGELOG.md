@@ -12,6 +12,37 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.5.1] - 2026-10-10
+
+### Added
+
+- **Typed results for every tool**: all 18 tools declare an output schema, so clients receive
+  machine-checkable `structuredContent` (field names, types and nullability) next to the text.
+- **Agent metadata**: every tool has a human title and MCP behaviour annotations
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so agents can tell safe reads from file
+  creation and destructive calls before calling.
+- **`align_stress`** (opt-in) in `map_vocal_lyrics`: when a stressed syllable gets a much shorter
+  note than a weak one in the same word, the two note lengths are swapped (pitch order and total
+  length unchanged) — fixes the classic "SO-di-um" mismatch without hand-editing the melody.
+- The `seed` option is now documented in the `create_chord_progression` reference (it was already
+  supported).
+
+### Fixed
+
+- **Overlapping calls can no longer race to the same output file.** Filenames are claimed
+  atomically before writing (`O_CREAT|O_EXCL`) and the claim is cleaned up when a render fails,
+  so two jobs that used to pick `song_vocal.wav` now always get distinct files.
+- **The mix measures the vocal at the mix rate.** The resampler's anti-alias filter costs 24 kHz
+  VOICEVOX output a couple of dB on the way to the 44.1 kHz mix, so the balance was computed from
+  a level the file never had: VOICEVOX mixes landed ~2.7 dB below the requested `vocal_level_db`
+  and `balance_check` reported a false `mismatch`. The vocal is now converted first and measured
+  as it will be mixed.
+- `mix_song_with_vocals` called with a **job id** uses the job's own vocal file, even when a file
+  with the same name exists on disk (previously it could mix the wrong take).
+- Tool descriptions and schemas tightened: every option has a description and its default in the
+  input schema, every description says what the tool returns, and the tools/list payload is
+  budgeted by a test.
+
 ## [0.5.0] - 2026-10-10
 
 ### Added

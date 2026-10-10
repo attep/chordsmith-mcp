@@ -42,6 +42,7 @@ Turns chord symbols into a MIDI file.
 | `voicing` | object | close, root position | See [Voicing options](#voicing-options) |
 | `rhythm` | object | block chords | See [Rhythm options](#rhythm-options) |
 | `preset` | text | none | `"lofi"`: voice leading on, soft swung repeated chord hits (pulse pattern) and light humanization |
+| `seed` | number | none | Fix the humanization randomness so the same call writes identical bytes (used with a preset or a `rhythm.humanize`; overrides its `seed`) |
 | `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
 | `overwrite` | true/false | `false` | Replace a file with the same name |
 

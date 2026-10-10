@@ -159,13 +159,16 @@ fixed `seed`, keep the same lyric, and run each version **two or three times**, 
 
 `mix_song_with_vocals` measures the active level of both stems **over the blocks where the voice
 is singing** (all channels, so a stereo band is judged as a whole) and places the vocal
-`vocal_level_db` dB above it (default `6`). The mono vocal is panned to stereo before mixing, so
+`vocal_level_db` dB above it (default `6`). The vocal is converted to the mix rate **before**
+measuring, so 24 kHz VOICEVOX output is judged as it will be mixed (the resampler costs it a
+couple of dB). The mono vocal is panned to stereo before mixing, so
 the measured balance is the real one; `backing_volume` trims the backing (default `1.0`) and
-`reverb` is **off** by default. The finished mix is normalized to `normalize_peak_db` (default
-`-1` dBFS; set null to keep the raw level), so exports are not left very quiet. The result reports
-`backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`, the calculated `vocal_to_backing_db`, the
-**measured** `vocal_to_backing_measured_db` (taken from the finished mix by subtracting the band's
-energy) with a `balance_check` flag (`ok` / `mismatch` / `unavailable` with reverb), the applied
+`reverb` is **off** by default (it adds a gentle echo, not a room reverb). The finished mix is
+normalized to `normalize_peak_db` (default `-1` dBFS; set null to keep the raw level), so exports
+are not left very quiet. The result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`, the
+calculated `vocal_to_backing_db`, the **measured** `vocal_to_backing_measured_db` (taken from the
+finished mix by subtracting the band's energy) with a `balance_check` flag (`ok` / `mismatch` /
+`unavailable` — the measurement assumes dry stems, so reverb makes it unavailable), the applied
 `gain_correction_db` and the final `peak_db`. The guide track (usually `Melody`) is left out of
 the backing by default. Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`,
 all via base64 or signed links.

@@ -67,8 +67,9 @@ HTTPS certificate automatically.
    ```
 
 5. Check it's alive: open `https://chordsmith.example.com/healthz` — you should see
-   `{"status": "ok"}`. Then connect your AI app (see below) and enter the password when the
-   sign-in page opens.
+   `{"status": "ok", "version": "..."}` reporting the version the image was built from (the
+   Docker build bakes it in, so rebuild after an upgrade). Then connect your AI app (see below)
+   and enter the password when the sign-in page opens.
 
 The generated `.mid`/`.wav`/`.mp3` files land in `./data` next to the compose file, and the
 OAuth state in `./state`, so they survive upgrades and are easy to copy out. To update:

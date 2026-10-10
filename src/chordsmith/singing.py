@@ -16,6 +16,7 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -28,9 +29,10 @@ from typing import Annotated, Any, Literal
 import httpx
 import mido
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from chordsmith import audio, delivery, diffsinger
+from chordsmith import audio, delivery, diffsinger, results
 from chordsmith.storage import FileStore
 from chordsmith.theory import midi_note_name
 
@@ -48,6 +50,13 @@ VOICEVOX_LICENCE = (
 )
 _KANA_RE = re.compile(r"^[\u3041-\u3096\u30a1-\u30fa\u30fc]+$")
 _MELODY_NAME_RE = re.compile(r"melody|vocal|lead|voice|sing", re.IGNORECASE)
+
+_READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+_CREATES = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
 
 
 class SingingError(ValueError):
@@ -435,7 +444,10 @@ def _truncate_groups(groups: list[list[str]], limit: int) -> list[list[str]]:
 
 
 def _stress_warnings(
-    groups: list[list[str]], remaining: list[ScoreNote], stress_per_note: dict[int, float | None]
+    groups: list[list[str]],
+    remaining: list[ScoreNote],
+    stress_per_note: dict[int, float | None],
+    aligned: set[int] | None = None,
 ) -> list[str]:
     """Warn when a stressed syllable lands on a much shorter note than a weak one in its word."""
     warnings: list[str] = []
@@ -459,21 +471,71 @@ def _stress_warnings(
                 stressed_token, stressed_seconds = min(stressed, key=lambda item: item[1])
                 weak_token, weak_seconds = max(weak, key=lambda item: item[1])
                 if stressed_seconds < 0.6 * weak_seconds:
+                    suffix = (
+                        " The note lengths were swapped (align_stress)."
+                        if aligned
+                        and any(note.note_id in aligned for note in remaining[index : index + len(group)])
+                        else " Consider swapping the syllables, or pass align_stress to swap the "
+                        "note lengths automatically."
+                    )
                     warnings.append(
                         f"'{''.join(group)}': the stressed syllable '{stressed_token}' sits on a "
                         f"shorter note ({stressed_seconds:.2f}s) than the weak syllable "
-                        f"'{weak_token}' ({weak_seconds:.2f}s); consider swapping the syllables "
-                        "or giving the word longer notes."
+                        f"'{weak_token}' ({weak_seconds:.2f}s).{suffix}"
                     )
         index += len(group)
     return warnings
 
 
+def _align_stress(
+    groups: list[list[str]], remaining: list[ScoreNote], stress_per_note: dict[int, float | None]
+) -> dict[int, tuple[float, float]]:
+    """Swap note lengths inside a word so stressed syllables get the longest notes.
+
+    Returns {note_id: (start_seconds, seconds)} for the affected notes; pitch order and the
+    total duration stay unchanged, and no gaps are introduced.
+    """
+    retimed: dict[int, tuple[float, float]] = {}
+    index = 0
+    for group in groups:
+        if len(group) == 1 and group[0] in ("+", "-", "br"):
+            index += 1
+            continue
+        positions = [index + offset for offset in range(len(group)) if index + offset < len(remaining)]
+        index += len(group)
+        if len(positions) < 2:
+            continue
+        levels = [stress_per_note.get(remaining[position].note_id) for position in positions]
+        if 1 not in levels or 0 not in levels:
+            continue
+        stressed_positions = [p for p, level in zip(positions, levels, strict=True) if level == 1]
+        weak_positions = [p for p, level in zip(positions, levels, strict=True) if level == 0]
+        shortest_stressed = min(stressed_positions, key=lambda p: remaining[p].seconds)
+        longest_weak = max(weak_positions, key=lambda p: remaining[p].seconds)
+        if remaining[shortest_stressed].seconds >= 0.6 * remaining[longest_weak].seconds:
+            continue
+        durations = {p: remaining[p].seconds for p in positions}
+        durations[shortest_stressed], durations[longest_weak] = (
+            durations[longest_weak],
+            durations[shortest_stressed],
+        )
+        cursor = remaining[positions[0]].start_seconds
+        for position in positions:
+            retimed[remaining[position].note_id] = (cursor, durations[position])
+            cursor += durations[position]
+    return retimed
+
+
 def build_mapping(
-    score: VocalScore, lyrics: str | None, language: str, holds: dict[int, int] | None
+    score: VocalScore,
+    lyrics: str | None,
+    language: str,
+    holds: dict[int, int] | None,
+    align_stress: bool = False,
 ) -> VocalMapping:
     wordless = lyrics is None or lyrics.strip() == ""
     warnings: list[str] = []
+    retimed: dict[int, tuple[float, float]] = {}
     sung = [note for note in score.notes if not note.is_rest]
 
     # Holds are applied first: the notes a hold consumes never get their own text or phonemes,
@@ -533,7 +595,9 @@ def build_mapping(
             for note, phones, level in zip(remaining, phones_per_token, stress, strict=False):
                 phonemes_per_note[note.note_id] = phones
                 stress_per_note[note.note_id] = level
-            warnings.extend(_stress_warnings(groups, remaining, stress_per_note))
+            retimed = _align_stress(groups, remaining, stress_per_note) if align_stress else {}
+            aligned = set(retimed)
+            warnings.extend(_stress_warnings(groups, remaining, stress_per_note, aligned))
     syllable_by_note = {
         note.note_id: syllables[index] for index, note in enumerate(remaining) if index < len(syllables)
     }
@@ -553,12 +617,13 @@ def build_mapping(
         if not wordless and lyric == "":
             phonemes = None  # no syllable: this note becomes a rest
         is_rest = not wordless and lyric == ""
-        seconds = note.seconds + held_seconds.get(note.note_id, 0.0)
+        start_seconds, base_seconds = retimed.get(note.note_id, (note.start_seconds, note.seconds))
+        seconds = base_seconds + held_seconds.get(note.note_id, 0.0)
         mapping_notes.append(
             MappingNote(
                 note.note_id,
                 None if is_rest else note.key,
-                note.start_seconds,
+                start_seconds,
                 seconds,
                 lyric,
                 is_rest,
@@ -746,7 +811,7 @@ def _run_voicevox(job: SingingJob, mapping: VocalMapping, score: VocalScore, que
     return {"data": data, "query_voice_id": f"voicevox:{query}"}
 
 
-def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore) -> dict:
+def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore, path: Path) -> dict:
     _, voice = parse_voice_engine(job.voice_id)
     mode = voice.split("/", 1)[-1]
     if mode not in diffsinger.MODES:
@@ -765,9 +830,6 @@ def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore) -
         raise SingingError("Nothing to sing: every note is a rest.")
     if any(not spec.phonemes for spec in specs):
         raise SingingError("English notes need phonemes; re-run map_vocal_lyrics with language='en'.")
-    store = _get_store()
-    assert store is not None
-    path = store.new_path(None, f"{Path(score.source).stem}_vocal", extension=".wav")
     info = diffsinger.render(
         specs,
         path,
@@ -781,7 +843,7 @@ def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore) -
         seed=job.settings.get("seed"),
         total_seconds=mapping.total_seconds,
     )
-    return {"path": path, "info": info}
+    return {"info": info}
 
 
 def _run_job(
@@ -792,14 +854,15 @@ def _run_job(
         engine, _ = parse_voice_engine(job.voice_id)
         store = _get_store()
         assert store is not None
-        if engine == "voicevox":
-            assert speakers is not None
-            result = _run_voicevox(job, mapping, score, *speakers)
-            path = store.new_path(None, f"{Path(score.source).stem}_vocal", extension=".wav")
-            path.write_bytes(result["data"])
-        else:
-            result = _run_diffsinger(job, mapping, score)
-            path = result["path"]
+        # claim the name up front: overlapping jobs must never share a file (and the placeholder
+        # is removed again if the render fails)
+        with store.claimed_path(None, f"{Path(score.source).stem}_vocal", extension=".wav") as path:
+            if engine == "voicevox":
+                assert speakers is not None
+                result = _run_voicevox(job, mapping, score, *speakers)
+                path.write_bytes(result["data"])
+            else:
+                result = _run_diffsinger(job, mapping, score, path)
         with wave.open(str(path), "rb") as handle:
             duration = handle.getnframes() / handle.getframerate()
             sample_rate = handle.getframerate()
@@ -1038,9 +1101,39 @@ def mix_tracks(
 
     ``vocal_level_db`` is the target level of the vocal *above the band*, both measured over the
     blocks where the voice is singing, so quiet backings and loud vocals are corrected instead
-    of being multiplied blindly. The finished mix is normalized to ``normalize_peak_db`` (default
-    -1 dBFS; pass None to keep the raw level) so exports are not left very quiet.
+    of being multiplied blindly. The vocal is converted to the mix rate before measuring: the
+    resampler's anti-alias filter costs 24 kHz engine output a couple of dB, and the level that
+    matters is the one in the finished file. The finished mix is normalized to
+    ``normalize_peak_db`` (default -1 dBFS; pass None to keep the raw level) so exports are not
+    left very quiet.
     """
+    original_vocal = vocal
+    with tempfile.TemporaryDirectory() as scratch:
+        vocal = Path(scratch) / "vocal_mix_rate.wav"
+        _ffmpeg(
+            ["-y", "-loglevel", "error", "-i", str(original_vocal), "-ac", "1", "-ar", "44100", str(vocal)]
+        )
+        return _mix_tracks_at_mix_rate(
+            backing,
+            vocal,
+            target,
+            vocal_level_db=vocal_level_db,
+            backing_volume=backing_volume,
+            reverb=reverb,
+            normalize_peak_db=normalize_peak_db,
+        )
+
+
+def _mix_tracks_at_mix_rate(
+    backing: Path,
+    vocal: Path,
+    target: Path,
+    *,
+    vocal_level_db: float,
+    backing_volume: float,
+    reverb: bool,
+    normalize_peak_db: float | None,
+) -> dict:
     backing_db, vocal_db = active_levels(backing, vocal)
     vocal_gain_db = (backing_db + vocal_level_db) - vocal_db
     vocal_gain = 10.0 ** (vocal_gain_db / 20.0)
@@ -1134,17 +1227,20 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     global _get_store
     _get_store = store_provider
 
-    @mcp.tool()
+    @mcp.tool(title="List singing voices", annotations=_READ_ONLY)
     def list_singing_voices(
         engine: Annotated[
             Literal["voicevox", "diffsinger", "all"], Field(description="Which engine to query.")
         ] = "all",
-    ) -> dict[str, Any]:
+    ) -> results.VoicesResult:
         """List the singing voices an engine offers, with languages, licence notes and soft controls.
 
-        VOICEVOX sings Japanese kana (or a wordless hum); decode-only voices (including the whisper
-        styles) are prepared by the engine's teacher style. DiffSinger sings English lyrics from a
-        voicebank you mount yourself (CHORDSMITH_DIFFSINGER_VOICE) and reports its licence layers.
+        Read-only; call this first to pick a voice id for render_singing. VOICEVOX sings Japanese
+        kana or a wordless hum (decode-only voices, including the whisper styles, are prepared by
+        the engine's teacher style). DiffSinger sings English lyrics from a voicebank mounted on
+        this computer (CHORDSMITH_DIFFSINGER_VOICE) and reports its licence layers and commercial
+        status. With engine='all' the result has a key per engine; with one engine you get that
+        engine's entry directly.
         """
         _registry.prune()
         if engine not in ("voicevox", "diffsinger", "all"):
@@ -1226,7 +1322,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             return result["engines"]
         return result["engines"][engine]
 
-    @mcp.tool()
+    @mcp.tool(title="Prepare vocal score", annotations=_READ_ONLY)
     def prepare_vocal_score(
         filename: Annotated[str, Field(description="MIDI file in the output folder.")],
         track: Annotated[
@@ -1250,12 +1346,14 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "gaps as rests).",
             ),
         ] = 0.25,
-    ) -> dict[str, Any]:
-        """Prepare a monophonic vocal score from a MIDI melody track, with rests and frame timings.
+    ) -> results.ScoreResult:
+        """Prepare a monophonic vocal score from a MIDI melody track (step 1 of singing).
 
-        The source file is never changed. Fails if the track has overlapping notes. Use ``legato``
-        to close the tiny gaps an instrumental melody leaves between notes, so the voice does not
-        stop and start inside words.
+        Read-only for the source file: it registers a score in memory and returns its id plus
+        every note with beats, seconds and engine frames, and the real rests. Fails if the track
+        has overlapping notes (pick a monophonic track). ``legato`` closes the tiny gaps an
+        instrumental melody leaves between notes, so the voice does not stop and start inside
+        words. The next step is map_vocal_lyrics with the returned score_id.
         """
         store = _get_store()
         assert store is not None
@@ -1264,7 +1362,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             _registry.scores[score.score_id] = score
         return _score_payload(score)
 
-    @mcp.tool()
+    @mcp.tool(title="Map vocal lyrics", annotations=_READ_ONLY)
     def map_vocal_lyrics(
         score_id: Annotated[str, Field(description="Score id from prepare_vocal_score.")],
         lyrics: Annotated[
@@ -1286,24 +1384,34 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "syllable should move across changing pitches."
             ),
         ] = None,
-    ) -> dict[str, Any]:
-        """Attach one token per note (or 'う' on every note in wordless mode).
+        align_stress: Annotated[
+            bool,
+            Field(
+                description="English only, off by default: when a stressed syllable gets a much "
+                "shorter note than a weak one in the same word, swap those note lengths so the "
+                "stressed syllable is longest (pitch order and total length unchanged)."
+            ),
+        ] = False,
+    ) -> results.MappingResult:
+        """Attach one token per note (step 2 of singing) and dry-run the phonemization.
 
-        English tokens are phonemized here (the dry run): the result lists the phonemes per note and
-        refuses unknown words by name. Mismatches produce warnings; words are never dropped or invented.
+        Read-only: registers the mapping in memory and returns the per-note plan (tokens, phonemes,
+        timings) plus warnings, so mistakes are caught before rendering. English tokens are
+        phonemized here; unknown words are refused by name and words are never dropped or invented.
+        Mismatches produce warnings. The next step is render_singing with the returned mapping_id.
         """
         with _registry.lock:
             score = _registry.scores.get(score_id)
         if score is None:
             raise SingingError(f"Score '{score_id}' not found (scores expire after 24 hours).")
-        mapping = build_mapping(score, lyrics, language, holds)
+        mapping = build_mapping(score, lyrics, language, holds, align_stress)
         with _registry.lock:
             _registry.versions[score_id] = _registry.versions.get(score_id, 0) + 1
             mapping.version = _registry.versions[score_id]
             _registry.mappings[mapping.mapping_id] = mapping
         return _mapping_payload(mapping)
 
-    @mcp.tool()
+    @mcp.tool(title="Render singing", annotations=_CREATES)
     def render_singing(
         mapping_id: Annotated[str, Field(description="Mapping id from map_vocal_lyrics.")],
         voice_id: Annotated[
@@ -1313,12 +1421,22 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "'diffsinger:hanami/nectar'."
             ),
         ],
-        settings: SoftSettings | None = None,
-    ) -> dict[str, Any]:
-        """Start rendering the vocal in the background and return a job id right away.
+        settings: Annotated[
+            SoftSettings | None,
+            Field(
+                description="Soft-voice controls; omit for defaults. VOICEVOX: energy, volume_cap. "
+                "DiffSinger: velocity, gender, expr, steps, depth, seed. The job record echoes the "
+                "full settings (defaults included)."
+            ),
+        ] = None,
+    ) -> results.RenderStartResult:
+        """Start rendering the vocal in the background (step 3 of singing) and return a job id.
 
-        Poll with get_singing_job. Repeating the same request reuses the finished job instead of
-        rendering (and charging) twice.
+        Creates a wav when the job finishes; poll get_singing_job. Repeating an identical request
+        reuses the finished job instead of rendering twice. A 'seed' in settings fixes DiffSinger's
+        sampling noise so the same input renders identical bytes (tested on Hanami v1.0; not
+        promised across voicebank versions). Failures (missing voicebank, engine unreachable) are
+        reported on the job as status 'failed' with the reason.
         """
         with _registry.lock:
             mapping = _registry.mappings.get(mapping_id)
@@ -1331,18 +1449,23 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         job, reused = start_job(mapping, score, voice_id, settings_dict, echo_settings)
         return {"job_id": job.job_id, "status": job.status, "reused": reused}
 
-    @mcp.tool()
+    @mcp.tool(title="Get singing job", annotations=_READ_ONLY)
     def get_singing_job(
         job_id: Annotated[str, Field(description="Job id from render_singing.")],
-    ) -> dict[str, Any]:
-        """Report a render job: queued, running, done (with the vocal file) or failed (with the error)."""
+    ) -> results.JobResult:
+        """Report a render job: queued, running, done (with the vocal file) or failed (with the error).
+
+        Read-only. When done, the result includes the vocal file name/path, sample rate, duration
+        and start offset, plus the settings that were used; when failed, the 'error' field says
+        what went wrong and how to fix it.
+        """
         with _registry.lock:
             job = _registry.jobs.get(job_id)
         if job is None:
             raise SingingError(f"Job '{job_id}' not found.")
         return _job_payload(job)
 
-    @mcp.tool()
+    @mcp.tool(title="Mix song with vocals", annotations=_CREATES)
     def mix_song_with_vocals(
         source: Annotated[str, Field(description="The MIDI file the score came from.")],
         vocal: Annotated[str, Field(description="Vocal filename from a finished job, or the job id.")],
@@ -1378,12 +1501,17 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             str | None, Field(description="Name for the mix (default: <source>_mix).")
         ] = None,
         overwrite: Annotated[bool, Field(description="Replace an existing mix.")] = False,
-    ) -> dict[str, Any]:
-        """Render the backing without the guide track, mix in the vocal, and check for clipping.
+    ) -> results.MixResult:
+        """Render the backing without the guide track, mix in the vocal, and check the balance (step 4).
 
-        Levels are balanced by measurement: the vocal is placed ``vocal_level_db`` above the
-        backing's active level, so quiet backings and loud vocals are corrected instead of being
-        multiplied blindly. The mix is gently turned down if it would clip.
+        Creates the backing and mix wavs (guide track left out). Levels are balanced by
+        measurement: the vocal is placed ``vocal_level_db`` above the backing's active level,
+        measured over the blocks where the voice sings, so quiet backings and loud vocals are
+        corrected instead of multiplied blindly. The result reports the achieved
+        vocal_to_backing_db and a balance_check of 'ok'/'mismatch'/'unavailable' (unavailable when
+        reverb is on: the measurement assumes dry signals). The mix is normalized to
+        normalize_peak_db unless null, and clipped exports are turned down (see clipping and
+        gain_correction_db).
         """
         store = _get_store()
         assert store is not None
@@ -1393,25 +1521,27 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         if job is not None:
             if job.status != "done" or job.result is None:
                 raise SingingError(f"Job '{vocal}' is {job.status}; wait for it to finish first.")
-            vocal_path = store.existing_path(job.result["filename"])
+            vocal_path = store.existing_media_path(job.result["filename"])
         else:
             vocal_path = store.existing_media_path(vocal)
         midi = mido.MidiFile(source_path)
         track_index = find_track(midi, guide_track)
-        backing_midi = store.new_path(None, f"{source_path.stem}_backing", overwrite, ".mid")
-        remove_track(source_path, backing_midi, track_index)
-        backing_wav = store.new_path(None, f"{source_path.stem}_backing", overwrite, ".wav")
-        audio.render(backing_midi, backing_wav, "wav")
-        target = store.new_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav")
-        info = mix_tracks(
-            backing_wav,
-            vocal_path,
-            target,
-            vocal_level_db=vocal_level_db,
-            backing_volume=backing_volume,
-            reverb=reverb,
-            normalize_peak_db=normalize_peak_db,
-        )
+        with (
+            store.claimed_path(None, f"{source_path.stem}_backing", overwrite, ".mid") as backing_midi,
+            store.claimed_path(None, f"{source_path.stem}_backing", overwrite, ".wav") as backing_wav,
+            store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
+        ):
+            remove_track(source_path, backing_midi, track_index)
+            audio.render(backing_midi, backing_wav, "wav")
+            info = mix_tracks(
+                backing_wav,
+                vocal_path,
+                target,
+                vocal_level_db=vocal_level_db,
+                backing_volume=backing_volume,
+                reverb=reverb,
+                normalize_peak_db=normalize_peak_db,
+            )
         return {
             "filename": target.name,
             "path": str(target),
@@ -1429,27 +1559,35 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             **info,
         }
 
-    @mcp.tool()
+    @mcp.tool(title="Export vocal song", annotations=_CREATES)
     def export_vocal_song(
         mix: Annotated[str, Field(description="Mix wav from mix_song_with_vocals.")],
         vocal: Annotated[str, Field(description="Vocal wav (from a job) to include separately.")],
         source: Annotated[str, Field(description="The untouched source MIDI to include.")],
-        return_as: delivery.ReturnAs = "base64",
+        return_as: Annotated[
+            delivery.ReturnAs,
+            Field(
+                description="'base64' returns the bytes inline; 'url' returns signed, expiring "
+                "download links (the bytes stay on the server)."
+            ),
+        ] = "base64",
         expires_in: Annotated[
             int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
         ] = delivery.DEFAULT_TTL_SECONDS,
-    ) -> dict[str, Any]:
-        """Return the full mix (WAV and MP3), the vocal alone and the untouched MIDI.
+    ) -> results.ExportResult:
+        """Return the finished song for delivery: full mix (WAV and MP3), vocal alone, source MIDI.
 
-        Files come back the same way as get_midi_file: base64 bytes or signed, expiring links.
+        Creates an MP3 of the mix. Each entry comes back like get_midi_file: base64 bytes, or a
+        signed expiring link when return_as='url'. Every entry includes filename, size, sha256 and
+        mime_type, so a caller can verify what it received.
         """
         store = _get_store()
         assert store is not None
         mix_path = store.existing_media_path(mix)
         vocal_path = store.existing_media_path(vocal)
         source_path = store.existing_path(source)
-        mp3_path = store.new_path(None, mix_path.stem, extension=".mp3")
-        to_mp3(mix_path, mp3_path)
+        with store.claimed_path(None, mix_path.stem, extension=".mp3") as mp3_path:
+            to_mp3(mix_path, mp3_path)
         items = {
             "mix": (mix_path, "audio/wav"),
             "mix_mp3": (mp3_path, "audio/mpeg"),

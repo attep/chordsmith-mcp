@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from datetime import datetime, timezone
@@ -50,17 +51,39 @@ class FileStore:
     def new_path(
         self, name: str | None, default_stem: str, overwrite: bool = False, extension: str = ".mid"
     ) -> Path:
+        """Reserve a free file name by creating a placeholder atomically.
+
+        Two overlapping writers (for example two render jobs that finish minutes apart) can never
+        claim the same name: the claim uses O_CREAT|O_EXCL, so the second one moves on to ``_2``.
+        """
         stem = name or default_stem
         filename = self.safe_name(stem, extension)
         path = self._inside(self.root / filename)
-        if overwrite or not path.exists():
+        if overwrite:
             return path
         base = path.stem
-        for i in range(2, 1000):
-            candidate = path.with_name(f"{base}_{i}{extension}")
-            if not candidate.exists():
-                return candidate
+        candidates = [path] + [path.with_name(f"{base}_{i}{extension}") for i in range(2, 1000)]
+        for candidate in candidates:
+            try:
+                descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            os.close(descriptor)
+            return candidate
         raise StorageError(f"Too many files named like '{filename}'.")
+
+    @contextlib.contextmanager
+    def claimed_path(
+        self, name: str | None, default_stem: str, overwrite: bool = False, extension: str = ".mid"
+    ):
+        """Claim a name and remove the placeholder again if writing the file fails."""
+        path = self.new_path(name, default_stem, overwrite, extension)
+        try:
+            yield path
+        except BaseException:
+            if not overwrite:
+                path.unlink(missing_ok=True)
+            raise
 
     def existing_path(self, name: str) -> Path:
         path = self._inside(self.root / self.safe_name(name))

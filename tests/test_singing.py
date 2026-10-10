@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import base64
 import hashlib
 import io
@@ -365,6 +366,24 @@ def _write_constant_wav(
         handle.writeframes(amplitude.to_bytes(2, "little") * round(seconds * rate) * channels)
 
 
+def _write_sine_wav(
+    path, frequency: float, amplitude: int, seconds: float = 1.0, rate: int = 44100, channels: int = 1
+) -> None:
+    samples = array.array(
+        "h",
+        (
+            round(amplitude * math.sin(2 * math.pi * frequency * i / rate))
+            for i in range(round(seconds * rate))
+            for _ in range(channels)
+        ),
+    )
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+
+
 def test_gated_rms_db(tmp_path):
     loud = tmp_path / "loud.wav"
     quiet = tmp_path / "quiet.wav"
@@ -416,21 +435,24 @@ def test_active_levels_average_all_channels(tmp_path):
 def test_mix_corrects_clipping_and_normalizes(tmp_path):
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
-    _write_constant_wav(backing, 30000, channels=2)
-    _write_constant_wav(vocal, 30000)
+    _write_constant_wav(backing, 8000, channels=2)
+    _write_constant_wav(vocal, 3000)
     target = tmp_path / "mix.wav"
     info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, reverb=True)
     assert info["clipping"] is False
     assert abs(info["peak_db"] - (-1.0)) <= 0.2  # normalized to -1 dBFS by default
-    assert abs(info["duration_seconds"] - 1.0) < 0.05
+    assert 1.0 <= info["duration_seconds"] <= 1.1  # the echo tail extends the mix slightly
+    assert info["balance_check"] == "unavailable"  # the measurement assumes dry stems
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
 def test_mix_balances_levels_by_measurement(tmp_path):
     backing = tmp_path / "backing.wav"
     vocal = tmp_path / "vocal.wav"
-    _write_constant_wav(backing, 3000, channels=2)
-    _write_constant_wav(vocal, 24000)
+    # tones, not constants: the measured balance assumes the stems are uncorrelated, and two
+    # constant signals are perfectly correlated (their amplitudes add, not their energies)
+    _write_sine_wav(backing, 440.0, 3000, channels=2)
+    _write_sine_wav(vocal, 660.0, 24000)
     target = tmp_path / "mix.wav"
     info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0)
     backing_db, vocal_db = singing.active_levels(backing, vocal)
@@ -461,6 +483,27 @@ def test_mix_vocal_level_is_exact_after_stereo_pan(tmp_path):
     expected_mix_vocal_db = vocal_db + info["vocal_gain_db"]
     measured = singing.gated_rms_db(target)
     assert abs(measured - expected_mix_vocal_db) <= 0.3  # no hidden ~3 dB mono-to-stereo loss
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_measures_the_vocal_at_the_mix_rate(tmp_path):
+    # VOICEVOX sings at 24 kHz and the resampler's anti-alias filter costs high frequencies a
+    # couple of dB on the way to the 44.1 kHz mix; the level must be measured after conversion,
+    # or the finished balance lands below the requested vocal_level_db
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 3000, channels=2)
+    rate = 24000
+    tone = array.array("h", (round(8000 * math.sin(2 * math.pi * 11900 * i / rate)) for i in range(rate)))
+    with wave.open(str(vocal), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(tone.tobytes())
+    target = tmp_path / "mix.wav"
+    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0)
+    assert info["balance_check"] == "ok"
+    assert abs(info["vocal_to_backing_measured_db"] - 6.0) <= 1.0
 
 
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
@@ -774,6 +817,84 @@ async def test_stress_warning_when_stressed_syllable_gets_a_short_note(store, fa
     warning = next((w for w in mapping["warnings"] if "stressed" in w), None)
     assert warning is not None
     assert "'sodium'" in warning and "'so'" in warning and "'di'" in warning
+
+
+@needs_voicebank
+async def test_align_stress_swaps_note_lengths(store, fake_engine):
+    notes = [
+        {"pitch": "C5", "start_beat": 0.0, "beats": 0.5},
+        {"pitch": "D5", "start_beat": 0.5, "beats": 1.0},
+        {"pitch": "E5", "start_beat": 1.5, "beats": 1.0},
+    ]
+    song = await _make_melody(store, notes, name="align")
+    score = (
+        await _call("prepare_vocal_score", {"filename": song, "track": "Melody", "transpose": 0})
+    ).structuredContent
+    plain = (
+        await _call(
+            "map_vocal_lyrics",
+            {"score_id": score["score_id"], "lyrics": "so- di- um", "language": "en"},
+        )
+    ).structuredContent
+    aligned = (
+        await _call(
+            "map_vocal_lyrics",
+            {
+                "score_id": score["score_id"],
+                "lyrics": "so- di- um",
+                "language": "en",
+                "align_stress": True,
+            },
+        )
+    ).structuredContent
+
+    plain_sung = [note for note in plain["notes"] if note["kind"] == "note"]
+    aligned_sung = [note for note in aligned["notes"] if note["kind"] == "note"]
+    assert [note["seconds"] for note in plain_sung] == [0.25, 0.5, 0.5]
+    # "so" (stressed) takes the longest note; pitch order and total duration are unchanged
+    assert [note["seconds"] for note in aligned_sung] == [0.5, 0.25, 0.5]
+    assert [note["pitch"] for note in aligned_sung] == [note["pitch"] for note in plain_sung]
+    assert sum(note["seconds"] for note in aligned_sung) == sum(note["seconds"] for note in plain_sung)
+    assert any("swapped" in warning for warning in aligned["warnings"])
+
+
+async def test_mix_accepts_a_job_id(store, fake_engine, monkeypatch):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    mapping = (await _call("map_vocal_lyrics", {"score_id": score["score_id"]})).structuredContent
+    started = await _call(
+        "render_singing", {"mapping_id": mapping["mapping_id"], "voice_id": "voicevox:6000"}
+    )
+    job = await _wait_for_job(started.structuredContent["job_id"])
+    assert job["status"] == "done"
+
+    def fake_render(source, target, audio_format, soundfont=None):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    # the job-id branch must resolve the .wav (it used to force .mid and fail with "not found")
+    result = await _call(
+        "mix_song_with_vocals", {"source": song, "vocal": started.structuredContent["job_id"]}
+    )
+    assert not result.isError
+    assert result.structuredContent["vocal"] == job["filename"]
 
 
 def test_patch_graph_seeds_random_nodes():
