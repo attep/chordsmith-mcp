@@ -12,6 +12,15 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.7.1] - 2026-10-10
+
+### Fixed
+
+- **Removed the mix-bus safety limiter added in v0.7.0.** On loud, dense mixes the always-on
+  `alimiter` does heavy gain reduction and smears consonants: on *The Old Ones Call* it cost
+  8 of 102 words (87 with the limiter, 95 without, measured with the pinned Whisper setup). The
+  existing peak-normalization loop already prevents clipping, so the limiter was redundant.
+
 ## [0.7.0] - 2026-10-10
 
 ### Added

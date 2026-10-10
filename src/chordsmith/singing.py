@@ -977,8 +977,6 @@ def _mix_filters(vocal_gain: float, backing_volume: float, reverb: bool, output_
     )
     if output_gain_db:
         filters += f",volume={output_gain_db:.2f}dB"
-    # a gentle safety limiter under the -1 dBFS export level; it only attenuates above the limit
-    filters += ",alimiter=limit=0.891:level=disabled:attack=5:release=80"
     return filters + "[m]"
 
 

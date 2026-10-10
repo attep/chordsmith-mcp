@@ -192,7 +192,9 @@ offending track with `backing_levels`, or turn on `ducking`.
 **Vocal dynamics (`compress`, default on):** the vocal gets a gentle high-pass and compressor
 before the balance is measured, because DiffSinger can swing about 6 dB between notes — measured
 in half-second windows, the raw voice moves ±6 dB while the compressed one stays within ~±2. Set
-`compress: false` to mix the raw voice.
+`compress: false` to mix the raw voice. On dense, loud mixes the compressor can cost a few words
+of diction (on a death-metal test it scored 89/102 compressed against 95/102 raw), so compare
+both when the words matter most.
 
 **Ducking (`ducking`, default off):** the vocal's envelope dips the backing about 4 dB with a
 fast attack and a slow release, so the band steps back while the voice sings and recovers

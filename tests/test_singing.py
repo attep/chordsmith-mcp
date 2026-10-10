@@ -450,7 +450,9 @@ def test_mix_corrects_clipping_and_normalizes(tmp_path):
     _write_constant_wav(backing, 8000, channels=2)
     _write_constant_wav(vocal, 3000)
     target = tmp_path / "mix.wav"
-    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, reverb=True)
+    info = singing.mix_tracks(
+        backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, reverb=True, compress=False
+    )
     assert info["clipping"] is False
     assert abs(info["peak_db"] - (-1.0)) <= 0.2  # normalized to -1 dBFS by default
     assert 1.0 <= info["duration_seconds"] <= 1.1  # the echo tail extends the mix slightly
