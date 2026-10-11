@@ -37,7 +37,8 @@ backing. Two engines are supported:
    same request reuses the finished job instead of rendering twice.
 4. `mix_song_with_vocals` renders the backing **without the guide track** and balances levels by
    measurement: the vocal is placed `vocal_level_db` (default 6 dB) above the backing's active
-   level, reverb is off by default, and the mix is turned down if it would clip. A
+   level, `vocal_reverb` is off by default, the backing can carry FluidSynth `reverb`/`chorus`
+   (per-track amounts via spec sends), and the mix is turned down if it would clip. A
    [section map](tools.md#set_song_sections) is honored end to end: the score's note seconds
    integrate every tempo change, so lyrics stay in sync through tempo and meter shifts.
 5. `export_vocal_song` returns the mix as WAV and MP3, the vocal alone, and the untouched MIDI —
@@ -156,8 +157,9 @@ apart ("so-di ... um"). Practical guidance, drawn from listening tests:
 - **Leave a breath before a cluster**: when a word starts with a consonant cluster right after a
   stop-ending word ("foot steps"), leave a small rest before it — otherwise the stop elides into
   the cluster and the first word disappears ("for steps"). A quarter-beat rest is enough.
-- **Clarity first, softness later**: mix with the default `vocal_level_db: 6` and reverb **off**
-  to judge diction, then add reverb or lower the vocal if the song needs it.
+- **Clarity first, softness later**: mix with the default `vocal_level_db: 6` and
+  `vocal_reverb` **off** to judge diction, then add reverb or lower the vocal if the song needs
+  it.
 - **When the melody fights the stress**: if the mapper warns that a stressed syllable got a short
   note (the classic "SO-di-um" case), swap the note lengths in that phrase or respell the word so
   a consonant separates the vowels; no setting fixes this automatically.
@@ -176,23 +178,33 @@ is singing** (all channels, so a stereo band is judged as a whole) and places th
 measuring, so 24 kHz VOICEVOX output is judged as it will be mixed (the resampler costs it a
 couple of dB). The mono vocal is panned to stereo before mixing, so
 the measured balance is the real one; `backing_volume` trims the backing (default `1.0`) and
-`reverb` is **off** by default (it adds a gentle echo, not a room reverb). The finished mix is
-normalized to `normalize_peak_db` (default `-1` dBFS; set null to keep the raw level), so exports
-are not left very quiet. The result reports `backing_rms_db`, `vocal_rms_db`, `vocal_gain_db`, the
-calculated `vocal_to_backing_db`, the **measured** `vocal_to_backing_measured_db` (taken from the
-finished mix by subtracting the band's energy) with a `balance_check` flag (`ok` / `mismatch` /
-`unavailable` — the measurement assumes dry stems, so reverb makes it unavailable), the applied
-`gain_correction_db` and the final `peak_db`. The guide track is left out of the backing: by
-default an exact `Vocal`, `Voice` or `Melody` track name wins (in that order), otherwise the
-first name mentioning melody/vocal/lead/voice/sing — so pass `guide_track` when the file has
-several melody-like tracks (a file with both `Lead` and `Vocal` needs `guide_track: "Vocal"`).
-Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original `.mid`, all via base64 or
-signed links.
+`vocal_reverb` is **off** by default (it adds a gentle echo, not a room reverb). The finished mix
+is normalized to `normalize_peak_db` (default `-1` dBFS; set null to keep the raw level), so
+exports are not left very quiet. The result reports `backing_rms_db`, `vocal_rms_db`,
+`vocal_gain_db`, the calculated `vocal_to_backing_db`, the **measured**
+`vocal_to_backing_measured_db` (taken from the finished mix by subtracting the band's energy)
+with a `balance_check` flag (`ok` / `mismatch` / `unavailable` — the measurement also works with
+the vocal reverb on, since the reverb rides along with the vocal), the applied
+`gain_correction_db`, the final `peak_db`, and the effective backing `effects`. The guide track
+is left out of the backing: by default an exact `Vocal`, `Voice` or `Melody` track name wins (in
+that order), otherwise the first name mentioning melody/vocal/lead/voice/sing — so pass
+`guide_track` when the file has several melody-like tracks (a file with both `Lead` and `Vocal`
+needs `guide_track: "Vocal"`). Exports: mix `.wav` + `.mp3`, the vocal `.wav`, and the original
+`.mid`, all via base64 or signed links.
 
-The backing honors per-track `set_track_instrument` specs: a track's soundfont, GM program and
-`gain_db` are applied when its stem is rendered (the result lists the `instruments` used).
-`backing_levels` entries override a spec's `gain_db`. Without specs or levels the backing renders
-in one pass; otherwise each track renders on its own, several at a time.
+The backing honors per-track `set_track_instrument` specs: a track's soundfont, GM program,
+`gain_db` and effect sends are applied when its stem is rendered (the result lists the
+`instruments` used). `backing_levels` entries override a spec's `gain_db`. Without specs or
+levels the backing renders in one pass; otherwise each track renders on its own, several at a
+time.
+
+**Instrumental reverb and chorus in the mix:** `reverb`/`chorus` switch FluidSynth's engine
+effects on for the **backing instruments** (off by default, so mixes stay byte-identical until
+asked) — the same settings as [`render_audio`](tools.md#render_audio). How much of each effect a
+track gets is per track: a spec's `reverb_send`/`chorus_send` (CC91/CC93) decides, because
+FluidSynth applies its reverb/chorus by send amount (a track with no send uses the GM default —
+a subtle reverb; send 0 is fully dry). The vocal's `vocal_reverb` is a separate effect and is
+never applied to instruments.
 
 The mix has level, per-stem trims, an optional vocal compressor, optional ducking, and
 normalization — no EQ. The peak is measured on a float render before the 16-bit export, so a hot

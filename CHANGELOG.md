@@ -12,6 +12,42 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.17.0] - 2026-10-10
+
+Mixing improvements from the Lanterns Below wet-stems test (items 1–2).
+
+### Fixed
+
+- **The mix tool now renders the backing wet.** `mix_song_with_vocals` renders the backing dry
+  no matter what — a mix could never carry the instrumental reverb/chorus that a stems render
+  did. It now takes the same `reverb`/`chorus` settings as `render_audio` (off by default, so
+  existing mixes stay byte-identical), applied to the backing in both the single-pass and the
+  per-track paths, and echoes the effective settings in `effects`.
+- **The balance measurement stays honest with a wet backing**: the band's energy is now read
+  from the backing file over the same voiced blocks as the mix probe, instead of a whole-file
+  gated-RMS estimate that drifts once reverb fills the gaps (a wet mix measured 3.1 dB against
+  a 6.0 target before this; it reads 5.8 and `ok` now).
+- **The vocal echo no longer attenuates the dry vocal**: `aecho`'s default in-gain pulled the
+  vocal ~1.9 dB below its measured level whenever `vocal_reverb` was on; the dry signal now
+  stays at unity and the echo rides on top (the same convention the Lanterns Below test used).
+
+### Added
+
+- **Per-track effect sends** (`reverb_send`/`chorus_send`, CC91/CC93, 0–127) in
+  `set_track_instrument` specs: FluidSynth applies its reverb/chorus by send amount, so this is
+  how a track gets a bigger room than another (the Lanterns Below test hand-wrote these sends;
+  a no-send track gets the GM default — a subtle reverb — and send 0 is fully dry). The sends
+  are written into stem renders and baked into the MIDI by `bake_instruments`; omitting them
+  leaves the file's own sends untouched.
+
+### Changed
+
+- **The mix tool's vocal reverb flag is renamed `reverb` → `vocal_reverb`** so `reverb`/`chorus`
+  mean the backing instruments everywhere, matching `render_audio`.
+- The balance measurement now also runs with the vocal reverb on: the reverb rides with the
+  vocal, so the measured ratio reflects what the listener hears (the earlier `unavailable`
+  behavior is gone).
+
 ## [0.16.0] - 2026-10-10
 
 Long-render support (patch brief milestone 6, part 1).

@@ -224,6 +224,8 @@ class InstrumentTrack(TypedDict):
     bank: int | None
     program: int | None
     sections: dict[str, SectionOverride] | None
+    reverb_send: int | None
+    chorus_send: int | None
     gain_db: float
 
 
@@ -461,6 +463,7 @@ class MixResult(TypedDict):
     levels: MixLevels
     backing_levels: dict[str, float] | None
     instruments: dict[str, InstrumentTrack] | None
+    effects: EffectsEntry | None
     compress: bool | None
     ducking: bool | None
     guide_removed: str

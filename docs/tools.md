@@ -318,8 +318,12 @@ balancing.
 until you opt in; with them on, the engine's natural tail past the last note is kept (about
 2.7 s). They are **engine-wide for one render instance, not per-track effects**: with
 `stems: true` every stem is rendered wet, so summing the wet stems is not identical to one wet
-pass (chorus/reverb do not add linearly across stems). For the voice, use the mix tool's own
-`reverb` switch — it is a separate vocal effect and is never applied to instruments.
+pass (chorus/reverb do not add linearly across stems). How wet each track is comes from its
+spec's `reverb_send`/`chorus_send` (see [set_track_instrument](#set_track_instrument)) — with no
+send a track gets the GM default (a subtle reverb; send 0 is fully dry).
+[`mix_song_with_vocals`](singing.md#mixing-and-export) takes the same `reverb`/`chorus` settings
+for the backing, so a mix can be wet too; the vocal's own `vocal_reverb` is a separate effect and
+is never applied to instruments.
 
 ## render_audio_job and get_render_job
 
@@ -372,6 +376,7 @@ Each spec has:
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
 | `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet |
+| `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:

@@ -451,12 +451,15 @@ def test_mix_corrects_clipping_and_normalizes(tmp_path):
     _write_constant_wav(vocal, 3000)
     target = tmp_path / "mix.wav"
     info = singing.mix_tracks(
-        backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, reverb=True, compress=False
+        backing, vocal, target, vocal_level_db=6.0, backing_volume=1.0, vocal_reverb=True, compress=False
     )
     assert info["clipping"] is False
     assert abs(info["peak_db"] - (-1.0)) <= 0.2  # normalized to -1 dBFS by default
     assert 1.0 <= info["duration_seconds"] <= 1.1  # the echo tail extends the mix slightly
-    assert info["balance_check"] == "unavailable"  # the measurement assumes dry stems
+    # the measurement now runs with the vocal reverb on (the reverb rides with the vocal); on a
+    # steady tone the echo adds real energy, so the measured ratio reads above the dry target
+    assert info["vocal_to_backing_measured_db"] is not None
+    assert info["balance_check"] in ("ok", "mismatch")
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
@@ -646,7 +649,7 @@ async def test_mix_echoes_compress_and_ducking(store, monkeypatch):
     (store.root / "vocal.wav").write_bytes(b"RIFF0000")
     captured = {}
 
-    def fake_render(source, target, audio_format, soundfont=None):
+    def fake_render(source, target, audio_format, soundfont=None, effects=None):
         target.write_bytes(b"RIFF0000")
 
     def fake_mix(backing, vocal, target, **kwargs):
@@ -1098,7 +1101,7 @@ async def test_mix_accepts_a_job_id(store, fake_engine, monkeypatch):
     job = await _wait_for_job(started.structuredContent["job_id"])
     assert job["status"] == "done"
 
-    def fake_render(source, target, audio_format, soundfont=None):
+    def fake_render(source, target, audio_format, soundfont=None, effects=None):
         target.write_bytes(b"RIFF0000")
 
     def fake_mix(backing, vocal, target, **kwargs):
@@ -1292,12 +1295,45 @@ async def test_mix_uses_sidecar_instrument_specs(store, monkeypatch):
     assert overridden.structuredContent["instruments"]["Bass"]["program"] == 38
 
 
+@pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
+async def test_mix_applies_backing_effects(store):
+    song = await _make_band_song(store)
+    _write_constant_wav(store.root / "vocal.wav", 6000, seconds=1.0)
+
+    dry = (
+        await _call(
+            "mix_song_with_vocals",
+            {"source": song, "vocal": "vocal.wav", "output_filename": "mix_dry", "overwrite": True},
+        )
+    ).structuredContent
+    wet = (
+        await _call(
+            "mix_song_with_vocals",
+            {
+                "source": song,
+                "vocal": "vocal.wav",
+                "output_filename": "mix_wet",
+                "overwrite": True,
+                "reverb": {},
+            },
+        )
+    ).structuredContent
+    assert dry["effects"] == {"reverb": None, "chorus": None}
+    assert wet["effects"]["reverb"]["room_size"] == 0.5  # the engine's own default
+    # the backing is rendered wet in the wet mix, so the two mixes differ audibly
+    assert (store.root / dry["filename"]).read_bytes() != (store.root / wet["filename"]).read_bytes()
+    # the balance measurement reads the backing over the same voiced blocks, so it stays
+    # honest with a wet backing (this used to drift with a whole-file gated-RMS estimate)
+    assert wet["balance_check"] == "ok"
+    assert abs(wet["vocal_to_backing_measured_db"] - 6.0) <= 1.5
+
+
 async def test_concurrent_mixes_get_distinct_backings(store, monkeypatch):
     song = await _make_band_song(store)
     (store.root / "vocal.wav").write_bytes(b"RIFF0000")
     backings = []
 
-    def fake_render(source, target, audio_format, soundfont=None):
+    def fake_render(source, target, audio_format, soundfont=None, effects=None):
         target.write_bytes(b"RIFF0000")
 
     def fake_mix(backing, vocal, target, **kwargs):

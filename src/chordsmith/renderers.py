@@ -235,6 +235,21 @@ class InstrumentSpec(BaseModel):
         "{'Chorus': {'program': 81}}; a change lands exactly at the section start and held "
         "notes keep their original sound. Sections not listed use the track's own program/bank.",
     )
+    reverb_send: int | None = Field(
+        None,
+        ge=0,
+        le=127,
+        description="CC91 reverb send for this track (0-127; 0 = fully dry). Omit to keep the "
+        "file's own send (GM default 40) — FluidSynth's engine reverb only reaches a track as "
+        "far as its send.",
+    )
+    chorus_send: int | None = Field(
+        None,
+        ge=0,
+        le=127,
+        description="CC93 chorus send for this track (0-127; 0 = fully dry). Omit to keep the "
+        "file's own send (GM default 0).",
+    )
     gain_db: float = Field(
         0.0,
         ge=-24.0,
@@ -392,9 +407,14 @@ def section_markers(midi: mido.MidiFile) -> list[tuple[int, str]]:
 
 
 def _program_events(
-    tick: int, channels: list[int], bank: int | None, program: int | None
+    tick: int,
+    channels: list[int],
+    bank: int | None,
+    program: int | None,
+    reverb_send: int | None = None,
+    chorus_send: int | None = None,
 ) -> list[tuple[int, int, mido.Message]]:
-    """Bank-select + program-change events at ``tick`` (bank before program), one per channel."""
+    """Channel events at ``tick``: bank select, program change and effect sends, in order."""
     events: list[tuple[int, int, mido.Message]] = []
     for channel in channels:
         if bank is not None:
@@ -406,16 +426,33 @@ def _program_events(
             )
         if program is not None:
             events.append((tick, 2, mido.Message("program_change", program=program, time=0, channel=channel)))
+        if reverb_send is not None:
+            events.append(
+                (
+                    tick,
+                    3,
+                    mido.Message("control_change", control=91, value=reverb_send, time=0, channel=channel),
+                )
+            )
+        if chorus_send is not None:
+            events.append(
+                (
+                    tick,
+                    4,
+                    mido.Message("control_change", control=93, value=chorus_send, time=0, channel=channel),
+                )
+            )
     return events
 
 
-def _strip_program_events(track: mido.MidiTrack) -> None:
-    """Remove a track's own program changes and bank selects (the spec's timeline replaces them)."""
+def _strip_program_events(track: mido.MidiTrack, sends: bool = False) -> None:
+    """Remove a track's own program changes and bank selects (and effect sends when replaced)."""
+    controls = {0, 32} | ({91, 93} if sends else set())
     track[:] = [
         message
         for message in track
         if message.type != "program_change"
-        and not (message.type == "control_change" and message.control in (0, 32))
+        and not (message.type == "control_change" and message.control in controls)
     ]
 
 
@@ -476,20 +513,22 @@ def _rewrite_track(track: mido.MidiTrack, events: list[tuple[int, int, mido.Mess
 
 
 def override_program(midi: Path, spec: InstrumentSpec) -> Path:
-    """Write a copy of ``midi`` with the spec's bank/program timeline applied to every note channel.
+    """Write a copy of ``midi`` with the spec's bank/program timeline and sends applied.
 
     Returns ``midi`` itself when the spec sets nothing to apply. The copy strips the file's own
-    program changes (and bank selects) and inserts the resolved timeline — one set at time zero,
-    or one at each section start with ``sections`` (bank select before the program change).
-    Notes already sounding keep their original preset: FluidSynth assigns the preset per voice,
-    so a program change only affects notes that begin after it. The copy lives next to the
-    caller's scratch MIDI.
+    program changes (and bank selects — and effect sends when the spec sets its own) and inserts
+    the resolved timeline: programs/banks at time zero or at each section start with
+    ``sections`` (bank select before the program change), plus CC91/CC93 sends at time zero when
+    the spec sets them. Notes already sounding keep their original preset: FluidSynth assigns
+    the preset per voice, so a program change only affects notes that begin after it. The copy
+    lives next to the caller's scratch MIDI.
     """
     has_overrides = any(
         override.program is not None or override.bank is not None
         for override in (spec.sections or {}).values()
     )
-    if spec.bank is None and spec.program is None and not has_overrides:
+    has_sends = spec.reverb_send is not None or spec.chorus_send is not None
+    if spec.bank is None and spec.program is None and not has_overrides and not has_sends:
         return midi
     file = mido.MidiFile(midi)
     channels = sorted(
@@ -501,8 +540,10 @@ def override_program(midi: Path, spec: InstrumentSpec) -> Path:
         }
     )
     for track in file.tracks:
-        _strip_program_events(track)
+        _strip_program_events(track, sends=has_sends)
     events = program_timeline(file, spec, channels)
+    if has_sends:
+        events += _program_events(0, channels, None, None, spec.reverb_send, spec.chorus_send)
     _rewrite_track(file.tracks[0], events)
     target = midi.with_name(midi.stem + ".inst.mid")
     file.save(target)
@@ -674,12 +715,14 @@ def register(mcp: FastMCP, store_provider) -> None:
         Writes a small JSON sidecar next to the file; the MIDI itself is never modified. Each
         track can get its own soundfont (``preset``), a different GM instrument (``program``
         0-127, or a drum kit on a drum track; ``bank`` selects the bank), a ``gain_db`` trim for
-        the combined mix, and ``sections`` overrides that change the program/bank at a section's
-        start (see set_song_sections; held notes keep their original sound). Track names must
-        exist in the file, a preset file must be readable, section names must exist in the file's
-        section map, and every requested bank/program must exist in the SoundFont it targets — a
-        miss is an error that lists what the bank has, so nothing falls back silently. Returns
-        the full spec map and the resolved preset label per track.
+        the combined mix, ``sections`` overrides that change the program/bank at a section's
+        start (see set_song_sections; held notes keep their original sound), and CC91/CC93
+        effect sends (``reverb_send``/``chorus_send``) that decide how much of FluidSynth's
+        engine reverb/chorus each track gets. Track names must exist in the file, a preset file
+        must be readable, section names must exist in the file's section map, and every
+        requested bank/program must exist in the SoundFont it targets — a miss is an error that
+        lists what the bank has, so nothing falls back silently. Returns the full spec map and
+        the resolved preset label per track.
         """
         store: FileStore = store_provider()
         source = store.existing_path(filename)
@@ -803,10 +846,11 @@ def register(mcp: FastMCP, store_provider) -> None:
 
         The original is never modified. Every track with a set_track_instrument spec gets its
         resolved bank/program timeline as real MIDI events in the copy — including per-section
-        overrides at their exact boundaries — so other players and DAWs hear the intended
-        instruments without ChordSmith. A MIDI file cannot carry a SoundFont, so the result also
-        returns the required .sf2 per track as companion metadata. Tracks that share a MIDI
-        channel share one program timeline (a standard MIDI limitation; a warning says so).
+        overrides at their exact boundaries and the track's CC91/CC93 effect sends — so other
+        players and DAWs hear the intended instruments without ChordSmith. A MIDI file cannot
+        carry a SoundFont, so the result also returns the required .sf2 per track as companion
+        metadata. Tracks that share a MIDI channel share one program timeline (a standard MIDI
+        limitation; a warning says so).
         """
         store: FileStore = store_provider()
         source = store.existing_path(filename)
@@ -828,7 +872,8 @@ def register(mcp: FastMCP, store_provider) -> None:
                 override.program is not None or override.bank is not None
                 for override in (spec.sections or {}).values()
             )
-            if spec.bank is None and spec.program is None and not has_overrides:
+            has_sends = spec.reverb_send is not None or spec.chorus_send is not None
+            if spec.bank is None and spec.program is None and not has_overrides and not has_sends:
                 baked[name] = spec  # only a trim (gain_db): nothing representable in MIDI
                 continue
             channel = channels.get(name)
@@ -840,8 +885,13 @@ def register(mcp: FastMCP, store_provider) -> None:
                     )
                 channel_settings[channel] = settings
             track_channels_here = [channel] if channel is not None else []
-            _strip_program_events(midi.tracks[index])
-            _rewrite_track(midi.tracks[index], program_timeline(midi, spec, track_channels_here))
+            _strip_program_events(midi.tracks[index], sends=has_sends)
+            events = program_timeline(midi, spec, track_channels_here)
+            if has_sends:
+                events += _program_events(
+                    0, track_channels_here, None, None, spec.reverb_send, spec.chorus_send
+                )
+            _rewrite_track(midi.tracks[index], events)
             baked[name] = spec
         with store.claimed_path(output_filename, f"{source.stem}_instruments", overwrite) as target:
             if target == source:

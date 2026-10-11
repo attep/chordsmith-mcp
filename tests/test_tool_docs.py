@@ -22,9 +22,10 @@ pytestmark = pytest.mark.anyio
 
 DESCRIPTION_BUDGET_BYTES = 15 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
-# effects, import, sections) and 108 KB (v0.16.0: background render jobs, whose tool mirrors
-# render_audio's params). The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 108 * 1024
+# effects, import, sections), 108 KB (v0.16.0: background render jobs) and 116 KB (v0.17.0:
+# the mix tool carries the backing reverb/chorus settings and specs carry effect sends).
+# The surface grows with capabilities; keep new schemas lean.
+PAYLOAD_CEILING_BYTES = 116 * 1024
 
 
 @pytest.fixture

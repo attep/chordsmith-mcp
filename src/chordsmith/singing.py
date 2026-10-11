@@ -33,6 +33,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from chordsmith import audio, delivery, diffsinger, renderers, results
+from chordsmith.models import ChorusSettings, ReverbSettings
 from chordsmith.offload import offloaded
 from chordsmith.storage import FileStore
 from chordsmith.theory import midi_note_name
@@ -977,12 +978,14 @@ def _peak_db(path: Path) -> float:
     return float(match.group(1))
 
 
-def _mix_filters(vocal_gain: float, backing_volume: float, reverb: bool, output_gain_db: float) -> str:
+def _mix_filters(vocal_gain: float, backing_volume: float, vocal_reverb: bool, output_gain_db: float) -> str:
     # The vocal is mono (both engines) and the backing is stereo: pan the vocal to stereo
     # explicitly, otherwise amix spreads it across both channels about 3 dB lower than measured.
     vocal = f"[1:a]pan=stereo|c0=c0|c1=c0,volume={vocal_gain:.4f}"
-    if reverb:
-        vocal += ",aecho=0.8:0.9:60:0.25"
+    if vocal_reverb:
+        # Dry at unity (in/out gain 1.0): the echo rides on top instead of pulling the vocal
+        # below its measured level — aecho's default in_gain would attenuate the dry signal.
+        vocal += ",aecho=1.0:1.0:60:0.25"
     filters = (
         f"[0:a]volume={backing_volume:.3f}[b];{vocal}[v];[b][v]amix=inputs=2:duration=longest:normalize=0"
     )
@@ -1087,6 +1090,34 @@ def _f32_mix_energy_over_sung(vocal: Path, probe: Path, block_ms: float = 50.0, 
         total += block_energy * span * probe_channels
         count += span * probe_channels
     return (total / count) * (32768.0**2) if count else 0.0
+
+
+def _wav_energy_over_sung(vocal: Path, backing: Path, block_ms: float = 50.0, gate: float = 0.004) -> float:
+    """Mean square of a 16-bit backing wav over the vocal's voiced blocks, in int16 units.
+
+    Reading the backing over the *same* blocks as the mix probe is what keeps the balance check
+    honest with a wet backing: a whole-file gated-RMS estimate drifts once reverb fills the
+    gaps, while this measures exactly the band energy the subtraction assumes.
+    """
+    vocal_samples, vocal_channels, vocal_rate = _read_pcm(vocal)
+    backing_samples, backing_channels, backing_rate = _read_pcm(backing)
+    vocal_block = max(1, round(vocal_rate * block_ms / 1000.0))
+    backing_block = max(1, round(backing_rate * block_ms / 1000.0))
+    frames = len(backing_samples) // backing_channels
+    total = 0.0
+    count = 0
+    for index in range(len(vocal_samples) // vocal_channels // vocal_block):
+        start = index * vocal_block
+        energy = _block_energy(vocal_samples, start, vocal_block, vocal_channels)
+        if math.sqrt(energy) / 32768.0 < gate:
+            continue
+        if start >= frames:
+            continue
+        block_energy = _block_energy(backing_samples, start, backing_block, backing_channels)
+        span = min(backing_block, frames - start)
+        total += block_energy * span * backing_channels
+        count += span * backing_channels
+    return total / count if count else 0.0
 
 
 def gated_rms_db(path: Path, gate: float = 0.004) -> float:
@@ -1203,7 +1234,7 @@ def mix_tracks(
     *,
     vocal_level_db: float = 6.0,
     backing_volume: float = 1.0,
-    reverb: bool = False,
+    vocal_reverb: bool = False,
     normalize_peak_db: float | None = -1.0,
     compress: bool = False,
     ducking: bool = False,
@@ -1261,7 +1292,7 @@ def mix_tracks(
             scratch_path,
             vocal_level_db=vocal_level_db,
             backing_volume=backing_volume,
-            reverb=reverb,
+            vocal_reverb=vocal_reverb,
             normalize_peak_db=normalize_peak_db,
             duck_db=effective_duck,
         )
@@ -1276,7 +1307,7 @@ def _mix_tracks_at_mix_rate(
     *,
     vocal_level_db: float,
     backing_volume: float,
-    reverb: bool,
+    vocal_reverb: bool,
     normalize_peak_db: float | None,
     duck_db: float = 0.0,
 ) -> dict:
@@ -1299,7 +1330,7 @@ def _mix_tracks_at_mix_rate(
             "-i",
             str(vocal),
             "-filter_complex",
-            _mix_filters(vocal_gain, backing_volume, reverb, output_gain_db),
+            _mix_filters(vocal_gain, backing_volume, vocal_reverb, output_gain_db),
             "-map",
             "[m]",
             "-ar",
@@ -1326,15 +1357,16 @@ def _mix_tracks_at_mix_rate(
     peak = _peak_db(target)
 
     # verify the balance by measurement on the uncorrected probe: the mix holds band + vocal
-    # (uncorrelated), so subtracting the ducked band's energy leaves the vocal's energy
+    # (uncorrelated), so subtracting the band's energy — measured from the backing file over the
+    # same voiced blocks, which stays honest when the backing is rendered wet — leaves the
+    # vocal's energy (with the vocal reverb riding along, the ratio reflects what is heard).
     measured_db: float | None = None
-    if not reverb:
-        mix_energy = _f32_mix_energy_over_sung(vocal, probe)
-        band_energy = (
-            (10.0 ** (backing_db / 20.0) * 32768.0) ** 2 * (backing_volume**2) * 10.0 ** (-duck_db / 10.0)
-        )
-        if band_energy > 0 and mix_energy > band_energy:
-            measured_db = 10.0 * math.log10((mix_energy - band_energy) / band_energy)
+    mix_energy = _f32_mix_energy_over_sung(vocal, probe)
+    band_energy = (
+        _wav_energy_over_sung(vocal, measure_backing) * (backing_volume**2) * 10.0 ** (-duck_db / 10.0)
+    )
+    if band_energy > 0 and mix_energy > band_energy:
+        measured_db = 10.0 * math.log10((mix_energy - band_energy) / band_energy)
     if measured_db is None:
         balance_check = "unavailable"
     elif abs(measured_db - balance_db) <= 1.5:
@@ -1688,9 +1720,24 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "a spec's gain_db. Omit to use only the specs (single pass when there are none)."
             ),
         ] = None,
-        reverb: Annotated[
+        vocal_reverb: Annotated[
             bool, Field(description="Gentle reverb on the vocal (off by default: clarity first).")
         ] = False,
+        reverb: Annotated[
+            ReverbSettings | None,
+            Field(
+                description="FluidSynth reverb for the backing instruments (off when omitted; "
+                "the vocal has its own vocal_reverb). Per-track amounts come from each spec's "
+                "reverb_send (CC91)."
+            ),
+        ] = None,
+        chorus: Annotated[
+            ChorusSettings | None,
+            Field(
+                description="FluidSynth chorus for the backing instruments (off when omitted). "
+                "Per-track amounts come from each spec's chorus_send (CC93)."
+            ),
+        ] = None,
         normalize_peak_db: Annotated[
             float | None,
             Field(
@@ -1736,13 +1783,17 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         measurement: the vocal is placed ``vocal_level_db`` over the band as heard (over the
         dipped band when ducking is on), measured over the blocks where the voice sings, so
         quiet backings and loud vocals are corrected instead of multiplied blindly. Per-track
-        set_track_instrument specs (soundfont, GM program, gain) are honored for the backing;
-        with ``backing_levels`` each backing track is rendered separately and trimmed by its dB
-        value, which overrides a spec's gain (renders run several at a time). The result reports
-        the achieved vocal_to_backing_db (during phrases) and vocal_to_original_backing_db, plus
-        a balance_check of 'ok'/'mismatch'/'unavailable' (unavailable when reverb is on: the
-        measurement assumes dry signals). The mix is normalized to normalize_peak_db unless
-        null, and clipped exports are turned down (see clipping and gain_correction_db).
+        set_track_instrument specs (soundfont, GM program, gain, effect sends) are honored for
+        the backing; with ``backing_levels`` each backing track is rendered separately and
+        trimmed by its dB value, which overrides a spec's gain (renders run several at a time).
+        ``reverb``/``chorus`` switch FluidSynth's engine effects on for the backing (off by
+        default, so mixes stay byte-identical until asked; per-track wetness comes from each
+        spec's reverb_send/chorus_send); ``vocal_reverb`` is the vocal's own effect. The result
+        reports the achieved vocal_to_backing_db (during phrases), vocal_to_original_backing_db,
+        a balance_check of 'ok'/'mismatch'/'unavailable' (the measurement also works with the
+        vocal reverb on: the reverb rides with the vocal), and the effective backing effects.
+        The mix is normalized to normalize_peak_db unless null, and clipped exports are turned
+        down (see clipping and gain_correction_db).
         """
         store = _get_store()
         assert store is not None
@@ -1772,6 +1823,11 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
         specs = renderers.load_specs(source_path)
         use_stems = backing_levels is not None or bool(specs)
+        effects = renderers.effect_options(reverb, chorus)
+        effects_echo = {
+            "reverb": reverb.model_dump() if reverb is not None else None,
+            "chorus": chorus.model_dump() if chorus is not None else None,
+        }
         with (
             # The backing is an internal intermediate: always claim a unique name, even when the
             # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
@@ -1785,7 +1841,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                     None, f"{source_path.stem}_backing", extension=".mid"
                 ) as backing_midi:
                     remove_track(source_path, backing_midi, track_index)
-                    audio.render(backing_midi, backing_wav, "wav")
+                    audio.render(backing_midi, backing_wav, "wav", effects=effects)
             else:
                 with tempfile.TemporaryDirectory() as scratch:
 
@@ -1802,7 +1858,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                         extract_track(source_path, stem_midi, index)
                         renderer = renderers.get_renderer(spec.engine)
                         try:
-                            renderer.render(stem_midi, spec, stem_wav)
+                            renderer.render(stem_midi, spec, stem_wav, effects)
                         except renderers.RenderError as exc:
                             raise SingingError(f"Track '{name}': {exc}") from None
                         return name, stem_wav, gain_db, spec
@@ -1822,7 +1878,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 target,
                 vocal_level_db=vocal_level_db,
                 backing_volume=backing_volume,
-                reverb=reverb,
+                vocal_reverb=vocal_reverb,
                 normalize_peak_db=normalize_peak_db,
                 compress=compress,
                 ducking=ducking,
@@ -1844,6 +1900,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             },
             "backing_levels": backing_levels,
             "instruments": instruments,
+            "effects": effects_echo,
             "compress": compress,
             "ducking": ducking,
             "guide_removed": _track_names(midi)[track_index],

@@ -569,7 +569,14 @@ async def test_bake_instruments_materializes_the_timeline(store, engine_availabl
         "set_track_instrument",
         {
             "filename": song,
-            "tracks": {"Bass": {"engine": "fluidsynth", "program": 38, "sections": {"B": {"program": 81}}}},
+            "tracks": {
+                "Bass": {
+                    "engine": "fluidsynth",
+                    "program": 38,
+                    "reverb_send": 90,
+                    "sections": {"B": {"program": 81}},
+                }
+            },
         },
     )
     result = await _call("bake_instruments", {"filename": song, "output_filename": "baked"})
@@ -578,7 +585,7 @@ async def test_bake_instruments_materializes_the_timeline(store, engine_availabl
     assert baked.is_file()
     # the original file is untouched
     assert renderers.load_specs(store.root / song)["Bass"].program == 38
-    # the copy carries the timeline in the Bass track
+    # the copy carries the timeline and the send in the Bass track
     file = mido.MidiFile(baked)
     bass = next(
         track
@@ -587,6 +594,57 @@ async def test_bake_instruments_materializes_the_timeline(store, engine_availabl
     )
     programs = [(m.program) for m in bass if m.type == "program_change"]
     assert programs == [38, 81]
+    sends = [(m.control, m.value) for m in bass if m.type == "control_change" and m.control == 91]
+    assert sends == [(91, 90)]
+
+
+async def test_override_program_writes_effect_sends(store, engine_available):
+    from chordsmith.singing import extract_track
+
+    song = await _make_band(store)
+    stem = store.root / "stem.mid"
+    extract_track(store.root / song, stem, 2)  # the Bass track
+
+    # put a send in the file first: a spec without sends must leave it untouched
+    file = mido.MidiFile(stem)
+    file.tracks[-1].insert(0, mido.Message("control_change", control=91, value=77, channel=0, time=0))
+    file.save(stem)
+    plain = renderers.override_program(stem, renderers.InstrumentSpec(program=38))
+    kept = [
+        (message.control, message.value)
+        for track in mido.MidiFile(plain).tracks
+        for message in track
+        if message.type == "control_change" and message.control in (91, 93)
+    ]
+    assert kept == [(91, 77)]
+
+    spec = renderers.InstrumentSpec(reverb_send=100, chorus_send=50)
+    rewritten = renderers.override_program(stem, spec)
+    sends = [
+        (message.control, message.value)
+        for track in mido.MidiFile(rewritten).tracks
+        for message in track
+        if message.type == "control_change" and message.control in (91, 93)
+    ]
+    assert (91, 100) in sends and (93, 50) in sends
+    assert (91, 77) not in sends  # the file's own send is replaced
+
+
+async def test_set_track_instrument_stores_effect_sends(store, engine_available):
+    song = await _make_band(store)
+    result = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Bass": {"engine": "fluidsynth", "reverb_send": 110, "chorus_send": 60}},
+        },
+    )
+    assert not result.isError, result.content[0].text
+    spec = result.structuredContent["tracks"]["Bass"]
+    assert spec["reverb_send"] == 110 and spec["chorus_send"] == 60
+    sidecar = json.loads((store.root / f"{song[:-4]}.instruments.json").read_text(encoding="utf-8"))
+    assert sidecar["tracks"]["Bass"]["reverb_send"] == 110
+    assert renderers.load_specs(store.root / song)["Bass"].chorus_send == 60
 
 
 def test_effect_options_map_engine_settings():
