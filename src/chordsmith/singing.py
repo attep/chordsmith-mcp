@@ -1479,6 +1479,7 @@ class ProcessedVocals:
     delay_return: Path | None
     gain_reduction: dict[str, float]
     warnings: list[str]
+    delay_ms: float | None = None  # the delay's resolved time (tempo sync made visible)
 
 
 def _reverb_ir(scratch: Path, reverb: ReverbReturn) -> Path:
@@ -1668,7 +1669,10 @@ def _render_voice(
                     str(path),
                 ]
             )
-        reduction = gated_rms_db(without_compressor) - gated_rms_db(with_compressor)
+        # raw gain reduction (before makeup), like a DAW's meter: with = without - raw + makeup,
+        # so the measured difference plus the makeup recovers the compressor's own work
+        compressor = voice.chain.compressor
+        reduction = gated_rms_db(without_compressor) - gated_rms_db(with_compressor) + compressor.makeup_db
         if reduction > 6.0:
             warnings.append(f"voice '{voice.name}': the compressor is working hard ({reduction:.1f} dB)")
     return outputs, reduction, warnings
@@ -1698,9 +1702,13 @@ def _apply_gain(source: Path, gain_db: float, target: Path) -> None:
 
 
 def _limiter_filter(ceiling_db: float) -> str:
-    """alimiter with a dB ceiling; level=false keeps the output at the ceiling (no auto level)."""
+    """alimiter with a dB ceiling; level=false keeps the output at the ceiling (no auto level).
+
+    ``latency=true`` compensates the lookahead: the default would push the output ~5 ms late
+    (and cut that much off the end), which would misalign the mix against the backing or stems.
+    """
     limit = 10.0 ** (ceiling_db / 20.0)
-    return f"alimiter=limit={limit:.6f}:level=false"
+    return f"alimiter=limit={limit:.6f}:level=false:latency=true"
 
 
 def _wav_duration(path: Path) -> float:
@@ -1734,7 +1742,25 @@ def _reverb_return(send: Path, ir_path: Path, target: Path) -> None:
 
 
 def _delay_return(send: Path, delay_ms: float, feedback: float, target: Path) -> None:
-    """The delay return: echoes only (the dry path stays clean)."""
+    """The delay return: the send repeated at the delay time, each repeat quieter.
+
+    ffmpeg's ``aecho`` is a single-tap delay (its decay scales one echo, it does not repeat),
+    so the repeats are built explicitly: delayed copies at 1..N times the delay, scaled
+    ``feedback``, ``feedback²``, ... and summed. Repeats are kept while above -40 dB (at most
+    8), and the dry path stays clean.
+    """
+    taps = 1
+    while feedback > 0.0 and taps < 8 and feedback ** (taps + 1) > 0.01:
+        taps += 1
+    filters = [f"[0:a]asplit={taps}" + "".join(f"[t{position}]" for position in range(taps))]
+    labels = []
+    for position in range(taps):
+        level = feedback ** (position + 1)
+        filters.append(
+            f"[t{position}]adelay={round(delay_ms * (position + 1))}:all=1,volume={level:.6f}[t{position}out]"
+        )
+        labels.append(f"[t{position}out]")
+    filters.append(f"{''.join(labels)}amix=inputs={taps}:duration=longest:normalize=0[m]")
     _ffmpeg(
         [
             "-y",
@@ -1742,8 +1768,10 @@ def _delay_return(send: Path, delay_ms: float, feedback: float, target: Path) ->
             "error",
             "-i",
             str(send),
-            "-af",
-            f"aecho=0:1:{delay_ms:g}:{feedback:g}",
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[m]",
             str(target),
         ]
     )
@@ -1807,7 +1835,9 @@ def _render_processed_vocals(
                 str(compressed),
             ]
         )
-        gain_reduction["bus compressor"] = round(gated_rms_db(bus_current) - gated_rms_db(compressed), 2)
+        gain_reduction["bus compressor"] = round(
+            gated_rms_db(bus_current) - gated_rms_db(compressed) + vocal_bus.compressor.makeup_db, 2
+        )
         bus_current = compressed
     if vocal_bus is not None and vocal_bus.limiter is not None and vocal_bus.limiter.enabled:
         limited = scratch / "bus_limited.wav"
@@ -1830,6 +1860,7 @@ def _render_processed_vocals(
         bus_current = limited
     reverb_return_path: Path | None = None
     delay_return_path: Path | None = None
+    resolved_delay_ms: float | None = None
     if returns is not None:
         reverb_sends = [outputs["reverb"] for outputs in rendered if "reverb" in outputs]
         if reverb_sends and ir_path is not None:
@@ -1842,15 +1873,15 @@ def _render_processed_vocals(
             summed = scratch / "delay_send.wav"
             _sum_files(delay_sends, summed)
             delay_return_path = scratch / "delay_return.wav"
-            _delay_return(
-                summed, _delay_ms(returns.delay, starting_bpm), returns.delay.feedback, delay_return_path
-            )
+            resolved_delay_ms = _delay_ms(returns.delay, starting_bpm)
+            _delay_return(summed, resolved_delay_ms, returns.delay.feedback, delay_return_path)
     return ProcessedVocals(
         dry=bus_current,
         reverb_return=reverb_return_path,
         delay_return=delay_return_path,
         gain_reduction=gain_reduction,
         warnings=warnings,
+        delay_ms=resolved_delay_ms,
     )
 
 
@@ -2016,6 +2047,7 @@ def mix_tracks(
         )
         if processed is not None:
             info["gain_reduction_db"] = processed.gain_reduction
+            info["resolved_delay_ms"] = processed.delay_ms
             info["warnings"] = processed.warnings + info["warnings"]
         return info
 
@@ -2910,6 +2942,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         gain_reduction = info.pop("gain_reduction_db", {})
         loudness = info.pop("loudness", None)
         limiter_reduction = info.pop("limiter_reduction_db", None)
+        resolved_delay_ms = info.pop("resolved_delay_ms", None)
         warnings = info.pop("warnings", [])
         processing = None
         if process_voices:
@@ -2923,6 +2956,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "gain_reduction_db": gain_reduction,
                 "loudness": loudness,
                 "limiter_reduction_db": limiter_reduction,
+                "resolved_delay_ms": resolved_delay_ms,
             }
         return {
             "filename": target.name,

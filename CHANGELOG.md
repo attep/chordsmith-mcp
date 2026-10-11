@@ -12,6 +12,31 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.20.1] - 2026-10-12
+
+Fixes from the Under the Birch Moon vocal test (v0.20.0).
+
+### Fixed
+
+- **The limiters no longer delay the mix**: `alimiter`'s lookahead was uncompensated, so a mix
+  with the master limiter landed ~5 ms late against the backing (and lost that much off the
+  end), and a bus limiter shifted the voices against the band inside the mix. Both now run with
+  `latency=true`: sample-aligned, same ceiling, same length. (The test measured 219 samples of
+  offset on the processed mix.)
+- **Compressor gain reduction is now the raw reduction, before makeup** (like a DAW's meter):
+  the result used to report the net figure, so a compressor with 2 dB makeup could show a
+  negative "reduction" (−0.16 dB on the test's bus compressor; its raw reduction was 1.84 dB).
+  The 6 dB "working hard" warning uses the raw figure too.
+- **The delay now repeats**: ffmpeg's `aecho` is a single-tap filter, so however high
+  `feedback` was, the delay return produced exactly one echo (and the Under the Birch Moon test
+  could not confirm any echo at the dotted-eighth spacing). The return now builds real repeats
+  — delayed copies scaled `feedback`, `feedback²`, …, kept while above −40 dB (up to 8).
+
+### Added
+
+- **`processing.resolved_delay_ms`**: the time a tempo-synced delay actually uses (the test's
+  dotted-eighth at 66 BPM is 681.8 ms), so a synced delay can be checked without guessing.
+
 ## [0.20.0] - 2026-10-11
 
 Vocal processing, stage 1: per-voice chains, a duet bus, shared reverb/delay returns, and a

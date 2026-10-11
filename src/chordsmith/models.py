@@ -173,8 +173,9 @@ class VocalEq(BaseModel):
 class VocalCompressor(BaseModel):
     """A compressor with real settings; the defaults mirror the legacy fixed chain.
 
-    ``gain_reduction_db`` is reported from a measurement pass, so a threshold means the same
-    thing from song to song.
+    ``gain_reduction_db`` in the mix result is the raw reduction before makeup (like a DAW's
+    meter), reported from a measurement pass, so a threshold means the same thing from song to
+    song.
     """
 
     enabled: bool = False
@@ -248,7 +249,13 @@ class DelayReturn(BaseModel):
     tempo_sync: Literal["1/4", "1/8", "1/8d", "1/16"] | None = Field(
         None, description="Note value synced to the song's starting tempo."
     )
-    feedback: float = Field(0.2, ge=0.0, le=0.9, description="Feedback amount, 0-0.9.")
+    feedback: float = Field(
+        0.2,
+        ge=0.0,
+        le=0.9,
+        description="Level of each repeat relative to the previous one; repeats are kept while "
+        "above -40 dB (up to 8).",
+    )
 
     @model_validator(mode="after")
     def _one_time(self) -> DelayReturn:

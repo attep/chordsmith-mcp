@@ -26,6 +26,7 @@ from chordsmith.models import (
     MasterSettings,
     Returns,
     ReverbReturn,
+    VocalBus,
     VocalChain,
     VocalCompressor,
     VocalDeesser,
@@ -722,7 +723,7 @@ def test_delay_ms_resolves_tempo_sync():
 
 
 def test_limiter_filter_uses_a_linear_ceiling_and_no_auto_level():
-    assert singing._limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false"
+    assert singing._limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false:latency=true"
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
@@ -831,6 +832,130 @@ def test_master_loudness_target_applies_static_gain(tmp_path):
     assert abs(info["loudness"]["integrated_lufs"] + 18.0) <= 1.0
     assert info["loudness"]["true_peak_db"] is not None
     assert info["warnings"] == []
+
+
+def _first_audible_sample(path: Path, threshold: int = 50) -> int:
+    """Index of the first sample above a small threshold: where the tone's onset lands."""
+    with wave.open(str(path), "rb") as handle:
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    for index, value in enumerate(samples):
+        if abs(value) > threshold:
+            return index
+    return -1
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_master_limiter_keeps_the_mix_aligned(tmp_path):
+    # the limiter's lookahead must be compensated, or the whole mix lands ~5 ms late
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 0)  # silence: the vocal's onset is the only event
+    _write_sine_wav(vocal, 660.0, 20000)
+    plain = tmp_path / "plain.wav"
+    limited = tmp_path / "limited.wav"
+    singing.mix_tracks(backing, vocal, plain, normalize_peak_db=-1.0)
+    singing.mix_tracks(
+        backing,
+        vocal,
+        limited,
+        normalize_peak_db=-1.0,
+        master=MasterSettings(limiter=LimiterSettings(enabled=True, ceiling_db=-1.0)),
+    )
+    assert abs(_first_audible_sample(limited) - _first_audible_sample(plain)) <= 2
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_bus_limiter_keeps_the_vocal_aligned(tmp_path):
+    # a bus limiter without latency compensation would shift the voice against the band
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_constant_wav(backing, 0)
+    _write_sine_wav(vocal, 660.0, 20000)
+    plain = tmp_path / "plain.wav"
+    limited = tmp_path / "limited.wav"
+    voices = [singing.ProcessedVoice(path=vocal, name="voice")]
+    singing.mix_tracks(backing, None, plain, voices=voices, normalize_peak_db=-1.0)
+    singing.mix_tracks(
+        backing,
+        None,
+        limited,
+        voices=voices,
+        normalize_peak_db=-1.0,
+        vocal_bus=VocalBus(limiter=LimiterSettings(enabled=True, ceiling_db=-1.0)),
+    )
+    assert abs(_first_audible_sample(limited) - _first_audible_sample(plain)) <= 2
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_compressor_reduction_is_makeup_independent(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_sine_wav(backing, 440.0, 3000, channels=2)
+    _write_sine_wav(vocal, 660.0, 8000)
+    reductions = []
+    for makeup in (0.0, 4.0):
+        target = tmp_path / f"mix_{makeup:g}.wav"
+        voices = [
+            singing.ProcessedVoice(
+                path=vocal,
+                name="lead",
+                chain=VocalChain(
+                    compressor=VocalCompressor(enabled=True, threshold_db=-20.0, ratio=3.0, makeup_db=makeup)
+                ),
+            )
+        ]
+        info = singing.mix_tracks(backing, None, target, voices=voices)
+        reductions.append(info["gain_reduction_db"]["voice 'lead' compressor"])
+    assert abs(reductions[0] - reductions[1]) <= 0.3  # raw reduction: makeup does not change it
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_processing_reports_resolved_delay_ms(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_sine_wav(backing, 440.0, 3000, seconds=1.0, channels=2)
+    _write_sine_wav(vocal, 660.0, 20000, seconds=0.5)
+    target = tmp_path / "mix.wav"
+    voices = [singing.ProcessedVoice(path=vocal, sends=VocalSends(delay_db=-9.0))]
+    info = singing.mix_tracks(
+        backing,
+        None,
+        target,
+        voices=voices,
+        starting_bpm=120.0,
+        returns=Returns(delay=DelayReturn(tempo_sync="1/8d", feedback=0.3)),
+    )
+    assert info["resolved_delay_ms"] == 375.0  # a dotted eighth at 120 BPM
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_delay_return_repeats_with_feedback(tmp_path):
+    send = tmp_path / "send.wav"
+    _write_sine_wav(send, 1000.0, 20000, seconds=0.02)
+    target = tmp_path / "return.wav"
+    singing._delay_return(send, 200.0, 0.5, target)
+    with wave.open(str(target), "rb") as handle:
+        rate = handle.getframerate()
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    block = round(rate * 0.01)
+    loud = [
+        index
+        for index in range(len(samples) // block)
+        if max(abs(value) for value in samples[index * block : (index + 1) * block]) > 200
+    ]
+    groups: list[list[int]] = []
+    for index in loud:
+        if groups and index == groups[-1][-1] + 1:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    starts = [group[0] * block / rate for group in groups]
+    # one burst in, repeated bursts out: ffmpeg's aecho alone would give only the first
+    assert len(starts) >= 2
+    assert abs(starts[0] - 0.20) < 0.03
+    assert abs(starts[1] - 0.40) < 0.03
 
 
 async def test_mix_without_processing_stays_on_the_legacy_path(store, monkeypatch):

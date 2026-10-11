@@ -253,18 +253,22 @@ with no processing option the mix is exactly the plain graph.
   `release_ms`, `makeup_db`, `knee_db` — enabling it with defaults mirrors the legacy
   `compress`). Each voice also takes `gain_db`, `pan` (`-1` left … `1` right) and `reverb_mix`
   (0–1: an insert reverb on that voice alone). The result's `processing.gain_reduction_db`
-  reports each compressor's net reduction (makeup included) and warns past 6 dB.
+  reports each compressor's raw reduction, before makeup (like a DAW meter), and warns past
+  6 dB.
 - **Bus** (`vocal_bus`): `gain_db` for the summed voices plus an optional `compressor` and
   `limiter` (`ceiling_db`) — a glue stage for duets. A bus limiter taking off more than 2 dB
   warns.
 - **Returns** (`returns`): `reverb` (`decay_s`, `predelay_ms`, `damping`) — a deterministic,
   unit-energy impulse response convolved from the summed sends, so the wet amount means what it
   says — and `delay` (`delay_ms`, or `tempo_sync` `1/4`/`1/8`/`1/8d`/`1/16` at the song's
-  starting tempo, with `feedback`). Voices feed them through `sends` (`reverb_db`/`delay_db`);
-  the returns ride with the vocal gain and count as part of the vocal in the balance check.
+  starting tempo, with `feedback`: the repeats continue while audible, up to 8; a synced time
+  is reported as `processing.resolved_delay_ms`). Voices feed them through `sends`
+  (`reverb_db`/`delay_db`); the returns ride with the vocal gain and count as part of the
+  vocal in the balance check.
 - **Master** (`master`): `limiter` (`enabled`, `ceiling_db`) sits 0.3 dB under its ceiling so
-  inter-sample peaks stay inside it, and the finished mix's true peak is verified (a warning if
-  it slips over). `loudness_target_lufs` applies one static gain measured with EBU R128 —
+  inter-sample peaks stay inside it, its lookahead is compensated (the mix stays sample-aligned
+  with the backing and stems), and the finished mix's true peak is verified (a warning if it
+  slips over). `loudness_target_lufs` applies one static gain measured with EBU R128 —
   integrated loudness scales with gain, so a single measurement pass is enough, with no
   pumping — and supersedes `normalize_peak_db`. The `processing.loudness` block reports the
   measured integrated LUFS, loudness range, true peak and short-term max, plus the limiter's

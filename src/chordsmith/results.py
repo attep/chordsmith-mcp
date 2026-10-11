@@ -555,6 +555,7 @@ class MixProcessing(TypedDict, total=False):
     gain_reduction_db: dict[str, float]
     loudness: LoudnessInfo | None
     limiter_reduction_db: float | None
+    resolved_delay_ms: float | None
 
 
 class MixResult(TypedDict):
