@@ -311,7 +311,7 @@ class _FakeRenderer:
     def available(self):
         return True
 
-    def render(self, midi, spec, out):
+    def render(self, midi, spec, out, effects=None):
         self.rendered.append((mido.MidiFile(midi).tracks[-1], spec.preset))
         _write_tiny_wav(out, amplitude=1000)
 
@@ -368,6 +368,56 @@ async def test_render_audio_stems_use_signed_urls_when_configured(store, monkeyp
     for stem in data["stems"]:
         assert "data_base64" not in stem  # stems are megabytes each; links keep them off the wire
         assert stem["download_url"].startswith("https://example.test/")
+
+
+def test_effect_options_map_engine_settings():
+    from chordsmith.models import ChorusSettings, ReverbSettings
+
+    assert renderers.effect_options(None, None) is None
+    reverb_only = renderers.effect_options(ReverbSettings(room_size=1.0), None)
+    assert reverb_only["synth.reverb.active"] == 1
+    assert reverb_only["synth.reverb.room-size"] == 1.0
+    assert reverb_only["synth.chorus.active"] == 0
+    both = renderers.effect_options(ReverbSettings(), ChorusSettings(voices=6))
+    assert both["synth.chorus.active"] == 1 and both["synth.chorus.nr"] == 6
+    assert both["synth.reverb.level"] == 0.7  # the engine's own default is echoed
+
+
+@pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
+async def test_render_effects_are_opt_in_and_keep_tails(store):
+    song = await _make_band(store)
+    dry1 = (await _call("render_audio", {"filename": song, "output_filename": "dry1"})).structuredContent
+    dry2 = (await _call("render_audio", {"filename": song, "output_filename": "dry2"})).structuredContent
+    assert dry1["sha256"] == dry2["sha256"]  # the default render stays byte-identical
+    assert dry1["effects"] == {"reverb": None, "chorus": None}
+
+    wet = (
+        await _call("render_audio", {"filename": song, "output_filename": "wet", "reverb": {}})
+    ).structuredContent
+    assert wet["sha256"] != dry1["sha256"]
+    assert wet["effects"]["reverb"]["room_size"] == 0.5  # the engine's own default
+    assert wet["effects"]["chorus"] is None
+    assert wet["duration_seconds"] > dry1["duration_seconds"]  # the tail is not truncated
+    assert wet["clipping"] is False
+
+    chorus = (
+        await _call("render_audio", {"filename": song, "output_filename": "chorus", "chorus": {}})
+    ).structuredContent
+    assert chorus["sha256"] not in {dry1["sha256"], wet["sha256"]}
+
+    both = (
+        await _call(
+            "render_audio",
+            {
+                "filename": song,
+                "output_filename": "both",
+                "reverb": {"room_size": 0.9},
+                "chorus": {"voices": 2},
+            },
+        )
+    ).structuredContent
+    assert both["sha256"] not in {dry1["sha256"], wet["sha256"], chorus["sha256"]}
+    assert both["effects"]["chorus"]["voices"] == 2
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")

@@ -150,12 +150,32 @@ class StemEntry(_FileIdentity, DeliveryFields):
     peak_db: float
 
 
+class ReverbEntry(TypedDict):
+    room_size: float
+    damping: float
+    width: float
+    level: float
+
+
+class ChorusEntry(TypedDict):
+    voices: int
+    level: float
+    speed: float
+    depth: float
+
+
+class EffectsEntry(TypedDict):
+    reverb: ReverbEntry | None
+    chorus: ChorusEntry | None
+
+
 class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     source: str | None
     duration_seconds: float | None
     peak_db: float | None
     gain_correction_db: float
     clipping: bool
+    effects: EffectsEntry | None
     stems: list[StemEntry] | None
 
 

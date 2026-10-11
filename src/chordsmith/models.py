@@ -114,6 +114,32 @@ class PatternRow(BaseModel):
     velocity: int = Field(90, ge=1, le=127, description="Velocity of a plain hit; accents add 25.")
 
 
+class ReverbSettings(BaseModel):
+    """FluidSynth's built-in reverb for one render (engine-wide, not per track).
+
+    Defaults and ranges are the installed engine's own (FluidSynth 2.4.4): room size 0-1.2,
+    damping 0-1, width 0-100, level 0-1. Effects are off unless the tool gets this object.
+    """
+
+    room_size: float = Field(0.5, ge=0.0, le=1.2, description="Room size 0-1.2 (bigger = longer tail).")
+    damping: float = Field(0.3, ge=0.0, le=1.0, description="High-frequency damping 0-1.")
+    width: float = Field(0.8, ge=0.0, le=100.0, description="Stereo width 0-100.")
+    level: float = Field(0.7, ge=0.0, le=1.0, description="Reverb output level 0-1.")
+
+
+class ChorusSettings(BaseModel):
+    """FluidSynth's built-in chorus for one render (engine-wide, not per track).
+
+    Defaults and ranges are the installed engine's own (FluidSynth 2.4.4): 3 delay lines,
+    level 0-10, speed 0.1-5 Hz, depth 0-21 ms. This engine build has no waveform setting.
+    """
+
+    voices: int = Field(3, ge=0, le=99, description="Delay lines 0-99 (the engine's default is 3).")
+    level: float = Field(0.6, ge=0.0, le=10.0, description="Chorus output level 0-10.")
+    speed: float = Field(0.2, ge=0.1, le=5.0, description="Modulation speed in Hz, 0.1-5.")
+    depth: float = Field(4.25, ge=0.0, le=21.0, description="Modulation depth in ms, 0-21.")
+
+
 class LoopSpec(BaseModel):
     """Tile a short pattern across the song, e.g. one bar of drums repeated 32 times.
 

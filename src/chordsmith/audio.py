@@ -16,6 +16,7 @@ DEFAULT_SOUNDFONT_PATHS = (
     "/usr/share/soundfonts/default.sf2",
 )
 RENDER_TIMEOUT_SECONDS = 300
+EFFECTS_TAIL_SECONDS = 3.0  # with effects on, keep FluidSynth's natural tail past the last note
 
 
 class AudioError(ValueError):
@@ -114,17 +115,31 @@ def normalize_wav(path: Path, target_peak_db: float) -> float:
     return correction
 
 
+def _effect_options(effects: dict[str, float | int] | None) -> list[str]:
+    """FluidSynth ``-o`` arguments: explicit effect settings, or both effects forced off."""
+    if not effects:
+        return ["-o", "synth.reverb.active=0", "-o", "synth.chorus.active=0"]
+    args: list[str] = []
+    for name, value in effects.items():
+        args += ["-o", f"{name}={value}"]
+    return args
+
+
 def render(
     midi_path: Path,
     target: Path,
     audio_format: str,
     soundfont: str | None = None,
     normalize_peak_db: float | None = None,
+    effects: dict[str, float | int] | None = None,
 ) -> float:
     """Render ``midi_path`` to ``target`` (a .wav or .mp3 path).
 
     With ``normalize_peak_db`` the render is gained to that peak before the mp3 encode (None
-    keeps FluidSynth's raw level). Returns the gain correction applied in dB.
+    keeps FluidSynth's raw level). ``effects`` is a FluidSynth setting map (reverb/chorus);
+    None renders dry with both effects explicitly off — the byte-identical default. With
+    effects on, the natural tail past the last note is kept (up to EFFECTS_TAIL_SECONDS).
+    Returns the gain correction applied in dB.
     """
     if audio_format not in ("wav", "mp3"):
         raise AudioError("format must be 'wav' or 'mp3'.")
@@ -146,19 +161,18 @@ def render(
             str(wav_path),
             "-r",
             "44100",
-            "-o",
-            "synth.reverb.active=0",
-            "-o",
-            "synth.chorus.active=0",
+            *_effect_options(effects),
             str(sf2),
             str(midi_path),
         ]
     )
     if not wav_path.is_file():
         raise AudioError("FluidSynth produced no audio.")
-    # FluidSynth keeps rendering release tails past the last note; cut back to the MIDI length
-    # so the audio matches the file's reported duration.
-    trim_wav(wav_path, midi_duration(midi_path))
+    # FluidSynth keeps rendering past the last note; cut back to the MIDI length so the audio
+    # matches the file's reported duration — but keep the natural tail when effects are on, so
+    # reverb/chorus tails are not truncated.
+    tail = EFFECTS_TAIL_SECONDS if effects else 0.0
+    trim_wav(wav_path, midi_duration(midi_path) + tail)
     correction = 0.0
     if normalize_peak_db is not None:
         correction = normalize_wav(wav_path, normalize_peak_db)

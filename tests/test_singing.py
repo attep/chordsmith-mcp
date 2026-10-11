@@ -1185,7 +1185,7 @@ async def test_mix_per_stem_levels_render_each_track(store, monkeypatch):
         def available(self):
             return True
 
-        def render(self, midi, spec, out):
+        def render(self, midi, spec, out, effects=None):
             rendered.append(Path(midi).name)
             out.write_bytes(b"RIFF0000")
 
@@ -1236,7 +1236,7 @@ async def test_mix_uses_sidecar_instrument_specs(store, monkeypatch):
         def available(self):
             return True
 
-        def render(self, midi, spec, out):
+        def render(self, midi, spec, out, effects=None):
             captured.append((Path(midi).name, spec.program, spec.gain_db))
             out.write_bytes(b"RIFF0000")
 

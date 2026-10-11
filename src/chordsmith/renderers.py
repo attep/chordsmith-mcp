@@ -22,6 +22,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from chordsmith import audio, results
+from chordsmith.models import ChorusSettings, ReverbSettings
 from chordsmith.soundfont import SoundFontError, available_labels, find_preset, read_presets
 from chordsmith.storage import FileStore
 
@@ -232,7 +233,47 @@ class Renderer(Protocol):
 
     def available(self) -> bool: ...
 
-    def render(self, midi: Path, spec: InstrumentSpec, out: Path) -> None: ...
+    def render(
+        self,
+        midi: Path,
+        spec: InstrumentSpec,
+        out: Path,
+        effects: dict[str, float | int] | None = None,
+    ) -> None: ...
+
+
+def effect_options(
+    reverb: ReverbSettings | None, chorus: ChorusSettings | None
+) -> dict[str, float | int] | None:
+    """FluidSynth setting map for the given effects; None when both are off (a dry render).
+
+    Effects are engine-wide for one render instance, not per track: with ``stems`` every track
+    is rendered with them, and summing wet stems is not identical to a single wet pass.
+    """
+    if reverb is None and chorus is None:
+        return None
+    options: dict[str, float | int] = {"synth.reverb.active": 0, "synth.chorus.active": 0}
+    if reverb is not None:
+        options.update(
+            {
+                "synth.reverb.active": 1,
+                "synth.reverb.room-size": reverb.room_size,
+                "synth.reverb.damp": reverb.damping,
+                "synth.reverb.width": reverb.width,
+                "synth.reverb.level": reverb.level,
+            }
+        )
+    if chorus is not None:
+        options.update(
+            {
+                "synth.chorus.active": 1,
+                "synth.chorus.nr": chorus.voices,
+                "synth.chorus.level": chorus.level,
+                "synth.chorus.speed": chorus.speed,
+                "synth.chorus.depth": chorus.depth,
+            }
+        )
+    return options
 
 
 def _has_audio(path: Path, threshold: int = 2) -> bool:
@@ -255,12 +296,18 @@ class FluidSynthRenderer:
     def available(self) -> bool:
         return audio.find_fluidsynth() is not None and audio.find_soundfont() is not None
 
-    def render(self, midi: Path, spec: InstrumentSpec, out: Path) -> None:
+    def render(
+        self,
+        midi: Path,
+        spec: InstrumentSpec,
+        out: Path,
+        effects: dict[str, float | int] | None = None,
+    ) -> None:
         if spec.preset is not None and not Path(spec.preset).is_file():
             raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
         source = override_program(midi, spec)
         try:
-            audio.render(source, out, "wav", spec.preset)
+            audio.render(source, out, "wav", spec.preset, effects=effects)
         except audio.AudioError as exc:
             raise RenderError(str(exc)) from None
         if audio.wav_duration(out) <= 0.01:

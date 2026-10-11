@@ -21,10 +21,10 @@ from chordsmith import server
 pytestmark = pytest.mark.anyio
 
 DESCRIPTION_BUDGET_BYTES = 15 * 1024
-# Deliberately raised from 72 KB in v0.11.0: preset verification and level diagnostics added
-# input params and result fields (normalize_peak_db, soundfont inventories, per-stem peaks),
-# and the section/import/render-job milestones need headroom too. Keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 88 * 1024
+# Deliberately raised from 72 KB in v0.11.0 (preset verification, level diagnostics) and to
+# 96 KB in v0.14.0 (reverb/chorus settings, import and section tools). The surface grows with
+# capabilities; keep new schemas lean and re-check before raising again.
+PAYLOAD_CEILING_BYTES = 96 * 1024
 
 
 @pytest.fixture

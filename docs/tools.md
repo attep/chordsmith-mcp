@@ -282,14 +282,24 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 | `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
 | `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. Several renders run at once, but it is still slower than one pass; the result then also lists every stem (name, track, gain, sha256, peak). Stem entries use signed URLs whenever a public URL is configured (they are megabytes each), otherwise they follow `return_as`; the mix always follows `return_as` |
 | `normalize_peak_db` | Gain the rendered mix so its peak hits this level in dBFS (set `-1.0` for a listening-ready file). Default `null` keeps FluidSynth's raw level; **stems stay raw either way**, so their balance sums back to the unnormalized mix |
+| `reverb` | FluidSynth's built-in reverb (off when omitted): `{"room_size": 0.5, "damping": 0.3, "width": 0.8, "level": 0.7}` — those are the engine's own defaults, ranges are the engine's accepted values (room 0–1.2, damping 0–1, width 0–100, level 0–1). `{}` turns it on with the engine defaults |
+| `chorus` | FluidSynth's built-in chorus (off when omitted): `{"voices": 3, "level": 0.6, "speed": 0.2, "depth": 4.25}` — again the engine's defaults and accepted ranges (voices 0–99, level 0–10, speed 0.1–5 Hz, depth 0–21 ms; this engine build has no waveform setting) |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
 The result includes `mime_type`, `size_bytes`, `sha256`, for wav the rendered `duration_seconds`
-and `peak_db`, the `gain_correction_db` that normalization applied, and a `clipping` flag; every
-stem entry carries its own `peak_db`. Raw renders intentionally keep headroom (a busy arrangement
-can peak around −10 dBFS) — pass `normalize_peak_db: -1.0` when the file is for listening rather
-than for balancing.
+and `peak_db`, the `gain_correction_db` that normalization applied, a `clipping` flag, and the
+effective `effects` (reverb/chorus settings or nulls). Every stem entry carries its own
+`peak_db`. Raw renders intentionally keep headroom (a busy arrangement can peak around
+−10 dBFS) — pass `normalize_peak_db: -1.0` when the file is for listening rather than for
+balancing.
+
+**Instrumental effects (`reverb`/`chorus`) are off by default**, so renders stay byte-identical
+until you opt in; with them on, the engine's natural tail past the last note is kept (about
+2.7 s). They are **engine-wide for one render instance, not per-track effects**: with
+`stems: true` every stem is rendered wet, so summing the wet stems is not identical to one wet
+pass (chorus/reverb do not add linearly across stems). For the voice, use the mix tool's own
+`reverb` switch — it is a separate vocal effect and is never applied to instruments.
 
 Renders use a General MIDI soundfont: no samples, sub/reese bass design, filter sweeps or
 production FX. Treat them as an audition of the notes, not a finished master — open the `.mid` in

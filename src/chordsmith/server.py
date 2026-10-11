@@ -30,11 +30,13 @@ from chordsmith.midi_writer import add_track as add_track_midi
 from chordsmith.midi_writer import transpose_file, write_progression
 from chordsmith.models import (
     ChordEvent,
+    ChorusSettings,
     Humanize,
     LoopSpec,
     NoteInput,
     NumeralEvent,
     PatternRow,
+    ReverbSettings,
     Rhythm,
     Voicing,
 )
@@ -770,7 +772,9 @@ def render_audio(
             description="Render each track as its own wav stem (using set_track_instrument "
             "specs) and combine them into the mix. One render per track (several at once), so "
             "it is slower; stems always get unique names. Stem entries are delivered as signed "
-            "URLs when a public URL is configured, else like return_as."
+            "URLs when a public URL is configured, else like return_as. With reverb/chorus on, "
+            "every stem is rendered wet (the engine is per render instance), so summing stems "
+            "is not identical to one wet pass."
         ),
     ] = False,
     normalize_peak_db: Annotated[
@@ -783,6 +787,20 @@ def render_audio(
             "raw either way so their balance sums honestly.",
         ),
     ] = None,
+    reverb: Annotated[
+        ReverbSettings | None,
+        Field(
+            description="FluidSynth reverb for this render (off when omitted): room_size, "
+            "damping, width, level. Engine-wide for the render instance, not per track."
+        ),
+    ] = None,
+    chorus: Annotated[
+        ChorusSettings | None,
+        Field(
+            description="FluidSynth chorus for this render (off when omitted): voices, level, "
+            "speed, depth. Engine-wide for the render instance, not per track."
+        ),
+    ] = None,
     output_filename: FileName = None,
     expires_in: Annotated[
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
@@ -793,24 +811,42 @@ def render_audio(
 
     Creates an audio file next to the MIDI files and returns it like get_midi_file (base64 bytes
     or a signed, expiring URL), plus the source name, the sample peak (wav), the gain applied by
-    normalize_peak_db and whether the export clips. MP3 needs ffmpeg; FluidSynth and a soundfont
-    are required (both are in the Docker image). With ``stems``, each track is rendered on its
-    own (per-track soundfont/program/gain from set_track_instrument) and the stems are combined
-    into the mix; the result then also lists every stem with its own peak. Stems are never
-    normalized (their balance must stay intact); only the combined mix follows
-    normalize_peak_db. On failure a clear error explains what is missing and no file is left
-    behind.
+    normalize_peak_db, whether the export clips, and the effective `effects` (reverb/chorus).
+    MP3 needs ffmpeg; FluidSynth and a soundfont are required (both are in the Docker image).
+    With ``stems``, each track is rendered on its own (per-track soundfont/program/gain from
+    set_track_instrument) and the stems are combined into the mix; the result then also lists
+    every stem with its own peak. Stems are never normalized (their balance must stay intact);
+    only the combined mix follows normalize_peak_db. Reverb/chorus are off by default (renders
+    stay byte-identical); with them on the engine's tail past the last note is kept, and note
+    that they are engine-wide per render instance — with stems every stem is rendered wet, so
+    summing wet stems is not identical to one wet pass. On failure a clear error explains what
+    is missing and no file is left behind.
     """
     source = store.existing_path(filename)
+    effects = renderers.effect_options(reverb, chorus)
+    effects_echo = {
+        "reverb": reverb.model_dump() if reverb is not None else None,
+        "chorus": chorus.model_dump() if chorus is not None else None,
+    }
     if stems:
-        return _render_stems(
-            source, format, return_as, expires_in, output_filename, overwrite, soundfont, normalize_peak_db
+        result = _render_stems(
+            source,
+            format,
+            return_as,
+            expires_in,
+            output_filename,
+            overwrite,
+            soundfont,
+            normalize_peak_db,
+            effects,
         )
+        result["effects"] = effects_echo
+        return result
     with store.claimed_path(
         output_filename or source.stem, f"{source.stem}_{format}", overwrite, f".{format}"
     ) as target:
         try:
-            correction = audio.render(source, target, format, soundfont, normalize_peak_db)
+            correction = audio.render(source, target, format, soundfont, normalize_peak_db, effects)
         except audio.AudioError as exc:
             raise ValueError(str(exc)) from None
     data = target.read_bytes()
@@ -818,6 +854,7 @@ def render_audio(
     result["mime_type"] = "audio/wav" if format == "wav" else "audio/mpeg"
     result["source"] = source.name
     result["gain_correction_db"] = correction
+    result["effects"] = effects_echo
     if format == "wav":
         peak = audio.wav_peak_db(target)
         result["peak_db"] = round(peak, 2)
@@ -838,6 +875,7 @@ def _render_stems(
     overwrite: bool,
     soundfont: str | None,
     normalize_peak_db: float | None = None,
+    effects: dict[str, float | int] | None = None,
 ) -> dict[str, Any]:
     """Render every note track on its own and combine the stems into the mix."""
     midi = mido.MidiFile(source)
@@ -856,7 +894,7 @@ def _render_stems(
             renderer = renderers.get_renderer(spec.engine)
             with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
                 try:
-                    renderer.render(stem_midi, spec, stem_wav)
+                    renderer.render(stem_midi, spec, stem_wav, effects)
                 except renderers.RenderError as exc:
                     raise ValueError(f"Track '{name}': {exc}") from None
                 return renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db)

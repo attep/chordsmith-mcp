@@ -12,6 +12,28 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.14.0] - 2026-10-10
+
+Instrumental reverb and chorus (patch brief milestone 4).
+
+### Added
+
+- **FluidSynth reverb and chorus on `render_audio`** (`reverb`, `chorus`), off by default so
+  existing renders stay byte-identical. Defaults and ranges are the installed engine's own
+  (verified against FluidSynth 2.4.4: reverb room 0.5/damp 0.3/width 0.8/level 0.7; chorus
+  3 voices/0.6/0.2 Hz/4.25 ms — this build has no chorus waveform setting, so none is offered).
+  With effects on, the engine's natural tail past the last note (~2.7 s) is kept instead of
+  being trimmed. The result echoes the effective settings in `effects`.
+- Scope is documented and honest: effects are **engine-wide per render instance, not per
+  track** — with `stems: true` every stem renders wet, and summing wet stems is not identical
+  to one wet pass. The vocal mix's `reverb` stays a separate vocal effect and is never applied
+  to instruments.
+
+### Changed
+
+- The tools/list payload ceiling was raised from 88 KB to 96 KB for the effect schemas
+  (deliberate, with a note in the test).
+
 ## [0.13.0] - 2026-10-10
 
 MIDI import and bulk pattern ingestion (patch brief milestone 3).
