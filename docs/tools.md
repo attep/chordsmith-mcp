@@ -448,8 +448,10 @@ Then `render_audio` with `stems: true` renders each track through its spec and s
 unknown engines are rejected with a message that lists what is available, and a requested
 bank/program is checked against the soundfont it will play from — a miss is an error that lists
 what that bank actually has, so nothing falls back silently. The result echoes the **resolved
-preset** per track (e.g. `"128-016 Power"`; bank and program are 0-based). The specs follow the
-file through rename and delete.
+preset** per track (e.g. `"128-016 Power"`; bank and program are 0-based) and the same
+**`effective`** block as [`list_instruments`](#list_instruments) — what every track will
+actually play, with its source and any warnings. The specs follow the file through rename and
+delete.
 
 **Section overrides** switch a track's program/bank mid-song without splitting it into separate
 tracks: `{"sections": {"Intro": {"program": 24}, "Climax": {"program": 30}}}`. The events land at
@@ -467,10 +469,20 @@ this server can run — their availability, the default soundfont and notes — 
 preset table** of the loaded (or given) `.sf2`: every preset's name, bank and program, both
 0-based, so the numbers `set_track_instrument` takes are verifiable, not assumed (FluidR3 reports
 189 presets, its drum kits in bank 128 — e.g. `128-016 Power`). When no soundfont file is
-readable, a static GM reference list is returned instead. With a filename, also returns that
-file's note tracks, stored specs, and the preset label each spec resolves to. Engines run as
-**separate processes**, so a crashing or differently licensed engine can never take the server
-down.
+readable, a static GM reference list is returned instead. With a filename, also returns:
+
+- each track's **stored spec** and the preset label each spec resolves to (`resolved` — null
+  when a spec sets no bank/program, by contract);
+- an **`effective`** block: what every note track will actually play — a spec's program/bank
+  first, then the file's own `program_change`/CC0 on that channel (scanned across all tracks),
+  then the default (program 0; **bank 128 on channel 10**). Each entry carries the 1-based
+  `channel`, `bank`, `program`, the resolved `label`, a `source` (`spec`/`file`/`default`), the
+  `soundfont` it was looked up in, and a `warning` for shared channels, a later program change
+  on the channel, or a preset missing from the SoundFont. It shows what is *meant* to play, not
+  proof of how the audio sounds.
+
+Engines run as **separate processes**, so a crashing or differently licensed engine can never
+take the server down.
 
 ## list_chord_types
 

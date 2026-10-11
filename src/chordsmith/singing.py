@@ -1929,9 +1929,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     def list_singing_jobs() -> results.SingingJobsResult:
         """Return the recent singing jobs (newest first): id, status, source and progress.
 
-        Read-only; use it to find a job whose reply was lost — jobs now survive server restarts
-        (records are saved to disk), and a job that was running when the server went down comes
-        back reported as failed with the reason. Jobs live 24 hours.
+        Read-only; use it to find a job whose reply was lost — records survive server restarts,
+        and a job that was running when the server went down comes back failed with the reason.
+        Jobs live 24 hours.
         """
         _registry.prune()
         with _registry.lock:

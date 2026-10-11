@@ -12,6 +12,21 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.19.1] - 2026-10-10
+
+### Added
+
+- **An `effective` block in `list_instruments` and `set_track_instrument`**: what every note
+  track will actually play. Resolution order: a spec's program/bank first, then the file's own
+  `program_change`/CC0 on that channel (scanned across **all** tracks, since
+  `override_program` writes into the conductor), then the default (program 0; bank 128 on
+  channel 10). Each entry carries the 1-based channel, bank, program, the resolved preset
+  label, its `source` (`spec`/`file`/`default`), the soundfont it was looked up in, and
+  warnings for shared channels, a later program change on the channel (the starting value is
+  reported), or a preset missing from the SoundFont. This answers questions like "is the
+  Cymbals track really the Orchestra kit?" per track — `128-048 Orchestra Kit` — without
+  touching the existing `resolved` contract (still null when a spec sets no program).
+
 ## [0.19.0] - 2026-10-10
 
 Composition additions (patch brief milestone 3: the abyssal editing issues).

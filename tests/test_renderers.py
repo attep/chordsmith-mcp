@@ -647,6 +647,139 @@ async def test_set_track_instrument_stores_effect_sends(store, engine_available)
     assert renderers.load_specs(store.root / song)["Bass"].chorus_send == 60
 
 
+async def _make_effective_song(store):
+    """Chords (ch1, program 0), Harp (ch2, 46), Bass (ch3, 38), Drums (ch10, 16) in the file."""
+    created = await _call(
+        "create_chord_progression",
+        {"chords": ["Am", "F", "C", "G"], "filename": "eff", "tempo": 120},
+    )
+    song = created.structuredContent["filename"]
+    notes = [{"pitch": "C5", "start_beat": 0, "beats": 1}]
+    for track_name, instrument, channel in (("Harp", 46, 2), ("Bass", 38, 3), ("Drums", 16, 10)):
+        added = await _call(
+            "add_track",
+            {
+                "filename": song,
+                "track_name": track_name,
+                "notes": notes,
+                "instrument": instrument,
+                "channel": channel,
+                "output_filename": f"eff_{track_name.lower()}",
+                "overwrite": True,
+            },
+        )
+        song = added.structuredContent["filename"]
+    return song
+
+
+async def test_effective_instruments_resolve_spec_file_and_default(store, engine_available, tmp_path):
+    kit = tmp_path / "kit.sf2"
+    kit.write_bytes(_make_sf2([("Power", 128, 16), ("Orchestral Harp", 0, 46), ("Synth Bass 1", 0, 38)]))
+    song = await _make_effective_song(store)
+    await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "program": 33}}},
+    )
+    listing = (await _call("list_instruments", {"filename": song, "soundfont": str(kit)})).structuredContent
+    effective = listing["file"]["effective"]
+    assert effective["Harp"] == {
+        "channel": 2,
+        "bank": 0,
+        "program": 46,
+        "label": "000-046 Orchestral Harp",
+        "source": "file",
+        "soundfont": str(kit),
+        "warning": None,
+    }
+    # the percussion channel resolves against bank 128 by default
+    assert effective["Drums"]["bank"] == 128 and effective["Drums"]["label"] == "128-016 Power"
+    assert effective["Drums"]["channel"] == 10 and effective["Drums"]["source"] == "file"
+    # a spec program wins over the file's own
+    assert effective["Bass"]["source"] == "spec" and effective["Bass"]["program"] == 33
+    assert effective["Bass"]["label"] is None
+    assert "000-033" in effective["Bass"]["warning"]  # the label miss carries its reason
+    assert effective["Chords"]["source"] == "file" and effective["Chords"]["program"] == 0
+    assert "000-000" in effective["Chords"]["warning"]
+    # the set result carries the same block (labels depend on the server's soundfont)
+    stored = (
+        await _call("set_track_instrument", {"filename": song, "tracks": {"Harp": {"engine": "fluidsynth"}}})
+    ).structuredContent
+    assert stored["effective"]["Harp"]["program"] == 46
+    assert stored["effective"]["Harp"]["source"] == "file"
+
+
+async def test_effective_instruments_warn_on_shared_channels_and_later_changes(
+    store, engine_available, tmp_path
+):
+    kit = tmp_path / "kit.sf2"
+    kit.write_bytes(_make_sf2([("Orchestral Harp", 0, 46)]))
+    song = await _make_effective_song(store)
+    notes = [{"pitch": "C2", "start_beat": 0, "beats": 1}]
+    shared = (
+        await _call(
+            "add_track",
+            {
+                "filename": song,
+                "track_name": "Bass2",
+                "notes": notes,
+                "instrument": 38,
+                "channel": 3,
+                "output_filename": "eff_bass2",
+                "overwrite": True,
+            },
+        )
+    ).structuredContent["filename"]
+    # a later program change on the Harp channel: report the starting value and flag it
+    file = mido.MidiFile(store.root / shared)
+    harp = next(
+        track
+        for track in file.tracks
+        if next((m.name for m in track if m.type == "track_name"), "") == "Harp"
+    )
+    harp.append(mido.Message("program_change", program=10, channel=1, time=480))
+    file.save(store.root / shared)
+
+    effective = (
+        await _call("list_instruments", {"filename": shared, "soundfont": str(kit)})
+    ).structuredContent["file"]["effective"]
+    assert "shares channel 3 with" in effective["Bass"]["warning"]
+    assert "shares channel 3 with" in effective["Bass2"]["warning"]
+    assert "changes program again at beat" in effective["Harp"]["warning"]
+    assert effective["Harp"]["program"] == 46  # the starting value
+
+
+async def test_effective_instruments_default_when_the_file_sets_nothing(store, engine_available, tmp_path):
+    kit = tmp_path / "kit.sf2"
+    kit.write_bytes(_make_sf2([("Piano", 0, 0), ("Standard", 128, 0)]))
+    store.ensure_root()
+    raw = mido.MidiFile(type=1, ticks_per_beat=480)
+    conductor = mido.MidiTrack()
+    conductor.append(mido.MetaMessage("track_name", name="Conductor", time=0))
+    conductor.append(mido.MetaMessage("end_of_track", time=960))
+    melodic = mido.MidiTrack()
+    melodic.append(mido.MetaMessage("track_name", name="Melodic", time=0))
+    melodic.append(mido.Message("note_on", note=60, velocity=90, channel=0, time=0))
+    melodic.append(mido.Message("note_off", note=60, velocity=0, channel=0, time=480))
+    melodic.append(mido.MetaMessage("end_of_track", time=480))
+    drums = mido.MidiTrack()
+    drums.append(mido.MetaMessage("track_name", name="Drums", time=0))
+    drums.append(mido.Message("note_on", note=36, velocity=90, channel=9, time=0))
+    drums.append(mido.Message("note_off", note=36, velocity=0, channel=9, time=120))
+    drums.append(mido.MetaMessage("end_of_track", time=840))
+    raw.tracks.extend([conductor, melodic, drums])
+    raw.save(store.root / "raw.mid")
+
+    effective = (
+        await _call("list_instruments", {"filename": "raw.mid", "soundfont": str(kit)})
+    ).structuredContent["file"]["effective"]
+    assert effective["Melodic"]["source"] == "default"
+    assert effective["Melodic"]["bank"] == 0 and effective["Melodic"]["program"] == 0
+    assert effective["Melodic"]["label"] == "000-000 Piano"
+    # channel 10 defaults to the percussion bank
+    assert effective["Drums"]["source"] == "default"
+    assert effective["Drums"]["bank"] == 128 and effective["Drums"]["label"] == "128-000 Standard"
+
+
 def test_effect_options_map_engine_settings():
     from chordsmith.models import ChorusSettings, ReverbSettings
 

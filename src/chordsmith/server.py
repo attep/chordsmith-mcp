@@ -443,7 +443,7 @@ def create_empty_file(
 
     Use it when a song should not start from a chord progression: create the empty file, then
     add_track each part onto it. With ``sections`` the tempo/meter map is written immediately.
-    Returns the file's name/path and the section map it carries (empty when none was given).
+    Returns the file's name/path and the section map it carries.
     """
     with store.claimed_path(output_filename or filename, f"{filename}_empty", overwrite) as target:
         info = write_empty(target, target.stem)
@@ -472,9 +472,9 @@ def remove_track(
 ) -> results.RemoveTrackResult:
     """Write a copy of the file without one track; the original is kept.
 
-    Finds the track by name (names must be unique; rename first if not) and returns the copy's
-    name/path and how many tracks remain. The per-track instrument sidecar belongs to the
-    original, so the copy starts without specs.
+    Finds the track by name (names must be unique; rename first). Returns the copy's
+    name/path and remaining track count. The per-track instrument sidecar belongs to the
+    original; the copy starts without specs.
     """
     source = store.existing_path(filename)
     midi = mido.MidiFile(source)
@@ -635,10 +635,9 @@ def get_file(
 ) -> results.GetFileResult:
     """Return any output file — MIDI, wav or mp3 — so it can be checked or handed to the user.
 
-    Read-only; like get_midi_file but for every kind of file: rendered stems, mixes, vocal
-    takes, imports. base64 returns the bytes inline (with size and sha256); url returns a
-    signed, expiring link (needs CHORDSMITH_PUBLIC_URL). Use list_generated_files to find
-    names.
+    Read-only; like get_midi_file but for every kind of file: stems, mixes, vocal takes,
+    imports. base64 returns the bytes inline; url a signed, expiring link (needs
+    CHORDSMITH_PUBLIC_URL). Use list_generated_files to find names.
     """
     path = store.existing_media_path(filename)
     data = path.read_bytes()
@@ -662,8 +661,7 @@ def import_audio(
 
     The bytes are stored verbatim; the result reports size, sha256, duration, sample rate,
     channels and (for wav) the sample peak, so the file can be used with mix_song_with_vocals
-    (as a vocal or a vocal segment) without guessing what it is. MP3 metadata needs ffprobe
-    (part of the Docker image's ffmpeg).
+    without guessing what it is. MP3 metadata needs ffprobe.
     """
     suffix = Path(filename).suffix.lower()
     if suffix not in (".wav", ".mp3"):

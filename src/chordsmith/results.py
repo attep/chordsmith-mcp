@@ -280,11 +280,22 @@ class SoundfontInventory(TypedDict):
     presets: list[PresetEntry]
 
 
+class EffectiveInstrument(TypedDict):
+    channel: int
+    bank: int
+    program: int
+    label: str | None
+    source: str
+    soundfont: str | None
+    warning: str | None
+
+
 class InstrumentsFile(TypedDict):
     filename: str
     tracks: list[str]
     specs: dict[str, InstrumentTrack]
     resolved: dict[str, str | None]
+    effective: dict[str, EffectiveInstrument]
 
 
 class InstrumentsResult(TypedDict):
@@ -299,6 +310,7 @@ class InstrumentMapResult(TypedDict):
     path: str
     tracks: dict[str, InstrumentTrack]
     resolved: dict[str, str | None]
+    effective: dict[str, EffectiveInstrument]
 
 
 class BakeResult(TypedDict):

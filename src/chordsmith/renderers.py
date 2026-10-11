@@ -653,6 +653,97 @@ def _has_section_gains(spec: InstrumentSpec) -> bool:
     return any(override.gain_db is not None for override in (spec.sections or {}).values())
 
 
+def effective_instruments(
+    midi: mido.MidiFile, specs: dict[str, InstrumentSpec], soundfont: str | None = None
+) -> dict[str, dict]:
+    """What each note track will actually play, resolved through the spec, the file and defaults.
+
+    Resolution order per track: a spec's ``program``/``bank`` first, then the file's own events
+    on that channel (the first CC0 and the first ``program_change``, scanned across **all**
+    tracks — override_program writes into the conductor), then the default (program 0; bank 128
+    on channel 10). ``source`` names where the program came from; the bank resolves independently
+    through the same order. Labels are looked up in the spec's preset or the server SoundFont —
+    a missing preset returns a null label with the reason in ``warning``, never an error.
+    Channels are 1-based (10 = drums), matching add_track and the import report. This says what
+    is *meant* to play, not proof of how the audio sounds.
+    """
+    programs: dict[int, list[tuple[int, int]]] = {}
+    banks: dict[int, list[tuple[int, int]]] = {}
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type == "program_change":
+                programs.setdefault(message.channel, []).append((tick, message.program))
+            elif message.type == "control_change" and message.control == 0:
+                banks.setdefault(message.channel, []).append((tick, message.value))
+    ticks_per_beat = midi.ticks_per_beat
+    names = track_names(midi)
+    channels = track_channels(midi)
+    note_names = [names[index] for index in note_tracks(midi)]
+    shared: dict[int, list[str]] = {}
+    for name in note_names:
+        channel = channels.get(name)
+        if channel is not None:
+            shared.setdefault(channel, []).append(name)
+    result: dict[str, dict] = {}
+    for name in note_names:
+        channel = channels.get(name)
+        channel0 = channel if channel is not None else 0
+        spec = specs.get(name)
+        warnings: list[str] = []
+        if spec is not None and spec.program is not None:
+            program, source = spec.program, "spec"
+        elif channel is not None and programs.get(channel0):
+            program, source = programs[channel0][0][1], "file"
+        else:
+            program, source = 0, "default"
+        if spec is not None and spec.bank is not None:
+            bank = spec.bank
+        elif channel is not None and banks.get(channel0):
+            bank = banks[channel0][0][1]
+        else:
+            bank = 128 if channel0 == 9 else 0
+        if channel is not None:
+            if len(shared.get(channel0, [])) > 1:
+                others = ", ".join(entry for entry in shared[channel0] if entry != name)
+                warnings.append(f"shares channel {channel0 + 1} with {others}")
+            channel_programs = programs.get(channel0, [])
+            if len(channel_programs) > 1:
+                beat = channel_programs[1][0] / ticks_per_beat
+                warnings.append(
+                    f"the channel changes program again at beat {beat:g}; reporting the starting value"
+                )
+        target = spec.preset if spec is not None and spec.preset is not None else None
+        if target is None:
+            target = soundfont or audio.find_soundfont()
+        label: str | None = None
+        if target is None:
+            warnings.append("no SoundFont is readable on this server")
+        else:
+            try:
+                presets = read_presets(target)
+            except SoundFontError as exc:
+                warnings.append(str(exc))
+                presets = []
+            if presets:
+                preset = find_preset(presets, bank, program)
+                if preset is None:
+                    warnings.append(f"preset {bank:03d}-{program:03d} is not in '{Path(target).name}'")
+                else:
+                    label = preset.label()
+        result[name] = {
+            "channel": channel0 + 1,
+            "bank": bank,
+            "program": program,
+            "label": label,
+            "source": source,
+            "soundfont": str(target) if target is not None else None,
+            "warning": "; ".join(warnings) if warnings else None,
+        }
+    return result
+
+
 def _validate_sections(source: Path, spec: InstrumentSpec, channel: int) -> None:
     """Check a spec's section overrides against the file's section map and the target SoundFont."""
     if not spec.sections:
@@ -801,8 +892,9 @@ def register(mcp: FastMCP, store_provider) -> None:
         engine reverb/chorus each track gets. Track names must exist in the file, a preset file
         must be readable, section names must exist in the file's section map, and every
         requested bank/program must exist in the SoundFont it targets — a miss is an error that
-        lists what the bank has, so nothing falls back silently. Returns the full spec map and
-        the resolved preset label per track.
+        lists what the bank has, so nothing falls back silently. Returns the full spec map, the
+        resolved preset label per spec, and an ``effective`` block: what each track actually
+        plays, labelled with a source and warnings.
         """
         store: FileStore = store_provider()
         source = store.existing_path(filename)
@@ -839,6 +931,7 @@ def register(mcp: FastMCP, store_provider) -> None:
             "path": str(source),
             "tracks": {name: spec.model_dump() for name, spec in specs.items()},
             "resolved": resolved,
+            "effective": effective_instruments(midi, specs),
         }
 
     @mcp.tool(title="List instruments", annotations=_READ_ONLY)
@@ -858,8 +951,9 @@ def register(mcp: FastMCP, store_provider) -> None:
         block is the actual preset table of the loaded (or given) .sf2 — name, bank and program,
         both 0-based — which is what set_track_instrument validates against; when no soundfont
         file is readable, a static GM reference list is returned instead. With a filename, also
-        returns each track's stored spec, the tracks that can carry one, and the preset label
-        each spec resolves to.
+        returns each track's stored spec, the tracks that can carry one, the preset label each
+        spec resolves to, and an ``effective`` block: what each track actually plays, labelled
+        with a source and warnings (1-based channels; intent, not proof of the sound).
         """
         store: FileStore = store_provider()
         engines = [
@@ -911,6 +1005,7 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "tracks": [names[index] for index in note_tracks(midi)],
                 "specs": {name: spec.model_dump() for name, spec in specs.items()},
                 "resolved": resolved,
+                "effective": effective_instruments(midi, specs, soundfont),
             }
         return result
 

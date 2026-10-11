@@ -283,8 +283,8 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
         """Return the recent render jobs (newest first): id, status, tracks and progress.
 
         Read-only; use it to find a job whose reply was lost — records survive server restarts,
-        and a job that was running when the server went down comes back reported as failed with
-        the reason. Jobs live 24 hours.
+        and a job that was running when the server went down comes back failed with the reason.
+        Jobs live 24 hours.
         """
         _prune()
         with _JOBS_LOCK:
