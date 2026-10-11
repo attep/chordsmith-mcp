@@ -310,11 +310,14 @@ def add_track(
     program: int,
     channel: int,
     notes: list[tuple[int, float, float, int]],
+    automation: list[tuple[int, int, int, float, float]] | None = None,
 ) -> dict:
     """Append a note-level track to a copy of ``source``.
 
-    ``notes`` are ``(pitch, start_beat, beats, velocity)`` tuples. The original file is never
-    modified; a type 0 file is promoted to type 1 so it can hold several tracks.
+    ``notes`` are ``(pitch, start_beat, beats, velocity)`` tuples. ``automation`` are linear
+    controller ramps ``(cc, from_value, to_value, start_beat, end_beat)``: one value every
+    sixteenth note plus the exact end. The original file is never modified; a type 0 file is
+    promoted to type 1 so it can hold several tracks.
     """
     midi = mido.MidiFile(source)
     if midi.type == 0:
@@ -331,6 +334,19 @@ def add_track(
         raw.append((start, 1, mido.Message("note_on", note=pitch, velocity=velocity, channel=channel)))
         raw.append((start + duration, 0, mido.Message("note_off", note=pitch, velocity=0, channel=channel)))
         end = max(end, start + duration)
+    automation_events = 0
+    for cc, from_value, to_value, start_beat, end_beat in automation or []:
+        start_tick = round(start_beat * tpb)
+        end_tick = max(start_tick + 1, round(end_beat * tpb))
+        step = max(1, round(tpb / 4))  # a value every sixteenth note
+        ticks = list(range(start_tick, end_tick, step)) + [end_tick]
+        span = end_tick - start_tick
+        for tick in ticks:
+            fraction = (tick - start_tick) / span
+            value = round(from_value + (to_value - from_value) * fraction)
+            raw.append((tick, 2, mido.Message("control_change", control=cc, value=value, channel=channel)))
+            automation_events += 1
+        end = max(end, end_tick)
     raw.sort(key=lambda r: (r[0], r[1]))
     last = 0
     for t, _, msg in raw:
@@ -339,7 +355,23 @@ def add_track(
     track.append(mido.MetaMessage("end_of_track", time=max(0, end - last)))
     midi.tracks.append(track)
     midi.save(target)
-    return {"notes_added": len(notes), "total_tracks": len(midi.tracks), "track_index": len(midi.tracks) - 1}
+    return {
+        "notes_added": len(notes),
+        "automation_events": automation_events,
+        "total_tracks": len(midi.tracks),
+        "track_index": len(midi.tracks) - 1,
+    }
+
+
+def write_empty(path: Path, title: str) -> dict:
+    """Write a type-1 MIDI with just a conductor track (a blank song to add tracks to)."""
+    midi = mido.MidiFile(type=1, ticks_per_beat=TICKS_PER_BEAT)
+    conductor = mido.MidiTrack()
+    conductor.append(mido.MetaMessage("track_name", name=title, time=0))
+    conductor.append(mido.MetaMessage("end_of_track", time=0))
+    midi.tracks.append(conductor)
+    midi.save(path)
+    return {"midi_type": 1, "total_tracks": 1}
 
 
 def transpose_chord_symbol(symbol: str, semitones: int) -> str:

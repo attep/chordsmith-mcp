@@ -211,7 +211,7 @@ async def test_add_track_section_validation(store):
             "notes": [{"pitch": "C4", "start_beat": 0, "section": "Intro", "bar": 1, "beats": 1}],
         },
     )
-    assert both.isError and "not both" in both.content[0].text
+    assert both.isError and "exactly one" in both.content[0].text
 
 
 async def test_conductor_ends_with_the_map(store):

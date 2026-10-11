@@ -201,6 +201,13 @@ class SectionInstrument(BaseModel):
     )
     bank: int | None = Field(None, ge=0, le=127, description="CC0 bank select for this section.")
     program: int | None = Field(None, ge=0, le=127, description="MIDI program (0-127) for this section.")
+    gain_db: float | None = Field(
+        None,
+        ge=-24.0,
+        le=12.0,
+        description="Level for this track during this section, replacing its gain_db; applied "
+        "exactly to the rendered stem (and baked as CC11, which cannot boost above 0 dB).",
+    )
 
 
 class InstrumentSpec(BaseModel):
@@ -255,6 +262,11 @@ class InstrumentSpec(BaseModel):
         ge=-24.0,
         le=12.0,
         description="Trim for this stem when the stems are combined into the mix.",
+    )
+    mute: bool = Field(
+        False,
+        description="Muted: left out of stem renders and vocal mixes, and baked as CC7=0 so "
+        "external players hear it silent too.",
     )
 
 
@@ -637,6 +649,10 @@ def preset_label(spec: InstrumentSpec, channel: int) -> str | None:
     return preset.label()
 
 
+def _has_section_gains(spec: InstrumentSpec) -> bool:
+    return any(override.gain_db is not None for override in (spec.sections or {}).values())
+
+
 def _validate_sections(source: Path, spec: InstrumentSpec, channel: int) -> None:
     """Check a spec's section overrides against the file's section map and the target SoundFont."""
     if not spec.sections:
@@ -665,6 +681,63 @@ def _validate_sections(source: Path, spec: InstrumentSpec, channel: int) -> None
             program=override.program if override.program is not None else spec.program,
         )
         preset_label(merged, channel)
+
+
+def section_gain_windows(
+    spec: InstrumentSpec, timeline: list[tuple[str, float, float]]
+) -> list[tuple[float, float, float]]:
+    """``(start_seconds, end_seconds, gain_db)`` for each section the spec gives a gain to."""
+    if not spec.sections:
+        return []
+    windows: list[tuple[float, float, float]] = []
+    for name, start, end in timeline:
+        override = spec.sections.get(name)
+        if override is not None and override.gain_db is not None:
+            windows.append((start, end, override.gain_db))
+    return windows
+
+
+def apply_section_gains(stem: Path, windows: list[tuple[float, float, float]], baseline_db: float) -> bool:
+    """Apply per-section gain deltas to a rendered stem with an ffmpeg volume envelope.
+
+    Only the *difference* from the track's baseline is applied, so the stem keeps the baseline
+    for the mix and the combined result is exact. Returns True when a pass ran.
+    """
+    deltas = [
+        (start, end, gain - baseline_db) for start, end, gain in windows if abs(gain - baseline_db) > 0.05
+    ]
+    if not deltas:
+        return False
+    ffmpeg = audio.find_ffmpeg()
+    if ffmpeg is None:
+        raise RenderError("ffmpeg is not installed (it is in the Docker image); needed for section gains.")
+    chain = []
+    for index, (start, end, delta) in enumerate(deltas):
+        source_label = "[0:a]" if index == 0 else f"[g{index - 1}]"
+        chain.append(
+            f"{source_label}volume=enable='between(t,{start:.3f},{end:.3f})':"
+            f"volume={10 ** (delta / 20.0):.4f}[g{index}]"
+        )
+    temp = stem.with_name(stem.stem + ".sec.wav")
+    try:
+        _ffmpeg(
+            [
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(stem),
+                "-filter_complex",
+                ";".join(chain),
+                "-map",
+                f"[g{len(deltas) - 1}]",
+                str(temp),
+            ]
+        )
+        temp.replace(stem)
+    finally:
+        temp.unlink(missing_ok=True)
+    return True
 
 
 # ------------------------------------------------------------------ stem combination
@@ -880,7 +953,14 @@ def register(mcp: FastMCP, store_provider) -> None:
                 for override in (spec.sections or {}).values()
             )
             has_sends = spec.reverb_send is not None or spec.chorus_send is not None
-            if spec.bank is None and spec.program is None and not has_overrides and not has_sends:
+            if (
+                spec.bank is None
+                and spec.program is None
+                and not has_overrides
+                and not has_sends
+                and not spec.mute
+                and not _has_section_gains(spec)
+            ):
                 baked[name] = spec  # only a trim (gain_db): nothing representable in MIDI
                 continue
             channel = channels.get(name)
@@ -898,6 +978,28 @@ def register(mcp: FastMCP, store_provider) -> None:
                 events += _program_events(
                     0, track_channels_here, None, None, spec.reverb_send, spec.chorus_send
                 )
+            if spec.mute:
+                # a muted track is silenced for external players too (CC7 = channel volume)
+                events += [
+                    (0, 5, mido.Message("control_change", control=7, value=0, time=0, channel=entry))
+                    for entry in track_channels_here
+                ]
+            if spec.sections:
+                # per-section gains bake as CC11 expression at the section starts; the encoding
+                # cannot boost above 0 dB (CC11 127), which the docs call out
+                for section_tick, section_name in section_markers(midi):
+                    override = spec.sections.get(section_name)
+                    if override is None or override.gain_db is None:
+                        continue
+                    value = max(0, min(127, round(127 * 10 ** (override.gain_db / 20.0))))
+                    events += [
+                        (
+                            section_tick,
+                            6,
+                            mido.Message("control_change", control=11, value=value, time=0, channel=entry),
+                        )
+                        for entry in track_channels_here
+                    ]
             _rewrite_track(midi.tracks[index], events)
             baked[name] = spec
         with store.claimed_path(output_filename, f"{source.stem}_instruments", overwrite) as target:

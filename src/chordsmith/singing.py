@@ -649,6 +649,7 @@ def build_mapping(
     language: str,
     holds: dict[int, int] | None,
     align_stress: bool = False,
+    words: dict[str, str] | None = None,
 ) -> VocalMapping:
     wordless = lyrics is None or lyrics.strip() == ""
     warnings: list[str] = []
@@ -681,16 +682,55 @@ def build_mapping(
     phonemes_per_note: dict[int, list[str]] = {}
     stress_per_note: dict[int, float | None] = {}
     english = False
+    phoneme_mode = False
+    overrides: dict[str, list[str]] = {}
     if not wordless:
-        if language == "en":
+        if language in ("en", "phonemes"):
             if not diffsinger.available():
                 raise SingingError(
                     "English lyrics need the DiffSinger voicebank (see docs/singing.md) and "
                     "CHORDSMITH_DIFFSINGER_VOICE. Use wordless mode or Japanese kana for VOICEVOX."
                 )
-            english = True
-            groups = diffsinger.split_syllables(lyrics)
-            syllables = [token for group in groups for token in group]
+            bank = diffsinger.get_voicebank()
+            if language == "en":
+                english = True
+                groups = diffsinger.split_syllables(lyrics)
+                syllables = [token for group in groups for token in group]
+                unknown: list[str] = []
+                for word, pronunciation in (words or {}).items():
+                    phones = pronunciation.split()
+                    if not phones:
+                        raise SingingError(f"Custom word '{word}' has no phonemes.")
+                    unknown.extend(phone for phone in phones if phone not in bank.phoneme_ids)
+                    overrides[word.lower()] = phones
+                if unknown:
+                    raise SingingError(
+                        f"Custom word phoneme(s) not in this voicebank: "
+                        f"{', '.join(sorted(set(unknown)))}. Use the voicebank's own phonemes."
+                    )
+            else:
+                # raw phonemes: one token per note, phonemes hyphen-separated (e.g. 'l-aa')
+                phoneme_mode = True
+                unknown = []
+                for token in lyrics.split():
+                    lowered = token.lower()
+                    if lowered in ("+", "-", "br"):
+                        groups.append([token])
+                        continue
+                    phones = [part for part in token.split("-") if part]
+                    if not phones:
+                        raise SingingError(f"Empty phoneme token '{token}'.")
+                    unknown.extend(phone for phone in phones if phone not in bank.phoneme_ids)
+                    overrides[lowered] = phones
+                    groups.append([token])
+                if unknown:
+                    known = sorted(bank.phoneme_ids)
+                    preview = ", ".join(known[:40]) + ("..." if len(known) > 40 else "")
+                    raise SingingError(
+                        f"Unknown phoneme(s): {', '.join(sorted(set(unknown)))}. This voicebank "
+                        f"uses: {preview}"
+                    )
+                syllables = [token for group in groups for token in group]
         else:
             syllables = _parse_syllables(lyrics, language)
         if len(syllables) > len(remaining):
@@ -705,16 +745,18 @@ def build_mapping(
                 f"{len(remaining) - len(syllables)} notes had no syllable and were turned into rests "
                 "(no words were invented)."
             )
-        if english and syllables:
-            bank = diffsinger.get_voicebank()
-            phones_per_token, group_warnings, stress = diffsinger.phonemize_groups(bank, groups)
+        if (english or phoneme_mode) and syllables:
+            phones_per_token, group_warnings, stress = diffsinger.phonemize_groups(
+                bank, groups, overrides or None
+            )
             warnings.extend(group_warnings)
             for note, phones, level in zip(remaining, phones_per_token, stress, strict=False):
                 phonemes_per_note[note.note_id] = phones
                 stress_per_note[note.note_id] = level
-            retimed = _align_stress(groups, remaining, stress_per_note) if align_stress else {}
-            aligned = set(retimed)
-            warnings.extend(_stress_warnings(groups, remaining, stress_per_note, aligned))
+            if english:
+                retimed = _align_stress(groups, remaining, stress_per_note) if align_stress else {}
+                aligned = set(retimed)
+                warnings.extend(_stress_warnings(groups, remaining, stress_per_note, aligned))
     syllable_by_note = {
         note.note_id: syllables[index] for index, note in enumerate(remaining) if index < len(syllables)
     }
@@ -1774,8 +1816,21 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             ),
         ] = None,
         language: Annotated[
-            str, Field(description="'en' for English words, 'ja' for kana; omit lyrics for wordless mode.")
+            str,
+            Field(
+                description="'en' for English words, 'ja' for kana, 'phonemes' for raw "
+                "voicebank phonemes (one token per note, hyphen-separated, e.g. 'l-aa v-ey'); "
+                "omit lyrics for wordless mode."
+            ),
         ] = "ja",
+        words: Annotated[
+            dict[str, str] | None,
+            Field(
+                description="Custom pronunciations for 'en' (checked before the dictionaries), "
+                "e.g. {'lah': 'l aa', 'vey': 'v ey'} — word → voicebank phonemes. This is how "
+                "made-up languages or names get exact sounds."
+            ),
+        ] = None,
         holds: Annotated[
             dict[int, int] | None,
             Field(
@@ -1798,14 +1853,16 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         Read-only: registers the mapping in memory and returns the per-note plan (tokens,
         phonemes, timings) plus warnings, so mistakes are caught before rendering. The mapping is
         kept for 24 hours. English tokens are phonemized here; unknown words are refused by name
-        and words are never dropped or invented. Mismatches produce warnings. The next step is
-        render_singing with the returned mapping_id.
+        (all of them at once) and words are never dropped or invented. Made-up words get exact
+        sounds through ``words``, or bypass the dictionaries entirely with
+        language='phonemes'. Mismatches produce warnings. The next step is render_singing with
+        the returned mapping_id.
         """
         with _registry.lock:
             score = _registry.scores.get(score_id)
         if score is None:
             raise SingingError(f"Score '{score_id}' not found (scores expire after 24 hours).")
-        mapping = build_mapping(score, lyrics, language, holds, align_stress)
+        mapping = build_mapping(score, lyrics, language, holds, align_stress, words)
         with _registry.lock:
             _registry.versions[score_id] = _registry.versions.get(score_id, 0) + 1
             mapping.version = _registry.versions[score_id]
@@ -2051,7 +2108,13 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 available = ", ".join(names[index] for index in note_tracks) or "(none)"
                 raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
         specs = renderers.load_specs(source_path)
+        if specs:
+            # muted tracks stay out of the backing entirely
+            note_tracks = [
+                index for index in note_tracks if not (specs.get(names[index]) and specs[names[index]].mute)
+            ]
         use_stems = backing_levels is not None or bool(specs)
+        section_timeline = sections.timeline_seconds(sections.read_sections(source_path))
         effects = renderers.effect_options(reverb, chorus)
         effects_echo = {
             "reverb": reverb.model_dump() if reverb is not None else None,
@@ -2096,6 +2159,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                         renderer = renderers.get_renderer(spec.engine)
                         try:
                             renderer.render(stem_midi, spec, stem_wav, effects)
+                            windows = renderers.section_gain_windows(spec, section_timeline)
+                            if windows:
+                                renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
                         except renderers.RenderError as exc:
                             raise SingingError(f"Track '{name}': {exc}") from None
                         return name, stem_wav, gain_db, spec

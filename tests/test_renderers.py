@@ -388,7 +388,7 @@ async def test_spec_sections_round_trip(store, engine_available):
     )
     assert not result.isError, result.content[0].text
     spec = result.structuredContent["tracks"]["Bass"]
-    assert spec["sections"] == {"B": {"preset": None, "bank": None, "program": 81}}
+    assert spec["sections"] == {"B": {"preset": None, "bank": None, "program": 81, "gain_db": None}}
     sidecar = json.loads((store.root / f"{song[:-4]}.instruments.json").read_text(encoding="utf-8"))
     assert sidecar["tracks"]["Bass"]["sections"]["B"]["program"] == 81
     loaded = renderers.load_specs(store.root / song)

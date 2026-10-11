@@ -25,11 +25,13 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from chordsmith import __version__, audio, delivery, renderers, renderjobs, results, sections, singing
+from chordsmith import sections as sections_module
 from chordsmith.analysis import analyze_file, describe_midi
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
-from chordsmith.midi_writer import transpose_file, write_progression
+from chordsmith.midi_writer import transpose_file, write_empty, write_progression
 from chordsmith.models import (
+    Automation,
     ChordEvent,
     ChorusSettings,
     Humanize,
@@ -39,6 +41,7 @@ from chordsmith.models import (
     PatternRow,
     ReverbSettings,
     Rhythm,
+    SongSection,
     Voicing,
 )
 from chordsmith.offload import offloaded
@@ -422,6 +425,81 @@ def _chord_type_rows() -> list[dict]:
     return rows
 
 
+@mcp.tool(title="Create empty file", annotations=CREATES)
+def create_empty_file(
+    filename: Annotated[str, Field(description="Name for the new file, e.g. 'abyss'. '.mid' is added.")],
+    sections: Annotated[
+        list[SongSection] | None,
+        Field(
+            max_length=64,
+            description="Optional section map to write straight into the conductor (like "
+            "set_song_sections), so add_track can use section+bar+beat positions.",
+        ),
+    ] = None,
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.EmptyFileResult:
+    """Create a blank MIDI file (a conductor track only) to build a song on from scratch.
+
+    Use it when a song should not start from a chord progression: create the empty file, then
+    add_track each part onto it. With ``sections`` the tempo/meter map is written immediately.
+    Returns the file's name/path and the section map it carries (empty when none was given).
+    """
+    with store.claimed_path(output_filename or filename, f"{filename}_empty", overwrite) as target:
+        info = write_empty(target, target.stem)
+        resolved: list[dict] = []
+        if sections:
+            names = [section.name for section in sections]
+            if len(set(names)) != len(names):
+                duplicates = sorted({name for name in names if names.count(name) > 1})
+                raise ValueError(f"Duplicate section names: {', '.join(duplicates)}.")
+            resolved = [section.payload() for section in sections_module.write_sections(target, sections)]
+    return {
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"midi://{target.name}",
+        **info,
+        "sections": resolved,
+    }
+
+
+@mcp.tool(title="Remove track", annotations=CREATES)
+def remove_track(
+    filename: Annotated[str, Field(description="Existing file to copy without the track.")],
+    track_name: Annotated[str, Field(description="Name of the track to leave out, e.g. 'Chords'.")],
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.RemoveTrackResult:
+    """Write a copy of the file without one track; the original is kept.
+
+    Finds the track by name (names must be unique; rename first if not) and returns the copy's
+    name/path and how many tracks remain. The per-track instrument sidecar belongs to the
+    original, so the copy starts without specs.
+    """
+    source = store.existing_path(filename)
+    midi = mido.MidiFile(source)
+    names = renderers.track_names(midi)
+    matches = [index for index, name in enumerate(names) if name == track_name]
+    if not matches:
+        available = ", ".join(names) or "(none)"
+        raise ValueError(f"No track named '{track_name}'. Tracks: {available}.")
+    if len(matches) > 1:
+        raise ValueError(f"Several tracks are named '{track_name}'; rename them first.")
+    with store.claimed_path(output_filename, f"{source.stem}_no_{track_name}", overwrite) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        del midi.tracks[matches[0]]
+        midi.save(target)
+    return {
+        "source": source.name,
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"midi://{target.name}",
+        "removed": track_name,
+        "total_tracks": len(midi.tracks),
+    }
+
+
 @mcp.tool(title="List chord types", annotations=READ_ONLY)
 def list_chord_types() -> list[results.ChordTypeRow]:
     """Return every supported chord quality, with the symbols you can write and its notes in C.
@@ -692,6 +770,15 @@ def add_track(
         float,
         Field(gt=0, le=4, description="Length of one pattern step in beats (default 0.25 = a sixteenth)."),
     ] = 0.25,
+    automation: Annotated[
+        list[Automation] | None,
+        Field(
+            max_length=64,
+            description="Linear controller ramps, e.g. [{'cc': 11, 'from_value': 40, "
+            "'to_value': 110, 'start_beat': 0, 'end_beat': 12}] to swell a held note (CC11 "
+            "expression) or fade a track (CC7 volume). One value every sixteenth note.",
+        ),
+    ] = None,
     instrument: Instrument = 0,
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
     loop: Annotated[
@@ -709,12 +796,14 @@ def add_track(
 
     Creates a new file; the original is never modified. The copy keeps all existing tracks and
     gets the new one on the chosen channel (a type 0 file is promoted to type 1). Returns the new
-    file's name/path and how many notes/tracks it has. Pitches outside 0-127 and overlapping
-    notes are fine; the track is as monophonic or polyphonic as you write it. Notes can be
-    positioned in absolute beats or relative to a section (section+bar+beat, see
-    set_song_sections); a note may run past its section's end. ``patterns`` write drum-style
-    grids compactly — one row per voice, 'x' hits, 'X' accents — from beat 0. With ``loop``, a
-    short pattern (for example one bar of drums) is tiled across the song in one call.
+    file's name/path, how many notes/tracks it has and how many automation events were written.
+    Pitches outside 0-127 and overlapping notes are fine; the track is as monophonic or
+    polyphonic as you write it. Notes can be positioned in absolute beats, relative to a section
+    (section+bar+beat, see set_song_sections), or on an exact tuplet slot ({"count": 3,
+    "in_beats": 2, "start_beat": 138, "slot": 0}); a note may run past its section's end.
+    ``patterns`` write drum-style grids compactly — one row per voice, 'x' hits, 'X' accents —
+    from beat 0. ``automation`` writes linear controller ramps (CC11 swells, CC7 fades). With
+    ``loop``, a short pattern (for example one bar of drums) is tiled across the song.
     """
     source = store.existing_path(filename)
     with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
@@ -722,6 +811,7 @@ def add_track(
             raise ValueError("Choose a different output_filename; the original file is never modified.")
         if not notes and not patterns:
             raise ValueError("Give notes, patterns, or both.")
+        ticks_per_beat = mido.MidiFile(source).ticks_per_beat
         parsed: list[tuple[int, float, float, int]] = []
         for row in patterns or []:
             try:
@@ -773,6 +863,12 @@ def add_track(
                     + (bar - 1) * section.beats_per_bar
                     + ((note.beat if note.beat is not None else 1.0) - 1)
                 )
+            elif note.tuplet is not None:
+                # exact tick math: the group start plus the slot's share of the span
+                start_tick = round(note.tuplet.start_beat * ticks_per_beat) + round(
+                    note.tuplet.slot * note.tuplet.in_beats * ticks_per_beat / note.tuplet.count
+                )
+                start = start_tick / ticks_per_beat
             parsed.append((pitch, start, note.beats, note.velocity))
         if loop is not None:
             for _, start, beats, _ in parsed:
@@ -797,6 +893,10 @@ def add_track(
                 for repeat in range(loop.times)
                 for pitch, start, beats, velocity in parsed
             ]
+        ramps = [
+            (item.cc, item.from_value, item.to_value, item.start_beat, item.end_beat)
+            for item in automation or []
+        ]
         info = add_track_midi(
             source,
             target,
@@ -804,6 +904,7 @@ def add_track(
             program=instrument,
             channel=channel - 1,
             notes=parsed,
+            automation=ramps,
         )
     return {
         "source": source.name,
@@ -1056,6 +1157,7 @@ def _render_stems(
     specs = renderers.load_specs(source)
     names = renderers.track_names(midi)
     tracks = renderers.note_tracks(midi)
+    section_timeline = sections.timeline_seconds(sections.read_sections(source))
     if only_tracks is not None:
         available = [names[index] for index in tracks]
         unknown = sorted(set(only_tracks) - set(available))
@@ -1063,8 +1165,11 @@ def _render_stems(
             raise ValueError(f"Unknown track(s) {', '.join(unknown)}. Tracks: {', '.join(available)}.")
         wanted = set(only_tracks)
         tracks = [index for index in tracks if names[index] in wanted]
+    muted = {name for name, spec in specs.items() if spec.mute}
+    if muted:
+        tracks = [index for index in tracks if names[index] not in muted]
     if not tracks:
-        raise ValueError("This file has no note tracks to render.")
+        raise ValueError("This file has no unmuted note tracks to render.")
     with tempfile.TemporaryDirectory() as scratch:
 
         def render_track(index: int):
@@ -1078,6 +1183,9 @@ def _render_stems(
             with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
                 try:
                     renderer.render(stem_midi, spec, stem_wav, effects)
+                    windows = renderers.section_gain_windows(spec, section_timeline)
+                    if windows:
+                        renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
                 except renderers.RenderError as exc:
                     message = f"Track '{name}': {exc}"
                     if not continue_on_error:

@@ -224,7 +224,12 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
         source = store.existing_path(filename)
         midi = mido.MidiFile(source)
         names = renderers.track_names(midi)
-        note_names = [names[index] for index in renderers.note_tracks(midi)]
+        specs = renderers.load_specs(source)
+        note_names = [
+            names[index]
+            for index in renderers.note_tracks(midi)
+            if not (specs.get(names[index]) and specs[names[index]].mute)
+        ]
         wanted: list[str] | None = None
         if tracks:
             unknown = sorted(set(tracks) - set(note_names))

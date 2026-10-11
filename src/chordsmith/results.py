@@ -113,8 +113,27 @@ class AddTrackResult(TypedDict):
     track_name: str
     channel: int
     notes_added: int
+    automation_events: int
     total_tracks: int
     track_index: int
+
+
+class EmptyFileResult(TypedDict):
+    filename: str
+    path: str
+    uri: str
+    midi_type: int
+    total_tracks: int
+    sections: list[SectionEntry]
+
+
+class RemoveTrackResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    removed: str
+    total_tracks: int
 
 
 class DeleteResult(TypedDict):
@@ -230,6 +249,7 @@ class SectionOverride(TypedDict):
     preset: str | None
     bank: int | None
     program: int | None
+    gain_db: float | None
 
 
 class InstrumentTrack(TypedDict):
@@ -241,6 +261,7 @@ class InstrumentTrack(TypedDict):
     reverb_send: int | None
     chorus_send: int | None
     gain_db: float
+    mute: bool
 
 
 class ProgramCatalog(TypedDict):

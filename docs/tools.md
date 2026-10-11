@@ -8,6 +8,8 @@ for something specific ("use drop2 voicing") or understand a result.
 - [Voicing options](#voicing-options)
 - [Rhythm options](#rhythm-options)
 - [add_track](#add_track)
+- [create_empty_file](#create_empty_file)
+- [remove_track](#remove_track)
 - [set_song_sections](#set_song_sections)
 - [bake_instruments](#bake_instruments)
 - [get_midi_file](#get_midi_file)
@@ -179,9 +181,10 @@ original is never modified. A type 0 file is promoted to type 1.
 |---|---|
 | `filename` (required) | Existing file in the output folder |
 | `track_name` (required) | Name for the new track, e.g. `"Melody"` |
-| `notes` | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes. Position a note with `start_beat` (absolute) **or** with `section` + `bar` + `beat` (1-based, relative to the section map — see [set_song_sections](#set_song_sections)); a note may run past its section's end |
+| `notes` | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes. Position a note with `start_beat` (absolute), `section` + `bar` + `beat` (1-based, relative to the section map), or `tuplet` — an exact slot in a tuplet group, e.g. `{"count": 3, "in_beats": 2, "start_beat": 138, "slot": 0}` for the first note of a 3:2 triplet (positions are computed in MIDI ticks, so they are exact); a note may run past its section's end |
 | `patterns` | Compact step grids, e.g. `[{"pitch": 36, "steps": "x---x---"}, {"pitch": 38, "steps": "----x---", "velocity": 100}]`. One row per voice: `x`/`o` hit, `X`/`O` accent (+25), `-`/`.`/`_` rest, `|` and spaces are bar lines that do not consume a step. Starts at beat 0 and tiles with `loop`. Give `notes`, `patterns`, or both |
 | `step_beats` | Length of one pattern step in beats (default `0.25` = a sixteenth) |
+| `automation` | Linear controller ramps, e.g. `[{"cc": 11, "from_value": 40, "to_value": 110, "start_beat": 0, "end_beat": 12}]` — a held note can swell (CC11 expression) or a track can fade (CC7 volume); one value every sixteenth note |
 | `instrument` | General MIDI program for the track (0 piano, 24 nylon guitar, …) |
 | `channel` | MIDI channel 1–16 (10 = drums) |
 | `loop` | `{"length_beats": 4, "times": 36}`: the notes are positions inside the pattern window and repeat back to back, so a drum or bass groove is written once. The notes must fit inside `length_beats`; up to 20 000 notes after tiling |
@@ -201,6 +204,31 @@ with `patterns` is three short strings:
    {"pitch": 42, "steps": "x-x-x-x-|x-x-x-x-", "velocity": 70}
  ]}
 ```
+
+## create_empty_file
+
+Creates a **blank MIDI file** (a conductor track only) to build a song on from scratch — for
+songs that should not start from a chord progression. With `sections`, the tempo/meter map is
+written immediately, so [add_track](#add_track) can use `section` + `bar` + `beat` positions.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Name for the new file, e.g. `"abyss"` (`.mid` is added) |
+| `sections` | Optional section map, like [set_song_sections](#set_song_sections) |
+| `output_filename`, `overwrite` | As above |
+
+## remove_track
+
+Writes a **copy** of a file without one track (the original is kept). The track is found by name
+(names must be unique; rename first if not). The per-track instrument sidecar belongs to the
+original, so the copy starts without specs.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing file in the output folder |
+| `track_name` (required) | Track to leave out, e.g. `"Chords"` |
+| `output_filename` | Default: `<name>_no_<track_name>` |
+| `overwrite` | Replace an existing copy |
 
 ## set_song_sections
 
@@ -398,9 +426,10 @@ Each spec has:
 | `preset` | Path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
-| `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet |
+| `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet. A section `gain_db` replaces the track's gain for that section: it is applied **exactly** to the rendered stem (and baked as CC11, which cannot boost above 0 dB) |
 | `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
+| `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
 

@@ -26,12 +26,57 @@ class NumeralEvent(BaseModel):
     beats: float = Field(gt=0, le=64, description="Length of this chord in beats (quarter notes).")
 
 
+class Tuplet(BaseModel):
+    """An exact tuplet position for one note: it lands on ``slot`` of ``count`` even divisions of
+    ``in_beats`` beats, counted from ``start_beat`` (the group's start).
+
+    Positions are computed in MIDI ticks, so they are exact — e.g. a 3:2 triplet is
+    {"count": 3, "in_beats": 2, "start_beat": 138, "slot": 0..2}, and 2 against 3 works the same
+    way with count 2 and in_beats 3.
+    """
+
+    count: int = Field(ge=2, le=16, description="How many slots the group divides into.")
+    in_beats: float = Field(gt=0, le=64, description="The span the group fits into, in beats.")
+    start_beat: float = Field(ge=0, le=100000, description="Where the group starts, in beats.")
+    slot: int = Field(ge=0, le=15, description="Which slot this note takes (0-based).")
+
+    @model_validator(mode="after")
+    def _slot_within_count(self) -> Tuplet:
+        if self.slot >= self.count:
+            raise ValueError(f"slot {self.slot} is outside a {self.count}-slot tuplet")
+        return self
+
+
+class Automation(BaseModel):
+    """A linear controller ramp for add_track, e.g. {"cc": 11, "from_value": 40, "to_value":
+    110, "start_beat": 0, "end_beat": 12}.
+
+    One value is written every sixteenth note (plus the exact end), so a held note can swell
+    (CC11 expression) or a track can fade (CC7 channel volume).
+    """
+
+    cc: int = Field(
+        ge=0, le=127, description="Controller number: 11 = expression (swell), 7 = channel volume."
+    )
+    from_value: int = Field(ge=0, le=127, description="Controller value at start_beat.")
+    to_value: int = Field(ge=0, le=127, description="Controller value at end_beat.")
+    start_beat: float = Field(ge=0, le=100000, description="Ramp start in beats.")
+    end_beat: float = Field(gt=0, le=100000, description="Ramp end in beats (after the start).")
+
+    @model_validator(mode="after")
+    def _end_after_start(self) -> Automation:
+        if self.end_beat <= self.start_beat:
+            raise ValueError("end_beat must be after start_beat")
+        return self
+
+
 class NoteInput(BaseModel):
     """One note for add_track, e.g. {"pitch": "E6", "start_beat": 0, "beats": 0.5}.
 
-    Position it either with ``start_beat`` (absolute beats from the start of the song) or with
+    Position it one of three ways: ``start_beat`` (absolute beats from the start of the song),
     ``section`` + ``bar`` + ``beat`` (relative to a section of the song's section map — see
-    set_song_sections). A note may run past its section's end; it is still placed normally.
+    set_song_sections), or ``tuplet`` (an exact slot in a tuplet group). A note may run past its
+    section's end; it is still placed normally.
     """
 
     pitch: str | int = Field(description="Note name with octave ('E6', 'Bb3', 'C#-1') or MIDI number 0-127.")
@@ -39,7 +84,7 @@ class NoteInput(BaseModel):
         None,
         ge=0,
         le=100000,
-        description="Absolute start in beats from the start; give this, or section+bar+beat.",
+        description="Absolute start in beats from the start; give this, section+bar+beat, or a tuplet.",
     )
     beats: float = Field(gt=0, le=100000, description="Length of the note in beats (quarter notes).")
     velocity: int = Field(90, ge=1, le=127, description="Loudness, 1-127.")
@@ -50,19 +95,20 @@ class NoteInput(BaseModel):
     beat: float | None = Field(
         None, ge=1, le=100000, description="1-based beat inside the bar (floats fine: 2.5 = the 'and' of 2)."
     )
+    tuplet: Tuplet | None = Field(
+        None, description="Exact tuplet slot, e.g. {'count': 3, 'in_beats': 2, 'start_beat': 0, 'slot': 1}."
+    )
 
     @model_validator(mode="after")
     def _exactly_one_position(self) -> NoteInput:
-        if self.section is None:
-            if self.start_beat is None:
-                raise ValueError("give start_beat, or section with bar/beat")
-            if self.bar is not None or self.beat is not None:
-                raise ValueError("bar/beat need a section")
-        else:
-            if self.start_beat is not None:
-                raise ValueError("give either start_beat or section+bar+beat, not both")
+        modes = [self.start_beat is not None, self.section is not None, self.tuplet is not None]
+        if sum(modes) != 1:
+            raise ValueError("give exactly one position: start_beat, section+bar+beat, or a tuplet")
+        if self.section is not None:
             if self.bar is None:
                 raise ValueError("section-relative notes need a bar")
+        elif self.bar is not None or self.beat is not None:
+            raise ValueError("bar/beat need a section")
         return self
 
 

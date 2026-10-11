@@ -23,9 +23,10 @@ pytestmark = pytest.mark.anyio
 DESCRIPTION_BUDGET_BYTES = 17 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
 # effects, import, sections), 108 KB (v0.16.0: background render jobs), 116 KB (v0.17.0: wet
-# mix + effect sends) and 128 KB (v0.18.0: job listings, get_file, import_audio, multi-vocal
-# mixes). The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 128 * 1024
+# mix + effect sends), 128 KB (v0.18.0: job listings, get_file, import_audio) and 136 KB
+# (v0.19.0: create_empty_file, remove_track, automation, tuplets). The surface grows with
+# capabilities; keep new schemas lean.
+PAYLOAD_CEILING_BYTES = 136 * 1024
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 29
+    assert len(tools) == 31
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

@@ -230,6 +230,17 @@ def section_duration_seconds(sections: list[ResolvedSection]) -> float:
     return total
 
 
+def timeline_seconds(sections: list[ResolvedSection]) -> list[tuple[str, float, float]]:
+    """``(name, start_seconds, end_seconds)`` per section, integrating every tempo change."""
+    timeline: list[tuple[str, float, float]] = []
+    start = 0.0
+    for section in sections:
+        end = start + section.total_beats * 60.0 / section.bpm
+        timeline.append((section.name, start, end))
+        start = end
+    return timeline
+
+
 def register(mcp: FastMCP, store_provider) -> None:
     """Register the section tools on the ChordSmith server."""
 

@@ -12,6 +12,38 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.19.0] - 2026-10-10
+
+Composition additions (patch brief milestone 3: the abyssal editing issues).
+
+### Added
+
+- **CC automation on `add_track`**: `automation` writes linear controller ramps — e.g.
+  `{"cc": 11, "from_value": 40, "to_value": 110, "start_beat": 0, "end_beat": 12}` for a held
+  note that swells (CC11 expression) or a track that fades (CC7 volume) — one value every
+  sixteenth note, so crescendos stop needing re-struck notes.
+- **Tuplets**: a note can take an exact `tuplet` slot, e.g. `{"count": 3, "in_beats": 2,
+  "start_beat": 138, "slot": 0}` for 3:2 or `{"count": 2, "in_beats": 3, ...}` for 2:3.
+  Positions are computed in MIDI ticks, so they are exact — no more hand-rounded beats.
+- **`create_empty_file`** (a blank conductor-only song, optionally with a section map) and
+  **`remove_track`** (a copy without one named track) — songs no longer have to start from a
+  chord progression, and guide tracks can be removed.
+- **Per-track `mute`** in instrument specs: muted tracks are left out of stem renders and
+  vocal mixes, and `bake_instruments` writes CC7=0 so external players hear them silent too.
+- **Per-section `gain_db`** in section overrides: a track can be pulled back for the quiet
+  sections and pushed in the climax. Applied **exactly** to each rendered stem with an ffmpeg
+  volume envelope (stems and mixes carry it), and baked as CC11 expression at the section
+  starts (attenuation-focused: CC11 cannot boost above 0 dB).
+- **Lyric freedom**: `map_vocal_lyrics` takes a custom `words` map (word → voicebank phonemes,
+  e.g. `{"lah": "l aa", "vey": "v ey"}`) checked before the dictionaries, and a
+  `language="phonemes"` mode where each token is one note's raw voicebank phonemes
+  (`l-aa v-ey n-ah`). Made-up languages no longer need English stand-ins, and unknown phonemes
+  are listed in one error with the voicebank's own set.
+
+### Changed
+
+- The tools/list payload ceiling was raised from 128 KB to 136 KB (two new tools).
+
 ## [0.18.0] - 2026-10-10
 
 The abyssal-piece fixes: long vocal renders, restart recovery and the file/listing tools.

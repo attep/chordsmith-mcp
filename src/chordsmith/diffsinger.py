@@ -336,9 +336,14 @@ def _split_word_into_syllables(
     return [(phones[first:last], stress[first:last]) for first, last in ranges]
 
 
-def _word_phones(bank: _Voicebank, word: str) -> tuple[list[str], list[float | None]] | None:
-    """Whole-word lookup: voicebank dictionary first, then CMUdict (stress digits kept)."""
+def _word_phones(
+    bank: _Voicebank, word: str, overrides: dict[str, list[str]] | None = None
+) -> tuple[list[str], list[float | None]] | None:
+    """Whole-word lookup: custom words first, then the voicebank dictionary, then CMUdict."""
     key = word.lower()
+    if overrides and key in overrides:
+        phones = overrides[key]
+        return list(phones), [None] * len(phones)
     if key in bank.en_dict:
         return list(bank.en_dict[key]), [None] * len(bank.en_dict[key])
     if key in bank.cmu:
@@ -357,7 +362,7 @@ def _syllable_stress(phones: list[str], stress: list[float | None], bank: _Voice
 
 
 def phonemize_groups(
-    bank: _Voicebank, groups: list[list[str]]
+    bank: _Voicebank, groups: list[list[str]], overrides: dict[str, list[str]] | None = None
 ) -> tuple[list[list[str]], list[str], list[float | None]]:
     """Phones per flat token, warnings, and the stress level of each token's vowel.
 
@@ -365,7 +370,8 @@ def phonemize_groups(
     word's notes (one vowel per syllable); when that is impossible, the pieces are looked up
     individually and a warning names the word. A '+' carries the previous vowel onto the next
     note and moves the closing consonants to the last note of the slur ("still +" sings
-    s-t-ih then ih-l, not s-t-ih-l then ih).
+    s-t-ih then ih-l, not s-t-ih-l then ih). ``overrides`` maps custom words to voicebank
+    phonemes and is checked before the dictionaries.
     """
     flat_tokens = [token for group in groups for token in group]
     phones_per_token: list[list[str] | None] = [None] * len(flat_tokens)
@@ -380,7 +386,7 @@ def phonemize_groups(
             index += 1
             continue
         word = "".join(group)
-        whole = _word_phones(bank, word)
+        whole = _word_phones(bank, word, overrides)
         pieces: list[list[str]] = []
         stresses: list[float | None] = []
         if whole is not None:
@@ -395,7 +401,7 @@ def phonemize_groups(
                 )
         if not pieces:
             for token in group:
-                single = _word_phones(bank, token)
+                single = _word_phones(bank, token, overrides)
                 if single is None:
                     unknown.append(token)
                     continue
