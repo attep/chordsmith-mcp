@@ -119,12 +119,22 @@ class FileStore:
     def list_files(self) -> list[dict]:
         root = self.ensure_root()
         files = []
-        for path in sorted(root.glob("*.mid"), key=lambda p: p.stat().st_mtime, reverse=True):
+        patterns = (("*.mid", "midi"), ("*.midi", "midi"), ("*.wav", "wav"), ("*.mp3", "mp3"))
+        seen: set[str] = set()
+        paths = []
+        for pattern, _kind in patterns:
+            for path in root.glob(pattern):
+                if path.name not in seen:
+                    seen.add(path.name)
+                    paths.append(path)
+        for path in sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True):
+            kind = {".wav": "wav", ".mp3": "mp3"}.get(path.suffix.lower(), "midi")
             stat = path.stat()
             files.append(
                 {
                     "filename": path.name,
-                    "uri": f"midi://{path.name}",
+                    "uri": f"{'audio' if kind != 'midi' else 'midi'}://{path.name}",
+                    "kind": kind,
                     "size_bytes": stat.st_size,
                     "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(
                         timespec="seconds"

@@ -210,12 +210,16 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 | `format` | `"wav"` (default) or `"mp3"` (mp3 needs ffmpeg) |
 | `return_as` | Like [get_midi_file](#get_midi_file): `"base64"` or `"url"` |
 | `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
-| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. Several renders run at once, but it is still slower than one pass; the result then also lists every stem (name, track, gain, sha256). Stem entries use signed URLs whenever a public URL is configured (they are megabytes each), otherwise they follow `return_as`; the mix always follows `return_as` |
+| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. Several renders run at once, but it is still slower than one pass; the result then also lists every stem (name, track, gain, sha256, peak). Stem entries use signed URLs whenever a public URL is configured (they are megabytes each), otherwise they follow `return_as`; the mix always follows `return_as` |
+| `normalize_peak_db` | Gain the rendered mix so its peak hits this level in dBFS (set `-1.0` for a listening-ready file). Default `null` keeps FluidSynth's raw level; **stems stay raw either way**, so their balance sums back to the unnormalized mix |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
-The result includes `mime_type`, `size_bytes`, `sha256`, and for wav the rendered
-`duration_seconds`.
+The result includes `mime_type`, `size_bytes`, `sha256`, for wav the rendered `duration_seconds`
+and `peak_db`, the `gain_correction_db` that normalization applied, and a `clipping` flag; every
+stem entry carries its own `peak_db`. Raw renders intentionally keep headroom (a busy arrangement
+can peak around −10 dBFS) — pass `normalize_peak_db: -1.0` when the file is for listening rather
+than for balancing.
 
 Renders use a General MIDI soundfont: no samples, sub/reese bass design, filter sweeps or
 production FX. Treat them as an audition of the notes, not a finished master — open the `.mid` in
@@ -240,8 +244,8 @@ Each spec has:
 |---|---|
 | `engine` | Which renderer to use; only `"fluidsynth"` today |
 | `preset` | Path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
-| `bank` | CC0 bank select, 0–127 (`0` is the GM melodic bank); omit to keep the file's bank |
-| `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the full catalog |
+| `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
+| `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
@@ -258,7 +262,10 @@ Then `render_audio` with `stems: true` renders each track through its spec and s
 (each with its `gain_db`) into the mix; the result lists every stem so you can listen one by one.
 [`mix_song_with_vocals`](singing.md#mixing-and-export) honors the same specs for the backing
 (with `backing_levels` overriding a spec's gain). Unknown track names, missing soundfonts and
-unknown engines are rejected with a message that lists what is available. The specs follow the
+unknown engines are rejected with a message that lists what is available, and a requested
+bank/program is checked against the soundfont it will play from — a miss is an error that lists
+what that bank actually has, so nothing falls back silently. The result echoes the **resolved
+preset** per track (e.g. `"128-016 Power"`; bank and program are 0-based). The specs follow the
 file through rename and delete.
 
 To use your own `.sf2` files, put them where the server can read them and pass that path as
@@ -267,12 +274,15 @@ image) or mount a folder into the container and use its container path, e.g. `/s
 
 ## list_instruments
 
-No options (or a `filename`). Read-only. Returns the rendering engines this server can run —
-their availability, the default soundfont and notes — plus the instrument catalog: the 128 GM
-melodic program names (index = `program` number) and the standard drum kits (name → kit number
-for a drum track). With a filename, also returns that file's note tracks and stored specs.
-Engines run as **separate processes**, so a crashing or differently licensed engine can never
-take the server down.
+No options, or a `filename` and/or a `soundfont` path. Read-only. Returns the rendering engines
+this server can run — their availability, the default soundfont and notes — and the **actual
+preset table** of the loaded (or given) `.sf2`: every preset's name, bank and program, both
+0-based, so the numbers `set_track_instrument` takes are verifiable, not assumed (FluidR3 reports
+189 presets, its drum kits in bank 128 — e.g. `128-016 Power`). When no soundfont file is
+readable, a static GM reference list is returned instead. With a filename, also returns that
+file's note tracks, stored specs, and the preset label each spec resolves to. Engines run as
+**separate processes**, so a crashing or differently licensed engine can never take the server
+down.
 
 ## list_chord_types
 
@@ -318,8 +328,9 @@ make it return `?` (unknown) or wrong chords. `N.C.` means no notes are sounding
 
 ## list_generated_files
 
-No options. Returns the output folder path and its `.mid` files (newest first), with size, date
-and `midi://` link.
+No options. Returns the output folder path and its files (newest first), with size, date, a
+`kind` (`midi`/`wav`/`mp3`) and a link scheme (`midi://` or `audio://`). Rendered audio is
+listed too, so you can confirm a render, stem or mix actually landed on disk.
 
 ## delete_midi_file and rename_midi_file
 

@@ -80,6 +80,7 @@ class AnalyzeResult(TypedDict):
 class FileEntry(TypedDict):
     filename: str
     uri: str
+    kind: str
     size_bytes: int
     modified: str
 
@@ -133,11 +134,15 @@ class GetMidiFileResult(_FileIdentity, DeliveryFields):
 class StemEntry(_FileIdentity, DeliveryFields):
     track: str
     gain_db: float
+    peak_db: float
 
 
 class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     source: str | None
     duration_seconds: float | None
+    peak_db: float | None
+    gain_correction_db: float
+    clipping: bool
     stems: list[StemEntry] | None
 
 
@@ -161,15 +166,28 @@ class ProgramCatalog(TypedDict):
     drums: dict[str, int]
 
 
+class PresetEntry(TypedDict):
+    name: str
+    bank: int
+    program: int
+
+
+class SoundfontInventory(TypedDict):
+    path: str
+    presets: list[PresetEntry]
+
+
 class InstrumentsFile(TypedDict):
     filename: str
     tracks: list[str]
     specs: dict[str, InstrumentTrack]
+    resolved: dict[str, str | None]
 
 
 class InstrumentsResult(TypedDict):
     engines: list[EngineEntry]
-    programs: ProgramCatalog
+    soundfont: SoundfontInventory | None
+    programs: ProgramCatalog | None
     file: InstrumentsFile | None
 
 
@@ -177,6 +195,7 @@ class InstrumentMapResult(TypedDict):
     filename: str
     path: str
     tracks: dict[str, InstrumentTrack]
+    resolved: dict[str, str | None]
 
 
 class ExportEntry(_FileIdentity, DeliveryFields):

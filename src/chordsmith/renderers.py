@@ -22,6 +22,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from chordsmith import audio, results
+from chordsmith.soundfont import SoundFontError, available_labels, find_preset, read_presets
 from chordsmith.storage import FileStore
 
 SPECS_SUFFIX = ".instruments.json"
@@ -374,6 +375,57 @@ def track_names(midi: mido.MidiFile) -> list[str]:
     return names
 
 
+def track_channels(midi: mido.MidiFile) -> dict[str, int]:
+    """Track name -> the MIDI channel its notes play on (channel 9 is percussion)."""
+    channels: dict[str, int] = {}
+    for track in midi.tracks:
+        name = next((message.name for message in track if message.type == "track_name"), "")
+        if not name:
+            continue
+        channel = next((message.channel for message in track if message.type == "note_on"), None)
+        if channel is not None:
+            channels[name] = channel
+    return channels
+
+
+def preset_label(spec: InstrumentSpec, channel: int) -> str | None:
+    """The preset a spec will actually play, checked against the SoundFont it targets.
+
+    Returns the preset's ``bank-program name`` label, or None when there is nothing to resolve
+    (no program/bank, or no SoundFont file on this server). Raises :class:`RenderError` when the
+    requested bank/program is missing from the SoundFont, so a silent fallback is impossible.
+    """
+    if spec.bank is None and spec.program is None and spec.preset is None:
+        return None
+    path = spec.preset or audio.find_soundfont()
+    if path is None:
+        return None  # engine availability already gates rendering; nothing to verify against
+    if spec.preset is not None and not Path(path).is_file():
+        raise RenderError(f"Soundfont '{path}' does not exist.")
+    try:
+        presets = read_presets(path)
+    except SoundFontError as exc:
+        if spec.preset is not None:
+            raise RenderError(str(exc)) from None
+        return None
+    if spec.bank is None and spec.program is None:
+        return None
+    bank = spec.bank if spec.bank is not None else (128 if channel == 9 else 0)
+    if spec.program is None:
+        if not any(preset.bank == bank for preset in presets):
+            banks = ", ".join(str(value) for value in sorted({preset.bank for preset in presets}))
+            raise RenderError(f"Bank {bank} is not in '{Path(path).name}'. Banks: {banks}.")
+        return None
+    preset = find_preset(presets, bank, spec.program)
+    if preset is None:
+        in_bank = [entry for entry in presets if entry.bank == bank]
+        raise RenderError(
+            f"Preset {bank:03d}-{spec.program:03d} is not in '{Path(path).name}'. "
+            f"Bank {bank}: {available_labels(in_bank) or '(none)'}"
+        )
+    return preset.label()
+
+
 # ------------------------------------------------------------------ stem combination
 
 
@@ -429,14 +481,17 @@ def register(mcp: FastMCP, store_provider) -> None:
         Writes a small JSON sidecar next to the file; the MIDI itself is never modified. Each
         track can get its own soundfont (``preset``), a different GM instrument (``program``
         0-127, or a drum kit on a drum track; ``bank`` selects the bank), and a ``gain_db`` trim
-        for the combined mix. Track names must exist in the file and a soundfont preset must
-        exist on this server. Returns the full spec map after the update.
+        for the combined mix. Track names must exist in the file, a preset file must be readable,
+        and a requested bank/program must exist in the SoundFont it targets — a miss is an error
+        that lists what the bank has, so nothing falls back silently. Returns the full spec map
+        and the resolved preset label per track.
         """
         store: FileStore = store_provider()
         source = store.existing_path(filename)
         midi = mido.MidiFile(source)
         names = track_names(midi)
         known = {names[index] for index in note_tracks(midi)}
+        channels = track_channels(midi)
         specs = load_specs(source)
         for name, spec in tracks.items():
             if name not in known:
@@ -448,15 +503,23 @@ def register(mcp: FastMCP, store_provider) -> None:
             get_renderer(spec.engine)  # validate engine availability now, not at render time
             if spec.preset is not None and not Path(spec.preset).is_file():
                 raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
+            preset_label(spec, channels.get(name, 0))  # validate bank/program against the sf2
             specs[name] = spec
         if specs:
             save_specs(source, specs)
         else:
             specs_path(source).unlink(missing_ok=True)
+        resolved = {}
+        for name, spec in specs.items():
+            try:
+                resolved[name] = preset_label(spec, channels.get(name, 0))
+            except RenderError:
+                resolved[name] = None
         return {
             "filename": source.name,
             "path": str(source),
             "tracks": {name: spec.model_dump() for name, spec in specs.items()},
+            "resolved": resolved,
         }
 
     @mcp.tool(title="List instruments", annotations=_READ_ONLY)
@@ -464,14 +527,20 @@ def register(mcp: FastMCP, store_provider) -> None:
         filename: Annotated[
             str | None, Field(description="Optional MIDI file whose per-track specs to report.")
         ] = None,
+        soundfont: Annotated[
+            str | None,
+            Field(description="Optional .sf2 path to inspect; default: the server's soundfont."),
+        ] = None,
     ) -> results.InstrumentsResult:
-        """List the rendering engines available on this server and a file's per-track specs.
+        """List the rendering engines, the SoundFont's real preset inventory, and a file's specs.
 
         Read-only. Engines are invoked as separate processes (so a crashing or GPL-licensed
-        host can never take the server down); today only FluidSynth is built in. Also returns the
-        instrument catalog: the 128 GM melodic program names and the standard drum kits (the
-        numbers set_track_instrument takes). With a filename, also returns each track's stored
-        instrument spec and the tracks that can carry one.
+        host can never take the server down); today only FluidSynth is built in. The ``soundfont``
+        block is the actual preset table of the loaded (or given) .sf2 — name, bank and program,
+        both 0-based — which is what set_track_instrument validates against; when no soundfont
+        file is readable, a static GM reference list is returned instead. With a filename, also
+        returns each track's stored spec, the tracks that can carry one, and the preset label
+        each spec resolves to.
         """
         store: FileStore = store_provider()
         engines = [
@@ -483,19 +552,45 @@ def register(mcp: FastMCP, store_provider) -> None:
             }
             for renderer in sorted(RENDERERS.values(), key=lambda item: item.name)
         ]
+        inventory_path = soundfont or audio.find_soundfont()
+        inventory = None
+        if inventory_path is not None:
+            try:
+                presets = read_presets(inventory_path)
+            except SoundFontError as exc:
+                if soundfont is not None:
+                    raise RenderError(str(exc)) from None
+                presets = []
+            if presets:
+                inventory = {
+                    "path": str(inventory_path),
+                    "presets": [
+                        {"name": preset.name, "bank": preset.bank, "program": preset.program}
+                        for preset in presets
+                    ],
+                }
         result: dict = {
             "engines": engines,
-            "programs": {"melodic": list(GM_PROGRAMS), "drums": dict(GM_DRUM_KITS)},
+            "soundfont": inventory,
+            "programs": None if inventory else {"melodic": list(GM_PROGRAMS), "drums": dict(GM_DRUM_KITS)},
             "file": None,
         }
         if filename is not None:
             source = store.existing_path(filename)
             midi = mido.MidiFile(source)
             names = track_names(midi)
+            channels = track_channels(midi)
             specs = load_specs(source)
+            resolved: dict[str, str | None] = {}
+            for name, spec in specs.items():
+                try:
+                    resolved[name] = preset_label(spec, channels.get(name, 0))
+                except RenderError:
+                    resolved[name] = None
             result["file"] = {
                 "filename": source.name,
                 "tracks": [names[index] for index in note_tracks(midi)],
                 "specs": {name: spec.model_dump() for name, spec in specs.items()},
+                "resolved": resolved,
             }
         return result

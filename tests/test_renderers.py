@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import struct
 import wave
 from pathlib import Path
 
@@ -18,6 +19,18 @@ pytestmark = pytest.mark.anyio
 
 REPO = Path(__file__).resolve().parent.parent
 STAGE0_MANIFEST = REPO / "data" / "stage0" / "manifest.json"
+
+
+def _make_sf2(presets: list[tuple[str, int, int]]) -> bytes:
+    """A minimal valid .sf2 holding just a phdr table (name, bank, program)."""
+    phdr = b"".join(
+        name.encode("latin-1").ljust(20, b"\x00") + struct.pack("<HHHIII", program, bank, 0, 0, 0, 0)
+        for name, bank, program in presets
+    )
+    phdr += b"EOP".ljust(20, b"\x00") + struct.pack("<HHHIII", 0, 0, 0, 0, 0, 0)
+    pdta = b"pdta" + b"phdr" + struct.pack("<I", len(phdr)) + phdr
+    body = b"sfbk" + b"LIST" + struct.pack("<I", len(pdta)) + pdta
+    return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
 @pytest.fixture
@@ -158,13 +171,103 @@ async def test_list_instruments_reports_engines_and_specs(store, engine_availabl
     engines_only = (await _call("list_instruments", {})).structuredContent
     assert [engine["name"] for engine in engines_only["engines"]] == ["fluidsynth"]
     assert engines_only["file"] is None
-    assert len(engines_only["programs"]["melodic"]) == 128
-    assert engines_only["programs"]["melodic"][38] == "Synth Bass 1"
-    assert engines_only["programs"]["drums"]["Power"] == 16
+    if engines_only["soundfont"] is not None:
+        # the real preset table of the installed SoundFont (bank/program are 0-based)
+        presets = engines_only["soundfont"]["presets"]
+        assert len(presets) > 100
+        assert any(
+            entry["bank"] == 128 and entry["program"] == 16 and "Power" in entry["name"] for entry in presets
+        )
+    else:
+        assert len(engines_only["programs"]["melodic"]) == 128
+        assert engines_only["programs"]["melodic"][38] == "Synth Bass 1"
 
     with_file = (await _call("list_instruments", {"filename": song})).structuredContent
     assert set(with_file["file"]["tracks"]) == {"Chords", "Bass", "Melody"}
     assert with_file["file"]["specs"]["Bass"]["gain_db"] == -4.0
+    assert with_file["file"]["resolved"]["Bass"] is None  # nothing to resolve without a program
+
+
+async def test_set_track_instrument_validates_against_the_soundfont(store, engine_available, tmp_path):
+    song = await _make_band(store)
+    kit = tmp_path / "kit.sf2"
+    kit.write_bytes(_make_sf2([("Standard", 128, 0), ("Power", 128, 16), ("Synth Bass 1", 0, 38)]))
+
+    ok = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Bass": {"engine": "fluidsynth", "preset": str(kit), "program": 38}},
+        },
+    )
+    assert not ok.isError, ok.content[0].text
+    assert ok.structuredContent["resolved"]["Bass"] == "000-038 Synth Bass 1"
+
+    missing = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Bass": {"engine": "fluidsynth", "preset": str(kit), "program": 99}},
+        },
+    )
+    assert missing.isError and "000-099" in missing.content[0].text
+    assert "Synth Bass 1" in missing.content[0].text  # the error lists what the bank has
+
+    bad_bank = await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "preset": str(kit), "bank": 5}}},
+    )
+    assert bad_bank.isError and "Bank 5" in bad_bank.content[0].text
+
+    not_sf2 = tmp_path / "not.sf2"
+    not_sf2.write_bytes(b"nope")
+    invalid = await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "preset": str(not_sf2)}}},
+    )
+    assert invalid.isError and "not a SoundFont" in invalid.content[0].text
+
+    # a track on MIDI channel 10 (0-based 9) resolves programs against the percussion bank
+    drums = [
+        {"pitch": "C2", "start_beat": 0, "beats": 0.5, "velocity": 100},
+        {"pitch": "D2", "start_beat": 1, "beats": 0.5, "velocity": 100},
+    ]
+    with_drums = (
+        await _call(
+            "add_track",
+            {"filename": song, "track_name": "Drums", "notes": drums, "channel": 10},
+        )
+    ).structuredContent["filename"]
+    drum_ok = await _call(
+        "set_track_instrument",
+        {
+            "filename": with_drums,
+            "tracks": {"Drums": {"engine": "fluidsynth", "preset": str(kit), "program": 16}},
+        },
+    )
+    assert not drum_ok.isError, drum_ok.content[0].text
+    assert drum_ok.structuredContent["resolved"]["Drums"] == "128-016 Power"
+    drum_miss = await _call(
+        "set_track_instrument",
+        {
+            "filename": with_drums,
+            "tracks": {"Drums": {"engine": "fluidsynth", "preset": str(kit), "program": 38}},
+        },
+    )
+    assert drum_miss.isError and "128-038" in drum_miss.content[0].text  # not a kit
+
+
+async def test_list_instruments_inspects_a_given_soundfont(store, engine_available, tmp_path):
+    kit = tmp_path / "kit.sf2"
+    kit.write_bytes(_make_sf2([("Power", 128, 16)]))
+    result = await _call("list_instruments", {"soundfont": str(kit)})
+    assert not result.isError, result.content[0].text
+    inventory = result.structuredContent["soundfont"]
+    assert inventory["presets"] == [{"name": "Power", "bank": 128, "program": 16}]
+    assert result.structuredContent["programs"] is None
+
+    broken = await _call("list_instruments", {"soundfont": str(tmp_path / "missing.sf2")})
+    assert broken.isError and "cannot be read" in broken.content[0].text
 
 
 async def test_override_program_rewrites_the_stem_midi(store, engine_available):
@@ -265,6 +368,49 @@ async def test_render_audio_stems_use_signed_urls_when_configured(store, monkeyp
     for stem in data["stems"]:
         assert "data_base64" not in stem  # stems are megabytes each; links keep them off the wire
         assert stem["download_url"].startswith("https://example.test/")
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+async def test_render_audio_normalizes_only_the_mix(store, monkeypatch):
+    song = await _make_band(store)
+    fake = _FakeRenderer()
+    monkeypatch.setitem(renderers.RENDERERS, "fluidsynth", fake)
+    monkeypatch.setattr(
+        renderers, "combine_stems", lambda stems, target: _write_tiny_wav(target, amplitude=800)
+    )
+
+    raw = (
+        await _call("render_audio", {"filename": song, "stems": True, "output_filename": "raw"})
+    ).structuredContent
+    assert raw["gain_correction_db"] == 0.0
+    assert raw["peak_db"] < -20  # the raw combined level is preserved
+    assert all(stem["peak_db"] < -20 for stem in raw["stems"])
+
+    loud = (
+        await _call(
+            "render_audio",
+            {
+                "filename": song,
+                "stems": True,
+                "output_filename": "loud",
+                "normalize_peak_db": -1.0,
+            },
+        )
+    ).structuredContent
+    assert loud["gain_correction_db"] > 20
+    assert abs(loud["peak_db"] - (-1.0)) < 0.2
+    assert loud["clipping"] is False
+    # stems stay raw: their balance must sum back to the unnormalized mix
+    assert all(stem["peak_db"] < -20 for stem in loud["stems"])
+
+
+async def test_list_generated_files_includes_audio(store, engine_available):
+    song = await _make_band(store)
+    _write_tiny_wav(store.root / "sketch.wav")
+    listing = (await _call("list_generated_files", {})).structuredContent
+    kinds = {entry["filename"]: entry["kind"] for entry in listing["files"]}
+    assert kinds[song] == "midi"
+    assert kinds["sketch.wav"] == "wav"
 
 
 @pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")

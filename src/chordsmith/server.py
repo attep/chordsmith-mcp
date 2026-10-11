@@ -476,10 +476,11 @@ def analyze_midi(
 
 @mcp.tool(title="List generated files", annotations=READ_ONLY)
 def list_generated_files() -> results.ListFilesResult:
-    """Return the MIDI files in the output folder (newest first) and the folder path.
+    """Return the files in the output folder (MIDI and rendered audio, newest first).
 
-    Read-only; use it to find file names for get_midi_file, analyze_midi, transpose_midi or the
-    singing tools.
+    Read-only; each entry has a kind (midi/wav/mp3), so you can confirm that a render, stem or
+    mix actually landed on disk. Use it to find file names for get_midi_file, analyze_midi,
+    transpose_midi or the singing tools.
     """
     root = store.ensure_root()
     return {"output_dir": str(root), "files": store.list_files()}
@@ -652,6 +653,16 @@ def render_audio(
             "URLs when a public URL is configured, else like return_as."
         ),
     ] = False,
+    normalize_peak_db: Annotated[
+        float | None,
+        Field(
+            ge=-6.0,
+            le=0.0,
+            description="Gain the rendered mix so its peak hits this level in dBFS (set -1.0 "
+            "for a listening-ready file). Default null keeps FluidSynth's raw level; stems stay "
+            "raw either way so their balance sums honestly.",
+        ),
+    ] = None,
     output_filename: FileName = None,
     expires_in: Annotated[
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
@@ -661,28 +672,40 @@ def render_audio(
     """Render a MIDI file to audio (wav or mp3) with FluidSynth so it can be heard without a music app.
 
     Creates an audio file next to the MIDI files and returns it like get_midi_file (base64 bytes
-    or a signed, expiring URL), plus the source name and, for wav, the duration in seconds. MP3
-    needs ffmpeg; FluidSynth and a soundfont are required (both are in the Docker image). With
-    ``stems``, each track is rendered on its own (per-track soundfont/gain from
-    set_track_instrument) and the stems are combined into the mix; the result then also lists
-    every stem. On failure a clear error explains what is missing and no file is left behind.
+    or a signed, expiring URL), plus the source name, the sample peak (wav), the gain applied by
+    normalize_peak_db and whether the export clips. MP3 needs ffmpeg; FluidSynth and a soundfont
+    are required (both are in the Docker image). With ``stems``, each track is rendered on its
+    own (per-track soundfont/program/gain from set_track_instrument) and the stems are combined
+    into the mix; the result then also lists every stem with its own peak. Stems are never
+    normalized (their balance must stay intact); only the combined mix follows
+    normalize_peak_db. On failure a clear error explains what is missing and no file is left
+    behind.
     """
     source = store.existing_path(filename)
     if stems:
-        return _render_stems(source, format, return_as, expires_in, output_filename, overwrite, soundfont)
+        return _render_stems(
+            source, format, return_as, expires_in, output_filename, overwrite, soundfont, normalize_peak_db
+        )
     with store.claimed_path(
         output_filename or source.stem, f"{source.stem}_{format}", overwrite, f".{format}"
     ) as target:
         try:
-            audio.render(source, target, format, soundfont)
+            correction = audio.render(source, target, format, soundfont, normalize_peak_db)
         except audio.AudioError as exc:
             raise ValueError(str(exc)) from None
     data = target.read_bytes()
     result = delivery.deliver_file(target.name, data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if format == "wav" else "audio/mpeg"
     result["source"] = source.name
+    result["gain_correction_db"] = correction
     if format == "wav":
+        peak = audio.wav_peak_db(target)
+        result["peak_db"] = round(peak, 2)
+        result["clipping"] = peak > -0.05
         result["duration_seconds"] = round(audio.wav_duration(target), 2)
+    else:
+        result["peak_db"] = None
+        result["clipping"] = False
     return result
 
 
@@ -694,6 +717,7 @@ def _render_stems(
     output_filename: str | None,
     overwrite: bool,
     soundfont: str | None,
+    normalize_peak_db: float | None = None,
 ) -> dict[str, Any]:
     """Render every note track on its own and combine the stems into the mix."""
     midi = mido.MidiFile(source)
@@ -718,22 +742,34 @@ def _render_stems(
                 return renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db)
 
         stems = renderers.parallel_map(render_track, tracks)
+        correction = 0.0
         with store.claimed_path(
             output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
         ) as target:
             combined = target if audio_format == "wav" else Path(scratch) / "mix.wav"
             try:
                 renderers.combine_stems(stems, combined)
+                if normalize_peak_db is not None:
+                    correction = audio.normalize_wav(combined, normalize_peak_db)
                 if audio_format == "mp3":
                     singing.to_mp3(combined, target)
             except renderers.RenderError as exc:
+                raise ValueError(str(exc)) from None
+            except audio.AudioError as exc:
                 raise ValueError(str(exc)) from None
     data = target.read_bytes()
     result = delivery.deliver_file(target.name, data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
     result["source"] = source.name
+    result["gain_correction_db"] = correction
     if audio_format == "wav":
+        peak = audio.wav_peak_db(target)
+        result["peak_db"] = round(peak, 2)
+        result["clipping"] = peak > -0.05
         result["duration_seconds"] = round(audio.wav_duration(target), 2)
+    else:
+        result["peak_db"] = None
+        result["clipping"] = False
     # Stems are big (a minute of stereo wav is ~10 MB each), so with a public URL configured
     # they are always delivered as signed links: inlining ten of them can outsize any client's
     # tool timeout. The mix above still follows return_as.
@@ -744,6 +780,7 @@ def _render_stems(
             "mime_type": "audio/wav",
             "track": stem.track,
             "gain_db": stem.gain_db,
+            "peak_db": round(audio.wav_peak_db(stem.path), 2),
         }
         for stem in stems
     ]

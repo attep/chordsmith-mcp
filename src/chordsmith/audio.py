@@ -68,8 +68,64 @@ def trim_wav(path: Path, seconds: float) -> None:
         target.writeframes(data)
 
 
-def render(midi_path: Path, target: Path, audio_format: str, soundfont: str | None = None) -> None:
-    """Render ``midi_path`` to ``target`` (a .wav or .mp3 path)."""
+def wav_peak_db(path: Path) -> float:
+    """Peak level (dBFS) of a 16-bit wav file."""
+    import array
+    import math
+
+    with wave.open(str(path), "rb") as handle:
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    peak = max((abs(value) for value in samples), default=0)
+    return 20.0 * math.log10(max(peak / 32768.0, 1e-9))
+
+
+def normalize_wav(path: Path, target_peak_db: float) -> float:
+    """Gain ``path`` in place so its sample peak hits ``target_peak_db``.
+
+    Returns the correction applied in dB (0.0 when it already sits at the target). ffmpeg does
+    the gain pass, so 16-bit quantization noise is not compounded by a Python loop.
+    """
+    peak = wav_peak_db(path)
+    correction = round(target_peak_db - peak, 2)
+    if correction == 0.0:
+        return 0.0
+    ffmpeg = find_ffmpeg()
+    if ffmpeg is None:
+        raise AudioError("Normalization needs ffmpeg; install it or skip normalize_peak_db.")
+    temp = path.with_name(path.stem + ".norm.wav")
+    try:
+        _run(
+            [
+                ffmpeg,
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-af",
+                f"volume={correction:.2f}dB",
+                str(temp),
+            ]
+        )
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return correction
+
+
+def render(
+    midi_path: Path,
+    target: Path,
+    audio_format: str,
+    soundfont: str | None = None,
+    normalize_peak_db: float | None = None,
+) -> float:
+    """Render ``midi_path`` to ``target`` (a .wav or .mp3 path).
+
+    With ``normalize_peak_db`` the render is gained to that peak before the mp3 encode (None
+    keeps FluidSynth's raw level). Returns the gain correction applied in dB.
+    """
     if audio_format not in ("wav", "mp3"):
         raise AudioError("format must be 'wav' or 'mp3'.")
     fluidsynth = find_fluidsynth()
@@ -103,6 +159,9 @@ def render(midi_path: Path, target: Path, audio_format: str, soundfont: str | No
     # FluidSynth keeps rendering release tails past the last note; cut back to the MIDI length
     # so the audio matches the file's reported duration.
     trim_wav(wav_path, midi_duration(midi_path))
+    correction = 0.0
+    if normalize_peak_db is not None:
+        correction = normalize_wav(wav_path, normalize_peak_db)
     if audio_format == "mp3":
         ffmpeg = find_ffmpeg()
         if ffmpeg is None:
@@ -114,6 +173,7 @@ def render(midi_path: Path, target: Path, audio_format: str, soundfont: str | No
             wav_path.unlink(missing_ok=True)
         if not target.is_file():
             raise AudioError("ffmpeg produced no audio.")
+    return correction
 
 
 def wav_duration(path: Path) -> float:

@@ -12,6 +12,33 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.11.0] - 2026-10-10
+
+Preset verification and level diagnostics (patch brief milestone 1).
+
+### Added
+
+- **Real SoundFont preset inventory.** A new `pdta`/`phdr` reader (`soundfont.py`) reports the
+  actual preset table of a `.sf2` — name, bank and program, both 0-based. `list_instruments`
+  returns the inventory of the loaded (or a given) soundfont instead of the static GM reference
+  (which is still the fallback when no soundfont file is readable); FluidR3 reports 189 presets
+  with its drum kits in bank 128.
+- **Requested presets are verified, never assumed.** `set_track_instrument` checks the requested
+  bank/program against the soundfont it will play from (percussion tracks resolve against bank
+  128) and rejects a miss with the list of what that bank actually has; the result echoes the
+  resolved preset label (e.g. `128-016 Power`).
+- **Level diagnostics and an explicit mix normalization.** `render_audio` gains
+  `normalize_peak_db` (default `null` = raw FluidSynth level, so nothing changes unless asked)
+  and reports `peak_db`, `gain_correction_db` and `clipping`; every stem entry carries its own
+  `peak_db`. Stems are never normalized — their balance must sum back to the unnormalized mix.
+- `list_generated_files` lists rendered audio (`kind`: midi/wav/mp3) so a stem or mix can be
+  confirmed on disk.
+
+### Changed
+
+- The tools/list payload ceiling was deliberately raised from 72 KB to 88 KB to make room for
+  the new params and result fields (and the upcoming section/import/render-job milestones).
+
 ## [0.10.1] - 2026-10-10
 
 ### Fixed
