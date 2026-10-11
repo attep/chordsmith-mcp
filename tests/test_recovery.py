@@ -56,9 +56,7 @@ async def _make_song(store, filename="song"):
 async def test_singing_records_survive_a_restart(store):
     song = await _make_song(store)
     score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
-    await _call(
-        "map_vocal_lyrics", {"score_id": score["score_id"], "lyrics": "la la la la", "language": "en"}
-    )
+    await _call("map_vocal_lyrics", {"score_id": score["score_id"]})  # wordless: no voicebank needed
     state = Path(os.environ["CHORDSMITH_STATE_DIR"]) / "singing"
     assert (state / "scores.json").is_file()
     assert (state / "mappings.json").is_file()
@@ -70,10 +68,7 @@ async def test_singing_records_survive_a_restart(store):
         singing._registry.jobs.clear()
     singing._load_singing()
 
-    again = await _call(
-        "map_vocal_lyrics",
-        {"score_id": score["score_id"], "lyrics": "la la la la", "language": "en"},
-    )
+    again = await _call("map_vocal_lyrics", {"score_id": score["score_id"]})
     assert not again.isError, again.content[0].text
     assert again.structuredContent["score_id"] == score["score_id"]
 
