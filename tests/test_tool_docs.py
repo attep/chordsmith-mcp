@@ -21,10 +21,10 @@ from chordsmith import server
 pytestmark = pytest.mark.anyio
 
 DESCRIPTION_BUDGET_BYTES = 15 * 1024
-# Deliberately raised from 72 KB in v0.11.0 (preset verification, level diagnostics) and to
-# 96 KB in v0.14.0 (reverb/chorus settings, import and section tools). The surface grows with
-# capabilities; keep new schemas lean and re-check before raising again.
-PAYLOAD_CEILING_BYTES = 96 * 1024
+# Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
+# effects, import, sections) and 108 KB (v0.16.0: background render jobs, whose tool mirrors
+# render_audio's params). The surface grows with capabilities; keep new schemas lean.
+PAYLOAD_CEILING_BYTES = 108 * 1024
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 23
+    assert len(tools) == 25
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

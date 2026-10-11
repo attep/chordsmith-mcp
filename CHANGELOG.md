@@ -12,6 +12,38 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.16.0] - 2026-10-10
+
+Long-render support (patch brief milestone 6, part 1).
+
+### Added
+
+- **Background render jobs**: `render_audio_job` starts any render (same options as
+  `render_audio`, plus `tracks`) on a worker thread and returns immediately;
+  `get_render_job(job_id)` polls it with **per-track progress** (`pending`/`running`/`done`/
+  `failed`, with the error message per failed track) and the full render result when done. This
+  removes the client-timeout ceiling that made three-minute stems renders impossible — the
+  work no longer depends on how long a client is willing to wait.
+- **Partial failures are usable and retryable**: in job mode a failed track no longer aborts
+  the render — the mix combines the successful stems, the result lists `failed` tracks, and
+  `render_audio_job(..., tracks: ["Drums"])` retries just those tracks (successful stems are
+  not re-rendered).
+
+### Changed
+
+- The tools/list payload ceiling was raised from 96 KB to 108 KB (the job tool mirrors
+  render_audio's options).
+
+### Verified
+
+- A ~3-minute anime-style song (176.15 s: six sections including a 7/8 bridge and
+  100→128→140→100 BPM changes, 992 section-relative drum hits plus bass and guide) ran the full
+  pipeline: the vocal's first climax note landed at 119.925 s — exactly the tempo map's
+  integrated time; the stems job finished in 58 s with per-track progress and a mix of 176.15 s
+  (the map's length, ending complete); mix and export followed (vocal 6 dB over the dipped band,
+  balance ok). No request timeouts — job mode removes the client-wait ceiling entirely
+  (FluidSynth itself has no duration limit).
+
 ## [0.15.0] - 2026-10-10
 
 Section-based instrument selection (patch brief milestone 5).

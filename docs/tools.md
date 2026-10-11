@@ -13,6 +13,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [get_midi_file](#get_midi_file)
 - [import_midi](#import_midi)
 - [render_audio](#render_audio)
+- [render_audio_job and get_render_job](#render_audio_job-and-get_render_job)
 - [list_chord_types](#list_chord_types)
 - [transpose_midi](#transpose_midi)
 - [analyze_midi](#analyze_midi)
@@ -319,6 +320,31 @@ until you opt in; with them on, the engine's natural tail past the last note is 
 `stems: true` every stem is rendered wet, so summing the wet stems is not identical to one wet
 pass (chorus/reverb do not add linearly across stems). For the voice, use the mix tool's own
 `reverb` switch — it is a separate vocal effect and is never applied to instruments.
+
+## render_audio_job and get_render_job
+
+For renders that may outrun a client's tool timeout — a three-minute, nine-track stems render
+writes hundreds of megabytes and can take minutes — start the work in the background and poll it.
+
+`render_audio_job` takes the same options as [render_audio](#render_audio) (`format`,
+`return_as`, `soundfont`, `stems`, `normalize_peak_db`, `reverb`, `chorus`, `output_filename`,
+`expires_in`, `overwrite`) plus:
+
+| Option | Description |
+|---|---|
+| `tracks` | Render **only these tracks** and combine them — the retry path after a partial failure, so successful stems are never redone |
+
+It returns immediately with `{job_id, status, tracks}`. `get_render_job(job_id)` (read-only)
+reports:
+
+- `status`: `queued`, `running`, `done` or `failed`;
+- `progress`: every track with its `state` (`pending`/`running`/`done`/`failed`) and, for failed
+  tracks, the error message;
+- `result`: the full [render_audio](#render_audio) result once done — including a `failed` list
+  when some tracks failed, while the mix still combines the successful stems.
+
+Jobs live 24 hours. A failed track can be retried with
+`render_audio_job(filename, tracks: ["Drums"])`.
 
 Renders use a General MIDI soundfont: no samples, sub/reese bass design, filter sweeps or
 production FX. Treat them as an audition of the notes, not a finished master — open the `.mid` in

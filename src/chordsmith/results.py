@@ -169,6 +169,11 @@ class EffectsEntry(TypedDict):
     chorus: ChorusEntry | None
 
 
+class FailedTrack(TypedDict):
+    track: str
+    error: str
+
+
 class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     source: str | None
     duration_seconds: float | None
@@ -176,7 +181,28 @@ class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     gain_correction_db: float
     clipping: bool
     effects: EffectsEntry | None
+    failed: list[FailedTrack] | None
     stems: list[StemEntry] | None
+
+
+class RenderJobTrack(TypedDict):
+    track: str
+    state: str
+    error: str | None
+
+
+class RenderJobHandle(TypedDict):
+    job_id: str
+    status: str
+    tracks: list[str] | None
+
+
+class RenderJobResult(TypedDict):
+    job_id: str
+    status: str
+    progress: list[RenderJobTrack] | None
+    result: RenderAudioResult | None
+    error: str | None
 
 
 class EngineEntry(TypedDict):

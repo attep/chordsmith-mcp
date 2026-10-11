@@ -23,7 +23,7 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__, audio, delivery, renderers, results, sections, singing
+from chordsmith import __version__, audio, delivery, renderers, renderjobs, results, sections, singing
 from chordsmith.analysis import analyze_file, describe_midi
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
@@ -842,20 +842,47 @@ def render_audio(
         )
         result["effects"] = effects_echo
         return result
+    return _render_single(
+        source,
+        format,
+        return_as,
+        expires_in,
+        output_filename,
+        overwrite,
+        soundfont,
+        normalize_peak_db,
+        effects,
+        effects_echo,
+    )
+
+
+def _render_single(
+    source: Path,
+    audio_format: str,
+    return_as: str,
+    expires_in: int,
+    output_filename: str | None,
+    overwrite: bool,
+    soundfont: str | None,
+    normalize_peak_db: float | None,
+    effects: dict[str, float | int] | None,
+    effects_echo: dict[str, Any],
+) -> dict[str, Any]:
+    """One FluidSynth pass over the whole file, delivered like get_midi_file."""
     with store.claimed_path(
-        output_filename or source.stem, f"{source.stem}_{format}", overwrite, f".{format}"
+        output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
     ) as target:
         try:
-            correction = audio.render(source, target, format, soundfont, normalize_peak_db, effects)
+            correction = audio.render(source, target, audio_format, soundfont, normalize_peak_db, effects)
         except audio.AudioError as exc:
             raise ValueError(str(exc)) from None
     data = target.read_bytes()
     result = delivery.deliver_file(target.name, data, return_as, expires_in)
-    result["mime_type"] = "audio/wav" if format == "wav" else "audio/mpeg"
+    result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
     result["source"] = source.name
     result["gain_correction_db"] = correction
     result["effects"] = effects_echo
-    if format == "wav":
+    if audio_format == "wav":
         peak = audio.wav_peak_db(target)
         result["peak_db"] = round(peak, 2)
         result["clipping"] = peak > -0.05
@@ -864,6 +891,46 @@ def render_audio(
         result["peak_db"] = None
         result["clipping"] = False
     return result
+
+
+def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
+    """The render pipeline for background jobs (renderjobs.py runs this on a worker thread)."""
+    source = store.existing_path(args["filename"])
+    effects = renderers.effect_options(args.get("reverb"), args.get("chorus"))
+    effects_echo = {
+        "reverb": args["reverb"].model_dump() if args.get("reverb") is not None else None,
+        "chorus": args["chorus"].model_dump() if args.get("chorus") is not None else None,
+    }
+    only_tracks = args.get("tracks")
+    if args.get("stems") or only_tracks:
+        result = _render_stems(
+            source,
+            args.get("format", "wav"),
+            args.get("return_as", "base64"),
+            args.get("expires_in", delivery.DEFAULT_TTL_SECONDS),
+            args.get("output_filename"),
+            bool(args.get("overwrite")),
+            args.get("soundfont"),
+            args.get("normalize_peak_db"),
+            effects,
+            only_tracks=only_tracks,
+            progress=set_state,
+            continue_on_error=True,
+        )
+        result["effects"] = effects_echo
+        return result
+    return _render_single(
+        source,
+        args.get("format", "wav"),
+        args.get("return_as", "base64"),
+        args.get("expires_in", delivery.DEFAULT_TTL_SECONDS),
+        args.get("output_filename"),
+        bool(args.get("overwrite")),
+        args.get("soundfont"),
+        args.get("normalize_peak_db"),
+        effects,
+        effects_echo,
+    )
 
 
 def _render_stems(
@@ -876,18 +943,36 @@ def _render_stems(
     soundfont: str | None,
     normalize_peak_db: float | None = None,
     effects: dict[str, float | int] | None = None,
+    only_tracks: list[str] | None = None,
+    progress=None,
+    continue_on_error: bool = False,
 ) -> dict[str, Any]:
-    """Render every note track on its own and combine the stems into the mix."""
+    """Render every note track on its own and combine the stems into the mix.
+
+    ``only_tracks`` renders (and combines) just those tracks — the retry path for background
+    jobs; ``progress`` is called as ``(track, state, error=None)`` per track; with
+    ``continue_on_error`` a failed track is reported instead of aborting the whole render, and
+    the mix is combined from the successful stems.
+    """
     midi = mido.MidiFile(source)
     specs = renderers.load_specs(source)
     names = renderers.track_names(midi)
     tracks = renderers.note_tracks(midi)
+    if only_tracks is not None:
+        available = [names[index] for index in tracks]
+        unknown = sorted(set(only_tracks) - set(available))
+        if unknown:
+            raise ValueError(f"Unknown track(s) {', '.join(unknown)}. Tracks: {', '.join(available)}.")
+        wanted = set(only_tracks)
+        tracks = [index for index in tracks if names[index] in wanted]
     if not tracks:
         raise ValueError("This file has no note tracks to render.")
     with tempfile.TemporaryDirectory() as scratch:
 
-        def render_track(index: int) -> renderers.Stem:
+        def render_track(index: int):
             name = names[index]
+            if progress is not None:
+                progress(name, "running")
             stem_midi = Path(scratch) / f"stem_{index}.mid"
             singing.extract_track(source, stem_midi, index)
             spec = specs.get(name) or renderers.InstrumentSpec(preset=soundfont)
@@ -896,10 +981,24 @@ def _render_stems(
                 try:
                     renderer.render(stem_midi, spec, stem_wav, effects)
                 except renderers.RenderError as exc:
-                    raise ValueError(f"Track '{name}': {exc}") from None
-                return renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db)
+                    message = f"Track '{name}': {exc}"
+                    if not continue_on_error:
+                        raise ValueError(message) from None
+                    if progress is not None:
+                        progress(name, "failed", message)
+                    return ("failed", name, message)
+                if progress is not None:
+                    progress(name, "done")
+                return ("ok", renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db), None)
 
-        stems = renderers.parallel_map(render_track, tracks)
+        outcomes = renderers.parallel_map(render_track, tracks)
+        stems = [outcome[1] for outcome in outcomes if outcome[0] == "ok"]
+        failures = [
+            {"track": outcome[1], "error": outcome[2]} for outcome in outcomes if outcome[0] == "failed"
+        ]
+        if not stems:
+            detail = failures[0]["error"] if failures else "unknown error"
+            raise ValueError(f"Every track failed to render: {detail}")
         correction = 0.0
         with store.claimed_path(
             output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
@@ -920,6 +1019,7 @@ def _render_stems(
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
     result["source"] = source.name
     result["gain_correction_db"] = correction
+    result["failed"] = failures or None
     if audio_format == "wav":
         peak = audio.wav_peak_db(target)
         result["peak_db"] = round(peak, 2)
@@ -1062,6 +1162,7 @@ def _configure_transport_security(public_url: str) -> None:
 singing.register(mcp, lambda: store)
 renderers.register(mcp, lambda: store)
 sections.register(mcp, lambda: store)
+renderjobs.register(mcp, lambda: store, _run_audio_job)
 
 
 def main() -> None:
