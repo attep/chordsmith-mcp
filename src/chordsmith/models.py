@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 VoicingStyle = Literal["close", "open", "drop2"]
 RhythmPattern = Literal[
@@ -27,12 +27,74 @@ class NumeralEvent(BaseModel):
 
 
 class NoteInput(BaseModel):
-    """One note for add_track, e.g. {"pitch": "E6", "start_beat": 0, "beats": 0.5}."""
+    """One note for add_track, e.g. {"pitch": "E6", "start_beat": 0, "beats": 0.5}.
+
+    Position it either with ``start_beat`` (absolute beats from the start of the song) or with
+    ``section`` + ``bar`` + ``beat`` (relative to a section of the song's section map — see
+    set_song_sections). A note may run past its section's end; it is still placed normally.
+    """
 
     pitch: str | int = Field(description="Note name with octave ('E6', 'Bb3', 'C#-1') or MIDI number 0-127.")
-    start_beat: float = Field(ge=0, le=100000, description="When the note starts, in beats from the start.")
+    start_beat: float | None = Field(
+        None,
+        ge=0,
+        le=100000,
+        description="Absolute start in beats from the start; give this, or section+bar+beat.",
+    )
     beats: float = Field(gt=0, le=100000, description="Length of the note in beats (quarter notes).")
     velocity: int = Field(90, ge=1, le=127, description="Loudness, 1-127.")
+    section: str | None = Field(
+        None, description="Section name (from set_song_sections); positions the note relative to it."
+    )
+    bar: int | None = Field(None, ge=1, le=100000, description="1-based bar inside the section.")
+    beat: float | None = Field(
+        None, ge=1, le=100000, description="1-based beat inside the bar (floats fine: 2.5 = the 'and' of 2)."
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_position(self) -> NoteInput:
+        if self.section is None:
+            if self.start_beat is None:
+                raise ValueError("give start_beat, or section with bar/beat")
+            if self.bar is not None or self.beat is not None:
+                raise ValueError("bar/beat need a section")
+        else:
+            if self.start_beat is not None:
+                raise ValueError("give either start_beat or section+bar+beat, not both")
+            if self.bar is None:
+                raise ValueError("section-relative notes need a bar")
+        return self
+
+
+class SongSection(BaseModel):
+    """One song section, e.g. {"name": "Intro", "bars": 8, "bpm": 140}.
+
+    ``bpm`` is always **quarter-note** BPM (a tempo change never silently becomes dotted-quarter
+    BPM). ``grouping`` (e.g. "2+2+3") records accents for compound meters; it must sum to the
+    numerator and does not change the bar's length.
+    """
+
+    name: str = Field(min_length=1, max_length=40, description="Section name, e.g. 'Intro', 'Chorus'.")
+    bars: int = Field(ge=1, le=512, description="Length of the section in bars.")
+    bpm: float = Field(ge=20, le=300, description="Quarter-note tempo in BPM for this section.")
+    numerator: int = Field(4, ge=1, le=32, description="Time signature numerator (beats per bar).")
+    denominator: Literal[1, 2, 4, 8, 16, 32] = Field(
+        4, description="Time signature denominator (4 = quarter-note beat)."
+    )
+    grouping: str | None = Field(
+        None, description="Optional accent grouping like '2+2+3'; must sum to the numerator."
+    )
+
+    @model_validator(mode="after")
+    def _grouping_sums_to_numerator(self) -> SongSection:
+        if self.grouping is not None:
+            parts = [part.strip() for part in self.grouping.split("+")]
+            if not parts or not all(part.isdigit() and int(part) > 0 for part in parts):
+                raise ValueError("grouping must look like '2+2+3'")
+            total = sum(int(part) for part in parts)
+            if total != self.numerator:
+                raise ValueError(f"grouping sums to {total}, not the numerator {self.numerator}")
+        return self
 
 
 class LoopSpec(BaseModel):

@@ -12,6 +12,27 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.12.0] - 2026-10-10
+
+Shared sections with tempo and meter (patch brief milestone 2).
+
+### Added
+
+- **`set_song_sections`** writes a song-level section map into the MIDI conductor: each section's
+  start gets a real `time_signature`, a `set_tempo` and a `section: <name>` marker, so renders,
+  exports, `analyze_midi` and the vocal score follow one authoritative timing map. Tempo is
+  always quarter-note BPM; a section carries bars, BPM, numerator/denominator and an optional
+  accent `grouping` (e.g. `2+2+3`, stored in a small sidecar that follows rename/delete). The
+  result reports each section's start beat, total beats and the duration integrated over the
+  whole map — not the initial BPM applied to the song. This is the one tool that edits a file's
+  timing in place; notes are never touched, and old single-tempo files keep working unchanged.
+- **Section-relative note positions** in `add_track`: each note can use `section` + `bar` +
+  `beat` (1-based, e.g. 7/8 bar 2 beat 3.5) instead of absolute `start_beat`. Notes may run past
+  a section's end (sustains across boundaries are intentional); starting past the last bar is an
+  error that names the section.
+- `analyze_midi` now reports the full `tempo_changes` and `time_signature_changes` lists and the
+  file's `sections`; `tempo_bpm`/`time_signature` are the values the file starts with.
+
 ## [0.11.0] - 2026-10-10
 
 Preset verification and level diagnostics (patch brief milestone 1).

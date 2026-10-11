@@ -19,7 +19,7 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__, audio, delivery, renderers, results, singing
+from chordsmith import __version__, audio, delivery, renderers, results, sections, singing
 from chordsmith.analysis import analyze_file
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
@@ -521,7 +521,9 @@ def add_track(
             min_length=1,
             max_length=5000,
             description='Notes, e.g. [{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}]. '
-            "Pitch is a note name with octave or a MIDI number 0-127.",
+            "Pitch is a note name with octave or a MIDI number 0-127. Position each note with "
+            "start_beat (absolute) or with section+bar+beat relative to the section map "
+            "(set_song_sections).",
         ),
     ],
     instrument: Instrument = 0,
@@ -542,20 +544,47 @@ def add_track(
     Creates a new file; the original is never modified. The copy keeps all existing tracks and
     gets the new one on the chosen channel (a type 0 file is promoted to type 1). Returns the new
     file's name/path and how many notes/tracks it has. Pitches outside 0-127 and overlapping
-    notes are fine; the track is as monophonic or polyphonic as you write it. With ``loop``, a
-    short pattern (for example one bar of drums) is tiled across the song in one call.
+    notes are fine; the track is as monophonic or polyphonic as you write it. Notes can be
+    positioned in absolute beats or relative to a section (section+bar+beat, see
+    set_song_sections); a note may run past its section's end. With ``loop``, a short pattern
+    (for example one bar of drums) is tiled across the song in one call.
     """
     source = store.existing_path(filename)
     with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
         parsed: list[tuple[int, float, float, int]] = []
+        resolved_sections: list[sections.ResolvedSection] | None = None
         for note in notes:
             try:
                 pitch = parse_pitch(note.pitch)
             except MusicTheoryError as exc:
                 raise ValueError(str(exc)) from None
-            parsed.append((pitch, note.start_beat, note.beats, note.velocity))
+            start = note.start_beat
+            if note.section is not None:
+                if resolved_sections is None:
+                    resolved_sections = sections.read_sections(source)
+                    if not resolved_sections:
+                        raise ValueError(
+                            "This file has no section map; call set_song_sections first, or "
+                            "position notes with start_beat."
+                        )
+                section = next((item for item in resolved_sections if item.name == note.section), None)
+                if section is None:
+                    available = ", ".join(item.name for item in resolved_sections)
+                    raise ValueError(f"Unknown section '{note.section}'. Sections: {available}.")
+                bar = note.bar if note.bar is not None else 1
+                if bar > section.bars:
+                    raise ValueError(
+                        f"Section '{section.name}' has {section.bars} bars; bar {bar} is past "
+                        "its end (notes may run past the end, but not start there)."
+                    )
+                start = (
+                    section.start_beat
+                    + (bar - 1) * section.beats_per_bar
+                    + ((note.beat if note.beat is not None else 1.0) - 1)
+                )
+            parsed.append((pitch, start, note.beats, note.velocity))
         if loop is not None:
             for _, start, beats, _ in parsed:
                 if start >= loop.length_beats:
@@ -604,12 +633,13 @@ def delete_midi_file(
 ) -> results.DeleteResult:
     """Delete a MIDI file from the output folder.
 
-    Removes the file permanently (and its per-track instrument sidecar, if any) and returns its
-    name; use list_generated_files to confirm the name first. Fails with a clear message when
-    the file does not exist.
+    Removes the file permanently (and its instrument and section sidecars, if any) and returns
+    its name; use list_generated_files to confirm the name first. Fails with a clear message
+    when the file does not exist.
     """
     path = store.remove(filename)
     renderers.specs_path(path).unlink(missing_ok=True)
+    sections.sections_sidecar_path(path).unlink(missing_ok=True)
     return {"deleted": path.name}
 
 
@@ -621,14 +651,15 @@ def rename_midi_file(
     """Rename a MIDI file. Refuses to overwrite an existing file.
 
     Changes the file's name in place and returns the new name/path. If the target name exists,
-    the call fails and nothing changes. A per-track instrument sidecar (set_track_instrument)
-    moves with the file.
+    the call fails and nothing changes. The per-track instrument sidecar (set_track_instrument)
+    and the section sidecar (set_song_sections) move with the file.
     """
     source = store.existing_path(filename)
     target = store.rename(filename, new_name)
-    sidecar = renderers.specs_path(source)
-    if sidecar.is_file():
-        sidecar.replace(renderers.specs_path(target))
+    for sidecar_path in (renderers.specs_path, sections.sections_sidecar_path):
+        sidecar = sidecar_path(source)
+        if sidecar.is_file():
+            sidecar.replace(sidecar_path(target))
     return {"filename": target.name, "path": str(target), "uri": f"midi://{target.name}"}
 
 
@@ -903,6 +934,7 @@ def _configure_transport_security(public_url: str) -> None:
 
 singing.register(mcp, lambda: store)
 renderers.register(mcp, lambda: store)
+sections.register(mcp, lambda: store)
 
 
 def main() -> None:

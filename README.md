@@ -89,6 +89,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `create_chord_progression` | Chord names (`["Am","F","C","G"]`) → `.mid` file |
 | `create_progression_from_roman` | Roman numerals (`i–VI–III–VII`) + key → `.mid` file |
 | `add_track` | Adds a note-level track (melody, bass, drums) to a copy of a file |
+| `set_song_sections` | Writes a section map (bars, tempo, meter per section) into the file's conductor |
 | `get_midi_file` | Hands the actual file back (base64 or a signed download link) |
 | `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app (or per-track stems with `stems: true`) |
 | `set_track_instrument` / `list_instruments` | Per-track instrument specs (a soundfont, a GM program or drum kit, trims per track) and the engines + instrument catalog this server can run |
@@ -101,7 +102,9 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 
 The create tools accept **voicing** options (inversions, open/drop-2, voice leading, bass note),
 **rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), a `lofi`
-preset, a `seed` for reproducible renders, and `midi_type` 0/1 for simple players.
+preset, a `seed` for reproducible renders, and `midi_type` 0/1 for simple players. Songs can have
+a **section map** with real tempo and meter changes (`set_song_sections`); notes can then be
+placed with section-relative bar/beat positions, and vocals, renders and exports follow the map.
 
 Every tool also carries a human **title** and **behaviour hints** (read-only / creates /
 destructive) that MCP clients display, and every result is machine-checkable (a declared output

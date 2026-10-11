@@ -8,6 +8,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [Voicing options](#voicing-options)
 - [Rhythm options](#rhythm-options)
 - [add_track](#add_track)
+- [set_song_sections](#set_song_sections)
 - [get_midi_file](#get_midi_file)
 - [render_audio](#render_audio)
 - [list_chord_types](#list_chord_types)
@@ -173,7 +174,7 @@ original is never modified. A type 0 file is promoted to type 1.
 |---|---|
 | `filename` (required) | Existing file in the output folder |
 | `track_name` (required) | Name for the new track, e.g. `"Melody"` |
-| `notes` (required) | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes |
+| `notes` (required) | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes. Position a note with `start_beat` (absolute) **or** with `section` + `bar` + `beat` (1-based, relative to the section map — see [set_song_sections](#set_song_sections)); a note may run past its section's end |
 | `instrument` | General MIDI program for the track (0 piano, 24 nylon guitar, …) |
 | `channel` | MIDI channel 1–16 (10 = drums) |
 | `loop` | `{"length_beats": 4, "times": 36}`: the notes are positions inside the pattern window and repeat back to back, so a drum or bass groove is written once. The notes must fit inside `length_beats`; up to 20 000 notes after tiling |
@@ -183,6 +184,42 @@ original is never modified. A type 0 file is promoted to type 1.
 **Example:** a one-bar drum groove (kick on 1, snare on 2 and 4, hats on the offbeats) for a
 48-bar song: write the notes once inside beats 0–4 and pass
 `"loop": {"length_beats": 4, "times": 48}` instead of 192 hand-written notes.
+
+## set_song_sections
+
+Writes the song's **section map** into the MIDI: at each section's start the conductor gets a
+time signature, a tempo and a `section: <name>` marker, so renders, exports and the vocal score
+follow the map. This is the one tool that edits a file's timing **in place** — notes are never
+touched. Call it before [add_track](#add_track) to place notes with section-relative positions.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | MIDI file in the output folder |
+| `sections` (required) | Sections in order, up to 64 |
+
+Each section has:
+
+| Field | Description |
+|---|---|
+| `name` | Section name, e.g. `"Intro"`, `"Chorus"` (unique within the map) |
+| `bars` | Length in bars |
+| `bpm` | **Quarter-note** tempo for this section (a change is a real tempo event, never a hidden meter trick) |
+| `numerator`, `denominator` | Time signature (default 4/4); e.g. `7` and `8` for 7/8 |
+| `grouping` | Optional accent grouping like `"2+2+3"` (must sum to the numerator); stored in a sidecar, accents only — it does not change the bar's length |
+
+Example — a 140 BPM intro in 4/4, then a chorus in 7/8:
+
+```json
+{"filename": "song.mid", "sections": [
+  {"name": "Intro", "bars": 8, "bpm": 140},
+  {"name": "Chorus", "bars": 16, "bpm": 140, "numerator": 7, "denominator": 8, "grouping": "2+2+3"}
+]}
+```
+
+The result reports each section's `start_beat`, the total beats and the `duration_seconds`
+integrated over the whole map (not the initial BPM applied to the song). Replaces any existing
+section map; the sidecar (`<name>.sections.json`) follows the file through rename and delete.
+Old single-tempo songs simply have no sections and keep working unchanged.
 
 ## get_midi_file
 
@@ -314,7 +351,9 @@ Reads a MIDI file and guesses the chord in each bar.
 | `filename` (required) | A file in the output folder |
 | `window_beats` | Size of each analysis window in beats. Default: one bar. Use `2` if chords change every half bar. |
 
-Returns `tempo_bpm`, `time_signature`, `markers`, `key_signature_guess` (e.g.
+Returns `tempo_bpm` and `time_signature` (the values the file *starts* with), the full
+`tempo_changes` and `time_signature_changes` lists (beat + value), the `sections` map
+([set_song_sections](#set_song_sections)), `markers`, `key_signature_guess` (e.g.
 `"C major / A minor"`), `progression` (e.g. `["Am", "F", "C", "G"]`) and `segments` with
 start beat, length and notes of each chord.
 

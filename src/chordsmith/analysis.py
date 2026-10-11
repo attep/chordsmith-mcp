@@ -11,6 +11,7 @@ from pathlib import Path
 
 import mido
 
+from chordsmith import sections
 from chordsmith.theory import SCALES, MusicTheoryError, identify_chord, note_name, parse_chord
 
 _FLAT_MAJOR_TONICS = {1, 3, 5, 6, 8, 10}
@@ -32,7 +33,13 @@ def _marker_label(text: str, pitch_classes: set[int]) -> str | None:
 
 
 def _collect_notes(midi: mido.MidiFile) -> tuple[list[tuple[int, int, int]], dict]:
-    info: dict = {"tempo_bpm": 120.0, "time_signature": "4/4", "markers": []}
+    info: dict = {
+        "tempo_bpm": 120.0,
+        "time_signature": "4/4",
+        "tempo_changes": [],
+        "time_signature_changes": [],
+        "markers": [],
+    }
     notes: list[tuple[int, int, int]] = []
     for track in midi.tracks:
         tick = 0
@@ -40,17 +47,32 @@ def _collect_notes(midi: mido.MidiFile) -> tuple[list[tuple[int, int, int]], dic
         for msg in track:
             tick += msg.time
             if msg.type == "set_tempo":
-                info["tempo_bpm"] = round(mido.tempo2bpm(msg.tempo), 2)
+                info["tempo_changes"].append(
+                    {"beat": round(tick / midi.ticks_per_beat, 3), "bpm": round(mido.tempo2bpm(msg.tempo), 2)}
+                )
             elif msg.type == "time_signature":
-                info["time_signature"] = f"{msg.numerator}/{msg.denominator}"
+                info["time_signature_changes"].append(
+                    {
+                        "beat": round(tick / midi.ticks_per_beat, 3),
+                        "time_signature": f"{msg.numerator}/{msg.denominator}",
+                    }
+                )
             elif msg.type == "marker":
-                info["markers"].append({"beat": round(tick / midi.ticks_per_beat, 3), "text": msg.text})
+                if not msg.text.startswith(sections.SECTION_MARKER_PREFIX):
+                    info["markers"].append({"beat": round(tick / midi.ticks_per_beat, 3), "text": msg.text})
             elif msg.type == "note_on" and msg.velocity > 0 and msg.channel != 9:
                 active[(msg.channel, msg.note)].append(tick)
             elif msg.type in ("note_off", "note_on") and msg.channel != 9:
                 starts = active.get((msg.channel, msg.note))
                 if starts:
                     notes.append((starts.pop(0), tick, msg.note))
+    # The headline tempo/meter is the one the file starts with; the full lists carry the changes.
+    info["tempo_changes"].sort(key=lambda entry: entry["beat"])
+    info["time_signature_changes"].sort(key=lambda entry: entry["beat"])
+    if info["tempo_changes"]:
+        info["tempo_bpm"] = info["tempo_changes"][0]["bpm"]
+    if info["time_signature_changes"]:
+        info["time_signature"] = info["time_signature_changes"][0]["time_signature"]
     return notes, info
 
 
@@ -118,6 +140,7 @@ def analyze_file(path: Path, window_beats: float | None = None) -> dict:
         "total_beats": round(end / tpb, 3),
         "window_beats": window_beats,
         "key_signature_guess": key_guess,
+        "sections": [section.payload() for section in sections.read_sections(path)],
         "progression": [s["chord"] for s in segments],
         "segments": segments,
     }

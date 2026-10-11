@@ -43,6 +43,9 @@ Consequences:
 | `delivery.py` | Signed, expiring download URLs for tool-only clients |
 | `audio.py` | FluidSynth/ffmpeg rendering of MIDI to wav/mp3 |
 | `renderers.py` | Per-track rendering: the Renderer protocol, FluidSynth engine, instrument specs |
+| `soundfont.py` | SoundFont (.sf2) preset inventory: names/banks/programs from the pdta/phdr table |
+| `sections.py` | Song section maps: tempo/meter/marker events in the conductor, section-relative positions |
+| `offload.py` | Runs long tool bodies on worker threads so renders never block the event loop |
 | `singing.py` | Vocal scores, lyrics mapping, render jobs, mixing (engine dispatch) |
 | `diffsinger.py` | DiffSinger ONNX adapter for English voicebanks (mounted, never bundled) |
 | `auth.py` | OAuth 2.1 authorization server for HTTP transports (sign-in, DCR/CIMD, PKCE) |

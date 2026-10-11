@@ -58,6 +58,16 @@ class MarkerEntry(TypedDict):
     text: str
 
 
+class TempoChangeEntry(TypedDict):
+    beat: float
+    bpm: float
+
+
+class TimeSignatureChangeEntry(TypedDict):
+    beat: float
+    time_signature: str
+
+
 class SegmentEntry(TypedDict):
     start_beat: float
     beats: float
@@ -68,7 +78,10 @@ class SegmentEntry(TypedDict):
 class AnalyzeResult(TypedDict):
     tempo_bpm: float
     time_signature: str
+    tempo_changes: list[TempoChangeEntry]
+    time_signature_changes: list[TimeSignatureChangeEntry]
     markers: list[MarkerEntry]
+    sections: list[SectionEntry]
     ticks_per_beat: int
     total_beats: float
     window_beats: float
@@ -196,6 +209,24 @@ class InstrumentMapResult(TypedDict):
     path: str
     tracks: dict[str, InstrumentTrack]
     resolved: dict[str, str | None]
+
+
+class SectionEntry(TypedDict):
+    name: str
+    start_beat: float
+    bars: int
+    bpm: float
+    numerator: int
+    denominator: int
+    grouping: str | None
+
+
+class SectionsResult(TypedDict):
+    filename: str
+    path: str
+    sections: list[SectionEntry]
+    total_beats: float
+    duration_seconds: float
 
 
 class ExportEntry(_FileIdentity, DeliveryFields):

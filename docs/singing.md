@@ -37,7 +37,9 @@ backing. Two engines are supported:
    same request reuses the finished job instead of rendering twice.
 4. `mix_song_with_vocals` renders the backing **without the guide track** and balances levels by
    measurement: the vocal is placed `vocal_level_db` (default 6 dB) above the backing's active
-   level, reverb is off by default, and the mix is turned down if it would clip.
+   level, reverb is off by default, and the mix is turned down if it would clip. A
+   [section map](tools.md#set_song_sections) is honored end to end: the score's note seconds
+   integrate every tempo change, so lyrics stay in sync through tempo and meter shifts.
 5. `export_vocal_song` returns the mix as WAV and MP3, the vocal alone, and the untouched MIDI —
    as base64 or as signed, expiring links (the same mechanism as `get_midi_file`).
 
