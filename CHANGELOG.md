@@ -12,6 +12,24 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.13.0] - 2026-10-10
+
+MIDI import and bulk pattern ingestion (patch brief milestone 3).
+
+### Added
+
+- **`import_midi`** takes a MIDI file from anywhere else (a DAW, a generator, another
+  assistant) as base64 and stores the bytes **verbatim** — nothing is transformed or discarded.
+  The result is a structured report: tracks with channels/programs/note counts, every tempo and
+  time-signature change, markers, the SysEx count, and warnings for layouts the tools care
+  about (type 0 files, tempo events in several tracks, missing tempo/meter, no notes). The
+  imported file works with the whole workflow, and a round-trip through `get_midi_file` returns
+  the exact bytes.
+- **Step patterns in `add_track`**: `patterns: [{"pitch": 36, "steps": "x---x---"}]` writes
+  drum-style grids compactly — one row per voice, `x` hits, `X` accents (+25), `-`/`.` rests,
+  `|` and spaces are bar lines that do not consume a step, `step_beats` sets the grid (default a
+  sixteenth). Patterns combine with `notes` and tile with `loop`; `notes` is now optional.
+
 ## [0.12.0] - 2026-10-10
 
 Shared sections with tempo and meter (patch brief milestone 2).

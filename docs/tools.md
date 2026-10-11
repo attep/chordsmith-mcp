@@ -10,6 +10,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [add_track](#add_track)
 - [set_song_sections](#set_song_sections)
 - [get_midi_file](#get_midi_file)
+- [import_midi](#import_midi)
 - [render_audio](#render_audio)
 - [list_chord_types](#list_chord_types)
 - [transpose_midi](#transpose_midi)
@@ -174,7 +175,9 @@ original is never modified. A type 0 file is promoted to type 1.
 |---|---|
 | `filename` (required) | Existing file in the output folder |
 | `track_name` (required) | Name for the new track, e.g. `"Melody"` |
-| `notes` (required) | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes. Position a note with `start_beat` (absolute) **or** with `section` + `bar` + `beat` (1-based, relative to the section map — see [set_song_sections](#set_song_sections)); a note may run past its section's end |
+| `notes` | List of `{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}`. Pitch is a note name with octave (`E6`, `Bb3`, `C#-1`) or a MIDI number 0–127. Up to 5000 notes. Position a note with `start_beat` (absolute) **or** with `section` + `bar` + `beat` (1-based, relative to the section map — see [set_song_sections](#set_song_sections)); a note may run past its section's end |
+| `patterns` | Compact step grids, e.g. `[{"pitch": 36, "steps": "x---x---"}, {"pitch": 38, "steps": "----x---", "velocity": 100}]`. One row per voice: `x`/`o` hit, `X`/`O` accent (+25), `-`/`.`/`_` rest, `|` and spaces are bar lines that do not consume a step. Starts at beat 0 and tiles with `loop`. Give `notes`, `patterns`, or both |
+| `step_beats` | Length of one pattern step in beats (default `0.25` = a sixteenth) |
 | `instrument` | General MIDI program for the track (0 piano, 24 nylon guitar, …) |
 | `channel` | MIDI channel 1–16 (10 = drums) |
 | `loop` | `{"length_beats": 4, "times": 36}`: the notes are positions inside the pattern window and repeat back to back, so a drum or bass groove is written once. The notes must fit inside `length_beats`; up to 20 000 notes after tiling |
@@ -183,7 +186,17 @@ original is never modified. A type 0 file is promoted to type 1.
 
 **Example:** a one-bar drum groove (kick on 1, snare on 2 and 4, hats on the offbeats) for a
 48-bar song: write the notes once inside beats 0–4 and pass
-`"loop": {"length_beats": 4, "times": 48}` instead of 192 hand-written notes.
+`"loop": {"length_beats": 4, "times": 48}` instead of 192 hand-written notes. The same groove
+with `patterns` is three short strings:
+
+```json
+{"filename": "song.mid", "track_name": "Drums", "channel": 10, "loop": {"length_beats": 4, "times": 48},
+ "patterns": [
+   {"pitch": 36, "steps": "x---x---|x---x---", "velocity": 120},
+   {"pitch": 38, "steps": "----x---|----x---", "velocity": 115},
+   {"pitch": 42, "steps": "x-x-x-x-|x-x-x-x-", "velocity": 70}
+ ]}
+```
 
 ## set_song_sections
 
@@ -234,6 +247,26 @@ to you.
 
 The signed URL works without the OAuth login and stops working when it expires; the signing
 secret lives in the state folder.
+
+## import_midi
+
+Imports a MIDI file made elsewhere (a DAW, a generator, another assistant) into the output
+folder. The bytes are stored **verbatim** — nothing is transformed or discarded — and the
+result reports what the file contains.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Name for the imported file, e.g. `"sketch.mid"` |
+| `data_base64` (required) | The `.mid` bytes, base64-encoded (up to 5 MB decoded) |
+| `overwrite` | Replace an existing file of that name |
+
+The report has: `midi_type`, `ticks_per_beat`, `duration_seconds`, `total_notes`, per-track
+`index`/`name`/`channel`/`program`/`notes` (channels 1-based, 10 = drums), every
+`tempo_changes` and `time_signature_changes` entry, `markers`, the `sysex_events` count, and
+`warnings` for layouts the tools care about: type 0 files (per-track stems need type 1), tempo
+events in several tracks, missing tempo/meter events, SysEx events (stored but ignored by
+rendering), no notes. The imported file then works with the whole workflow — analyze,
+sections, per-track instruments, stems and the singing tools.
 
 ## render_audio
 

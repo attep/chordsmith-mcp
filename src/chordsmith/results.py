@@ -229,6 +229,33 @@ class SectionsResult(TypedDict):
     duration_seconds: float
 
 
+class TrackReport(TypedDict):
+    index: int
+    name: str
+    channel: int | None
+    program: int | None
+    notes: int
+
+
+class ImportResult(TypedDict):
+    filename: str
+    path: str
+    uri: str
+    size_bytes: int
+    sha256: str
+    mime_type: str
+    midi_type: int
+    ticks_per_beat: int
+    duration_seconds: float
+    total_notes: int
+    tracks: list[TrackReport]
+    tempo_changes: list[TempoChangeEntry]
+    time_signature_changes: list[TimeSignatureChangeEntry]
+    markers: list[MarkerEntry]
+    sysex_events: int
+    warnings: list[str]
+
+
 class ExportEntry(_FileIdentity, DeliveryFields):
     pass
 

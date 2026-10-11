@@ -97,6 +97,23 @@ class SongSection(BaseModel):
         return self
 
 
+class PatternRow(BaseModel):
+    """One voice of a step pattern for add_track, e.g. {"pitch": 36, "steps": "x---x---"}.
+
+    Each character is one step (``step_beats`` long, a sixteenth by default): ``x``/``o`` hits,
+    ``X``/``O`` hits harder (accent), ``-``/``.``/``_`` are rests, and ``|`` and spaces are bar
+    lines (ignored). Drum grids are written as one row per voice.
+    """
+
+    pitch: str | int = Field(description="Note name with octave or MIDI number 0-127.")
+    steps: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Step string, e.g. 'x---x---' (kick on 1 and 3) or 'x-x-|x-x-'.",
+    )
+    velocity: int = Field(90, ge=1, le=127, description="Velocity of a plain hit; accents add 25.")
+
+
 class LoopSpec(BaseModel):
     """Tile a short pattern across the song, e.g. one bar of drums repeated 32 times.
 

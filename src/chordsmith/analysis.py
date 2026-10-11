@@ -76,6 +76,94 @@ def _collect_notes(midi: mido.MidiFile) -> tuple[list[tuple[int, int, int]], dic
     return notes, info
 
 
+def describe_midi(midi: mido.MidiFile) -> dict:
+    """A structured summary of a MIDI file for import_midi: tracks, timing events, warnings.
+
+    Nothing is transformed — the report exists so an imported file is never silent about what it
+    contains: tempo changes in several tracks, SysEx events, type 0 layouts, missing tempo/meter.
+    Channels are reported 1-based (matching add_track; 10 = drums).
+    """
+    tracks: list[dict] = []
+    total_notes = 0
+    sysex = 0
+    tempos: dict[int, float] = {}
+    meters: dict[int, str] = {}
+    markers: list[dict] = []
+    tempo_tracks: set[int] = set()
+    for index, track in enumerate(midi.tracks):
+        tick = 0
+        name = "(unnamed)"
+        channel: int | None = None
+        program: int | None = None
+        notes = 0
+        for message in track:
+            tick += message.time
+            if message.type == "track_name" and name == "(unnamed)":
+                name = message.name or "(unnamed)"
+            elif message.type == "program_change" and program is None:
+                channel = message.channel
+                program = message.program
+            elif message.type == "note_on" and message.velocity > 0:
+                notes += 1
+                if channel is None:
+                    channel = message.channel
+            elif message.type == "set_tempo":
+                tempo_tracks.add(index)
+                tempos.setdefault(tick, round(mido.tempo2bpm(message.tempo), 2))
+            elif message.type == "time_signature":
+                meters.setdefault(tick, f"{message.numerator}/{message.denominator}")
+            elif message.type == "marker":
+                markers.append({"beat": round(tick / midi.ticks_per_beat, 3), "text": message.text})
+            elif message.type == "sysex":
+                sysex += 1
+        total_notes += notes
+        tracks.append(
+            {
+                "index": index,
+                "name": name,
+                "channel": None if channel is None else channel + 1,
+                "program": program,
+                "notes": notes,
+            }
+        )
+    warnings: list[str] = []
+    if midi.type == 0:
+        warnings.append(
+            "Type 0 file (a single track): per-track stems and set_track_instrument need a type-1 file."
+        )
+    if len(tempo_tracks) > 1:
+        warnings.append(
+            f"Tempo events appear in {len(tempo_tracks)} tracks; the merged map keeps the "
+            "first change per tick."
+        )
+    if not tempos:
+        warnings.append("No set_tempo event; 120 BPM is assumed.")
+    if not meters:
+        warnings.append("No time-signature event; 4/4 is assumed by the tools.")
+    if sysex:
+        warnings.append(f"{sysex} SysEx event(s) are stored verbatim but ignored by rendering.")
+    if total_notes == 0:
+        warnings.append("No notes found in the file.")
+    return {
+        "midi_type": midi.type,
+        "ticks_per_beat": midi.ticks_per_beat,
+        "duration_seconds": round(midi.length, 2),
+        "total_notes": total_notes,
+        "tracks": tracks,
+        "tempo_changes": [
+            {"beat": round(event_tick / midi.ticks_per_beat, 3), "bpm": bpm}
+            for event_tick, bpm in sorted(tempos.items())
+        ],
+        "time_signature_changes": [
+            {"beat": round(event_tick / midi.ticks_per_beat, 3), "time_signature": signature}
+            for event_tick, signature in sorted(meters.items())
+        ],
+        "markers": markers,
+        "sysex_events": sysex,
+        "warnings": warnings,
+    }
+
+
 def analyze_file(path: Path, window_beats: float | None = None) -> dict:
     midi = mido.MidiFile(path)
     notes, info = _collect_notes(midi)

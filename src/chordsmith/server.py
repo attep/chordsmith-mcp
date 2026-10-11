@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
+import io
 import json
 import logging
 import os
@@ -20,11 +24,20 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from chordsmith import __version__, audio, delivery, renderers, results, sections, singing
-from chordsmith.analysis import analyze_file
+from chordsmith.analysis import analyze_file, describe_midi
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
 from chordsmith.midi_writer import transpose_file, write_progression
-from chordsmith.models import ChordEvent, Humanize, LoopSpec, NoteInput, NumeralEvent, Rhythm, Voicing
+from chordsmith.models import (
+    ChordEvent,
+    Humanize,
+    LoopSpec,
+    NoteInput,
+    NumeralEvent,
+    PatternRow,
+    Rhythm,
+    Voicing,
+)
 from chordsmith.offload import offloaded
 from chordsmith.storage import FileStore, StorageError
 from chordsmith.theory import (
@@ -83,6 +96,7 @@ DESTRUCTIVE_IDEMPOTENT = ToolAnnotations(
 )
 
 MAX_TILED_NOTES = 20000  # cap after a loop pattern is tiled, so one call cannot write forever
+MAX_IMPORT_BYTES = 5 * 1024 * 1024  # import_midi: keep one base64 tool call to a sane size
 
 PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
     "lofi": (
@@ -511,21 +525,73 @@ def get_midi_file(
     return result
 
 
+@mcp.tool(title="Import MIDI", annotations=CREATES)
+def import_midi(
+    filename: Annotated[str, Field(description="Name for the imported file, e.g. 'sketch.mid'.")],
+    data_base64: Annotated[str, Field(description="The .mid bytes, base64-encoded (up to 5 MB decoded).")],
+    overwrite: Overwrite = False,
+) -> results.ImportResult:
+    """Import a MIDI file made elsewhere (a DAW, a generator) into the output folder.
+
+    The bytes are stored **verbatim** — nothing is transformed or discarded — and the result is
+    a structured report of what the file contains: tracks with their channels/programs/note
+    counts, every tempo and time-signature change, markers, the SysEx count, and warnings for
+    layouts the tools care about (type 0 files, tempo events in several tracks, missing
+    tempo/meter, no notes). The imported file then works with the normal workflow: analyze_midi,
+    set_song_sections, add_track, set_track_instrument, render_audio (stems) and the singing
+    tools.
+    """
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("data_base64 is not valid base64.") from None
+    if len(data) > MAX_IMPORT_BYTES:
+        raise ValueError(f"The file is {len(data)} bytes; the import limit is {MAX_IMPORT_BYTES} bytes.")
+    try:
+        midi = mido.MidiFile(file=io.BytesIO(data))
+    except Exception:
+        raise ValueError("The bytes are not a readable MIDI file.") from None
+    with store.claimed_path(filename, "imported", overwrite) as target:
+        target.write_bytes(data)
+    return {
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"midi://{target.name}",
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "mime_type": "audio/midi",
+        **describe_midi(midi),
+    }
+
+
 @mcp.tool(title="Add track", annotations=CREATES)
 def add_track(
     filename: Annotated[str, Field(description="Existing file to copy and extend.")],
     track_name: Annotated[str, Field(description="Name of the new track, e.g. 'Melody'.")],
     notes: Annotated[
-        list[NoteInput],
+        list[NoteInput] | None,
         Field(
-            min_length=1,
             max_length=5000,
             description='Notes, e.g. [{"pitch": "E6", "start_beat": 0, "beats": 0.5, "velocity": 80}]. '
             "Pitch is a note name with octave or a MIDI number 0-127. Position each note with "
             "start_beat (absolute) or with section+bar+beat relative to the section map "
-            "(set_song_sections).",
+            "(set_song_sections). Give notes, patterns, or both.",
         ),
-    ],
+    ] = None,
+    patterns: Annotated[
+        list[PatternRow] | None,
+        Field(
+            max_length=32,
+            description="Compact step patterns, e.g. [{'pitch': 36, 'steps': 'x---x---'}, "
+            "{'pitch': 38, 'steps': '----x---', 'velocity': 100}]. Each character is one step "
+            "(step_beats long): 'x' hits, 'X' accents, '-' or '.' rests, '|' and spaces are bar "
+            "lines. Give notes, patterns, or both.",
+        ),
+    ] = None,
+    step_beats: Annotated[
+        float,
+        Field(gt=0, le=4, description="Length of one pattern step in beats (default 0.25 = a sixteenth)."),
+    ] = 0.25,
     instrument: Instrument = 0,
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
     loop: Annotated[
@@ -546,16 +612,39 @@ def add_track(
     file's name/path and how many notes/tracks it has. Pitches outside 0-127 and overlapping
     notes are fine; the track is as monophonic or polyphonic as you write it. Notes can be
     positioned in absolute beats or relative to a section (section+bar+beat, see
-    set_song_sections); a note may run past its section's end. With ``loop``, a short pattern
-    (for example one bar of drums) is tiled across the song in one call.
+    set_song_sections); a note may run past its section's end. ``patterns`` write drum-style
+    grids compactly — one row per voice, 'x' hits, 'X' accents — from beat 0. With ``loop``, a
+    short pattern (for example one bar of drums) is tiled across the song in one call.
     """
     source = store.existing_path(filename)
     with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
+        if not notes and not patterns:
+            raise ValueError("Give notes, patterns, or both.")
         parsed: list[tuple[int, float, float, int]] = []
+        for row in patterns or []:
+            try:
+                row_pitch = parse_pitch(row.pitch)
+            except MusicTheoryError as exc:
+                raise ValueError(str(exc)) from None
+            step = 0
+            for char in row.steps:
+                if char in "| \t":  # bar lines are separators; they do not consume a step
+                    continue
+                if char in "-._":
+                    step += 1
+                    continue
+                if char not in "xXoO":
+                    raise ValueError(
+                        f"Unknown step '{char}' in the pattern for {row.pitch!r}; use 'x' for "
+                        "a hit, 'X' for an accent, '-' or '.' for a rest, '|' as a bar line."
+                    )
+                velocity = min(127, row.velocity + 25) if char in "XO" else row.velocity
+                parsed.append((row_pitch, step * step_beats, step_beats, velocity))
+                step += 1
         resolved_sections: list[sections.ResolvedSection] | None = None
-        for note in notes:
+        for note in notes or []:
             try:
                 pitch = parse_pitch(note.pitch)
             except MusicTheoryError as exc:
