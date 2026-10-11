@@ -116,12 +116,157 @@ class VocalSegment(BaseModel):
     """One vocal piece for mix_song_with_vocals, e.g. {"file": "verse.wav", "start_seconds": 12.5}.
 
     Use a list of segments to mix several takes or to join a vocal that was rendered in pieces;
-    each piece is placed at its start time and the pieces are summed into one vocal track.
+    each piece is placed at its start time and the pieces are summed into one vocal track. Each
+    voice can also carry its own level, pan and processing chain (EQ, compressor, sends).
     """
 
     file: str = Field(description="Vocal file in the output folder, or a finished singing job id.")
     start_seconds: float = Field(
         0.0, ge=0.0, le=100000.0, description="Where this piece starts in the song, in seconds."
+    )
+    name: str | None = Field(
+        None, max_length=40, description="Voice name for diagnostics, e.g. 'High' or 'Low'."
+    )
+    gain_db: float = Field(0.0, ge=-24.0, le=12.0, description="This voice's level in the duet.")
+    pan: float = Field(0.0, ge=-1.0, le=1.0, description="Pan: -1 left, 0 centre, +1 right (equal-power).")
+    chain: VocalChain | None = Field(
+        None, description="This voice's processing chain; omit for a clean voice."
+    )
+    sends: VocalSends | None = Field(None, description="Send levels to the shared reverb/delay.")
+    reverb_mix: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Insert-style reverb wet amount on this voice; null uses the sends.",
+    )
+
+
+class EqBell(BaseModel):
+    """One peaking EQ band, e.g. {"hz": 300, "gain_db": -2, "q": 1.2}."""
+
+    hz: float = Field(ge=20.0, le=20000.0, description="Centre frequency in Hz.")
+    gain_db: float = Field(ge=-24.0, le=24.0, description="Boost or cut in dB.")
+    q: float = Field(1.0, gt=0.05, le=10.0, description="Bandwidth (Q).")
+
+
+class EqShelf(BaseModel):
+    """A shelf band, e.g. {"hz": 6000, "gain_db": 2}."""
+
+    hz: float = Field(ge=20.0, le=20000.0, description="Shelf corner in Hz.")
+    gain_db: float = Field(ge=-24.0, le=24.0, description="Boost or cut in dB.")
+
+
+class VocalEq(BaseModel):
+    """Corrective and tone EQ for one voice; the bands apply in this order."""
+
+    highpass_hz: float | None = Field(
+        None, ge=20.0, le=500.0, description="High-pass corner in Hz (e.g. 75 to remove rumble); null skips it."
+    )
+    bells: list[EqBell] = Field(default_factory=list, max_length=6, description="Peaking bands, up to 6.")
+    low_shelf: EqShelf | None = Field(None, description="Low shelf (e.g. cut mud under 300 Hz).")
+    high_shelf: EqShelf | None = Field(None, description="High shelf (e.g. add or remove brightness).")
+
+
+class VocalCompressor(BaseModel):
+    """A compressor with real settings; the defaults mirror the legacy fixed chain.
+
+    ``gain_reduction_db`` is reported from a measurement pass, so a threshold means the same
+    thing from song to song.
+    """
+
+    enabled: bool = False
+    threshold_db: float = Field(-24.0, ge=-60.0, le=0.0, description="Threshold in dBFS.")
+    ratio: float = Field(3.0, ge=1.0, le=20.0, description="Compression ratio (e.g. 3 = 3:1).")
+    attack_ms: float = Field(10.0, ge=0.01, le=2000.0, description="Attack in ms.")
+    release_ms: float = Field(250.0, ge=0.01, le=9000.0, description="Release in ms.")
+    makeup_db: float = Field(2.0, ge=0.0, le=24.0, description="Makeup gain in dB.")
+    knee_db: float = Field(2.83, ge=1.0, le=8.0, description="Soft-knee width in dB.")
+
+
+class VocalDeesser(BaseModel):
+    """De-esser (planned for the next stage: enabling it returns a clear error for now)."""
+
+    enabled: bool = False
+    intensity: float = Field(0.5, ge=0.0, le=1.0, description="De-essing intensity, 0-1.")
+    frequency: float = Field(0.5, ge=0.0, le=1.0, description="Detection frequency, 0-1.")
+    makeup: float = Field(0.0, ge=0.0, le=1.0, description="Makeup gain, 0-1.")
+
+
+class VocalSaturation(BaseModel):
+    """Soft-clip saturation (planned for the next stage: enabling it returns an error for now)."""
+
+    enabled: bool = False
+    drive_db: float = Field(6.0, ge=0.0, le=24.0, description="Drive in dB.")
+
+
+class VocalSends(BaseModel):
+    """Send levels to the shared returns, in dB (0 = full send, -12 = quiet)."""
+
+    reverb_db: float | None = Field(None, ge=-60.0, le=12.0, description="Reverb send level; null = no send.")
+    delay_db: float | None = Field(None, ge=-60.0, le=12.0, description="Delay send level; null = no send.")
+
+
+class VocalChain(BaseModel):
+    """One voice's processing chain: EQ, then compressor (de-esser/saturation come later)."""
+
+    eq: VocalEq | None = None
+    compressor: VocalCompressor | None = None
+    deesser: VocalDeesser | None = None
+    saturation: VocalSaturation | None = None
+
+
+class LimiterSettings(BaseModel):
+    """A lookahead limiter: it catches peaks, not sustained loudness."""
+
+    enabled: bool = False
+    ceiling_db: float = Field(-1.0, ge=-12.0, le=0.0, description="Ceiling in dBFS.")
+
+
+class VocalBus(BaseModel):
+    """The duet bus: one gain (and optional glue compression/limiting) for all voices together."""
+
+    gain_db: float = Field(0.0, ge=-24.0, le=12.0, description="Bus level for the summed voices.")
+    compressor: VocalCompressor | None = None
+    limiter: LimiterSettings | None = None
+
+
+class ReverbReturn(BaseModel):
+    """The shared reverb: a convolution room with decay, pre-delay and damping."""
+
+    decay_s: float = Field(2.0, ge=0.1, le=8.0, description="Decay length in seconds.")
+    predelay_ms: float = Field(20.0, ge=0.0, le=200.0, description="Pre-delay in ms (space before the room).")
+    damping: float = Field(0.5, ge=0.0, le=1.0, description="High-frequency damping: 0 bright, 1 dark.")
+
+
+class DelayReturn(BaseModel):
+    """The shared delay: explicit milliseconds, or synced to the song's starting tempo."""
+
+    delay_ms: float | None = Field(None, ge=1.0, le=2000.0, description="Delay time in ms.")
+    tempo_sync: Literal["1/4", "1/8", "1/8d", "1/16"] | None = Field(
+        None, description="Note value synced to the song's starting tempo."
+    )
+    feedback: float = Field(0.2, ge=0.0, le=0.9, description="Feedback amount, 0-0.9.")
+
+    @model_validator(mode="after")
+    def _one_time(self) -> DelayReturn:
+        if (self.delay_ms is None) == (self.tempo_sync is None):
+            raise ValueError("give either delay_ms or tempo_sync, not both")
+        return self
+
+
+class Returns(BaseModel):
+    """The shared effect returns; voices reach them through their send levels."""
+
+    reverb: ReverbReturn | None = None
+    delay: DelayReturn | None = None
+
+
+class MasterSettings(BaseModel):
+    """The master stage: an optional true-peak limiter and an optional loudness target."""
+
+    limiter: LimiterSettings | None = None
+    loudness_target_lufs: float | None = Field(
+        None, ge=-30.0, le=-6.0, description="Target integrated loudness; applied as one static gain."
     )
 
 

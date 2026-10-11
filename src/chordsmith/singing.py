@@ -35,7 +35,20 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from chordsmith import audio, delivery, diffsinger, renderers, results, sections
-from chordsmith.models import ChorusSettings, ReverbSettings, VocalSegment
+from chordsmith.models import (
+    ChorusSettings,
+    DelayReturn,
+    MasterSettings,
+    ReverbReturn,
+    ReverbSettings,
+    Returns,
+    VocalBus,
+    VocalChain,
+    VocalCompressor,
+    VocalEq,
+    VocalSegment,
+    VocalSends,
+)
 from chordsmith.offload import offloaded
 from chordsmith.storage import FileStore
 from chordsmith.theory import midi_note_name
@@ -1435,6 +1448,442 @@ def _resolve_vocal_path(name: str, store: FileStore) -> Path:
     return store.existing_media_path(name)
 
 
+# ------------------------------------------------------------------ vocal processing
+
+
+IR_SEED = 4242  # the generated reverb impulse is deterministic
+LIMITER_MARGIN_DB = 0.3  # the limiter ceiling sits this far under the target: room for inter-sample peaks
+VOCAL_CHAIN_SUFFIX = ".vocal_chain.json"  # the chain sidecar next to the source MIDI
+
+
+@dataclass
+class ProcessedVoice:
+    """One voice with its resolved file and processing settings."""
+
+    path: Path
+    start_seconds: float = 0.0
+    name: str = "voice"
+    gain_db: float = 0.0
+    pan: float = 0.0
+    chain: VocalChain | None = None
+    sends: VocalSends | None = None
+    reverb_mix: float | None = None
+
+
+@dataclass
+class ProcessedVocals:
+    """The staged vocal pipeline's output: the dry bus and the effect returns."""
+
+    dry: Path
+    reverb_return: Path | None
+    delay_return: Path | None
+    gain_reduction: dict[str, float]
+    warnings: list[str]
+
+
+def _reverb_ir(scratch: Path, reverb: ReverbReturn) -> Path:
+    """A deterministic stereo impulse response: decay length, pre-delay and damping.
+
+    Two decorrelated pink-noise channels with an exponential fade make the room; damping is a
+    lowpass on the tail (1 = dark, 0 = bright) and the pre-delay is leading silence. The IR is
+    normalized to unit energy so a convolution does not change the signal's level: the ``wet``
+    fraction then mixes the reverb in at a predictable amount (afir runs with ``gtype=none``).
+    The file is cached per settings inside the scratch directory.
+    """
+    target = scratch / f"reverb_ir_{reverb.decay_s:g}_{reverb.predelay_ms:g}_{reverb.damping:g}.wav"
+    if target.is_file():
+        return target
+    raw = scratch / f"reverb_ir_{reverb.decay_s:g}_{reverb.predelay_ms:g}_{reverb.damping:g}_raw.wav"
+    cutoff = 12000.0 - reverb.damping * 10500.0  # 0 -> 12 kHz, 1 -> 1.5 kHz
+    _ffmpeg(
+        [
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"anoisesrc=color=pink:seed={IR_SEED}:duration={reverb.decay_s:.3f}:sample_rate=44100",
+            "-f",
+            "lavfi",
+            "-i",
+            f"anoisesrc=color=pink:seed={IR_SEED + 1}:duration={reverb.decay_s:.3f}:sample_rate=44100",
+            "-filter_complex",
+            "[0:a][1:a]join=inputs=2:channel_layout=stereo,"
+            f"afade=t=out:st=0:d={reverb.decay_s:.3f}:curve=exp,"
+            f"lowpass=f={cutoff:.0f},adelay={reverb.predelay_ms:g}:all=1[ir]",
+            "-map",
+            "[ir]",
+            str(raw),
+        ]
+    )
+    energy_file = scratch / "reverb_ir_energy.raw"
+    _ffmpeg(["-y", "-loglevel", "error", "-i", str(raw), "-f", "f32le", str(energy_file)])
+    import array
+
+    samples = array.array("f")
+    samples.frombytes(energy_file.read_bytes())
+    energy = sum(value * value for value in samples)
+    gain = 1.0 / math.sqrt(energy) if energy > 0 else 1.0
+    _ffmpeg(["-y", "-loglevel", "error", "-i", str(raw), "-af", f"volume={gain:.8f}", str(target)])
+    return target
+
+
+def _eq_filters(eq: VocalEq) -> list[str]:
+    """The FFmpeg filter strings for one voice's EQ, in application order."""
+    filters: list[str] = []
+    if eq.highpass_hz is not None:
+        filters.append(f"highpass=f={eq.highpass_hz:g}")
+    for bell in eq.bells:
+        filters.append(f"equalizer=f={bell.hz:g}:width_type=q:width={bell.q:g}:g={bell.gain_db:g}")
+    if eq.low_shelf is not None:
+        filters.append(f"lowshelf=f={eq.low_shelf.hz:g}:width_type=q:width=0.707:g={eq.low_shelf.gain_db:g}")
+    if eq.high_shelf is not None:
+        filters.append(f"highshelf=f={eq.high_shelf.hz:g}:width_type=q:width=0.707:g={eq.high_shelf.gain_db:g}")
+    return filters
+
+
+def _compressor_filter(comp: VocalCompressor) -> str:
+    """The FFmpeg acompressor string; makeup is given in dB and converted to linear gain."""
+    makeup = 10.0 ** (comp.makeup_db / 20.0)
+    return (
+        f"acompressor=threshold={comp.threshold_db:g}dB:ratio={comp.ratio:g}:"
+        f"attack={comp.attack_ms:g}:release={comp.release_ms:g}:makeup={makeup:.6f}:knee={comp.knee_db:g}"
+    )
+
+
+def _voice_chain_filters(voice: ProcessedVoice, include_compressor: bool = True) -> list[str]:
+    """A voice's filters from raw input to its processed stereo output (no sends)."""
+    parts = ["aformat=channel_layouts=mono"]
+    delay_ms = round(voice.start_seconds * 1000)
+    if delay_ms:
+        parts.append(f"adelay={delay_ms}:all=1")
+    left = math.cos((voice.pan + 1.0) * math.pi / 4.0)
+    right = math.sin((voice.pan + 1.0) * math.pi / 4.0)
+    parts.append(f"pan=stereo|c0={left:.4f}*c0|c1={right:.4f}*c0")
+    if voice.gain_db:
+        parts.append(f"volume={voice.gain_db:g}dB")
+    chain = voice.chain
+    if chain is not None:
+        if chain.deesser is not None and chain.deesser.enabled:
+            raise SingingError(
+                "The de-esser is planned for the next stage; it is not wired yet (leave it disabled)."
+            )
+        if chain.saturation is not None and chain.saturation.enabled:
+            raise SingingError(
+                "Saturation is planned for a later stage; it is not wired yet (leave it disabled)."
+            )
+        if chain.eq is not None:
+            parts.extend(_eq_filters(chain.eq))
+        if include_compressor and chain.compressor is not None and chain.compressor.enabled:
+            parts.append(_compressor_filter(chain.compressor))
+    return parts
+
+
+def _render_voice(
+    voice: ProcessedVoice,
+    index: int,
+    scratch: Path,
+    ir_path: Path | None,
+    include_compressor: bool = True,
+) -> tuple[dict[str, Path], float | None, list[str]]:
+    """Render one voice: its dry output plus any reverb/delay sends.
+
+    One FFmpeg pass produces the processed dry voice and the scaled sends (the dry file is the
+    first output, sends follow in reverb-then-delay order). With ``reverb_mix`` the reverb is an
+    insert on the voice itself instead of a shared return. Returns the output paths, the
+    compressor's gain reduction in dB (None when there is no compressor) and warnings.
+    """
+    warnings: list[str] = []
+    mono = scratch / f"voice_{index}_mono.wav"
+    _ffmpeg(["-y", "-loglevel", "error", "-i", str(voice.path), "-ac", "1", "-ar", "44100", str(mono)])
+    parts = _voice_chain_filters(voice, include_compressor=include_compressor)
+    filters = [f"[0:a]{','.join(parts)}[chain]"]
+    inputs = [str(mono)]
+    label = "chain"
+    if voice.reverb_mix is not None and ir_path is not None:
+        inputs.append(str(ir_path))
+        # afir's output is only as long as its input: pad with the IR's length first, so the
+        # insert's reverb tail is not cut off at the voice's last sample
+        pad = _wav_duration(ir_path)
+        filters.append(f"[{label}]asplit=2[vdry][vwet]")
+        filters.append(f"[vwet]apad=pad_dur={pad:.3f}[vpadded]")
+        filters.append(f"[vpadded][1:a]afir=wet={voice.reverb_mix:g}:dry=0:gtype=none[vrev]")
+        filters.append("[vdry][vrev]amix=inputs=2:duration=longest:normalize=0[vmix]")
+        label = "vmix"
+    sends: list[tuple[str, float]] = []
+    if voice.sends is not None:
+        if voice.sends.reverb_db is not None:
+            sends.append(("reverb", voice.sends.reverb_db))
+        if voice.sends.delay_db is not None:
+            sends.append(("delay", voice.sends.delay_db))
+    outputs: dict[str, Path] = {}
+    dry_out = scratch / f"voice_{index}_dry.wav"
+    if sends:
+        filters.append(
+            f"[{label}]asplit={len(sends) + 1}[dryout]"
+            + "".join(f"[s{position}]" for position in range(len(sends)))
+        )
+        map_labels = ["[dryout]"]
+        for position, (kind, level_db) in enumerate(sends):
+            filters.append(f"[s{position}]volume={level_db:g}dB[s{position}out]")
+            map_labels.append(f"[s{position}out]")
+            outputs[kind] = scratch / f"voice_{index}_{kind}_send.wav"
+    else:
+        map_labels = [f"[{label}]"]
+    command = ["-y", "-loglevel", "error"]
+    for path in inputs:
+        command += ["-i", path]
+    command += ["-filter_complex", ";".join(filters)]
+    # each -map sits right before its output file: with several outputs, trailing maps would
+    # all attach to the first file
+    command += ["-map", map_labels[0], "-ar", "44100", str(dry_out)]
+    for map_label, target_path in zip(map_labels[1:], outputs.values(), strict=True):
+        command += ["-map", map_label, str(target_path)]
+    _ffmpeg(command)
+    outputs["dry"] = dry_out
+    reduction: float | None = None
+    if voice.chain is not None and voice.chain.compressor is not None and voice.chain.compressor.enabled:
+        # measure the reduction on plain chain renders (no reverb insert), so the number is the
+        # compressor's own work
+        with_compressor = scratch / f"voice_{index}_gr_with.wav"
+        without_compressor = scratch / f"voice_{index}_gr_without.wav"
+        for path, with_comp in ((with_compressor, True), (without_compressor, False)):
+            chain_parts = _voice_chain_filters(voice, include_compressor=with_comp)
+            _ffmpeg(
+                [
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(mono),
+                    "-filter_complex",
+                    f"[0:a]{','.join(chain_parts)}[v]",
+                    "-map",
+                    "[v]",
+                    "-ar",
+                    "44100",
+                    str(path),
+                ]
+            )
+        reduction = gated_rms_db(without_compressor) - gated_rms_db(with_compressor)
+        if reduction > 6.0:
+            warnings.append(f"voice '{voice.name}': the compressor is working hard ({reduction:.1f} dB)")
+    return outputs, reduction, warnings
+
+
+def _sum_files(paths: list[Path], target: Path) -> None:
+    """Sum wav files into one (amix, no normalization)."""
+    if len(paths) == 1:
+        _ffmpeg(["-y", "-loglevel", "error", "-i", str(paths[0]), str(target)])
+        return
+    command = ["-y", "-loglevel", "error"]
+    for path in paths:
+        command += ["-i", str(path)]
+    labels = "".join(f"[{index}:a]" for index in range(len(paths)))
+    command += [
+        "-filter_complex",
+        f"{labels}amix=inputs={len(paths)}:duration=longest:normalize=0[m]",
+        "-map",
+        "[m]",
+        str(target),
+    ]
+    _ffmpeg(command)
+
+
+def _apply_gain(source: Path, gain_db: float, target: Path) -> None:
+    _ffmpeg(["-y", "-loglevel", "error", "-i", str(source), "-af", f"volume={gain_db:g}dB", str(target)])
+
+
+def _limiter_filter(ceiling_db: float) -> str:
+    """alimiter with a dB ceiling; level=false keeps the output at the ceiling (no auto level)."""
+    limit = 10.0 ** (ceiling_db / 20.0)
+    return f"alimiter=limit={limit:.6f}:level=false"
+
+
+def _wav_duration(path: Path) -> float:
+    with wave.open(str(path), "rb") as handle:
+        return handle.getnframes() / handle.getframerate()
+
+
+def _reverb_return(send: Path, ir_path: Path, target: Path) -> None:
+    """Convolve the summed reverb sends with the impulse response (wet only).
+
+    afir's output is only as long as its input, so the send is padded with the IR's length
+    first: the padded window holds the full convolution tail, which is the point of a reverb.
+    """
+    pad = _wav_duration(ir_path)
+    _ffmpeg(
+        [
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(send),
+            "-i",
+            str(ir_path),
+            "-filter_complex",
+            f"[0:a]apad=pad_dur={pad:.3f}[p];[p][1:a]afir=wet=1:dry=0:gtype=none[m]",
+            "-map",
+            "[m]",
+            str(target),
+        ]
+    )
+
+
+def _delay_return(send: Path, delay_ms: float, feedback: float, target: Path) -> None:
+    """The delay return: echoes only (the dry path stays clean)."""
+    _ffmpeg(
+        [
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(send),
+            "-af",
+            f"aecho=0:1:{delay_ms:g}:{feedback:g}",
+            str(target),
+        ]
+    )
+
+
+def _delay_ms(delay: DelayReturn, starting_bpm: float | None) -> float:
+    """Resolve a delay's time: explicit ms, or a note value at the song's starting tempo."""
+    if delay.delay_ms is not None:
+        return delay.delay_ms
+    bpm = starting_bpm or 120.0
+    quarter = 60000.0 / bpm
+    return {"1/4": quarter, "1/8": quarter / 2, "1/8d": quarter * 0.75, "1/16": quarter / 4}[delay.tempo_sync or "1/4"]
+
+
+def _render_processed_vocals(
+    voices: list[ProcessedVoice],
+    vocal_bus: VocalBus | None,
+    returns: Returns | None,
+    starting_bpm: float | None,
+    scratch: Path,
+) -> ProcessedVocals:
+    """Run the staged vocal pipeline: per-voice chains, sends, the bus, and the returns."""
+    warnings: list[str] = []
+    gain_reduction: dict[str, float] = {}
+    ir_path: Path | None = None
+    needs_ir = bool(returns is not None and returns.reverb is not None) or any(
+        voice.reverb_mix is not None for voice in voices
+    )
+    if needs_ir:
+        reverb_settings = returns.reverb if returns is not None and returns.reverb is not None else ReverbReturn()
+        ir_path = _reverb_ir(scratch, reverb_settings)
+    rendered: list[dict[str, Path]] = []
+    for index, voice in enumerate(voices):
+        outputs, reduction, voice_warnings = _render_voice(voice, index, scratch, ir_path)
+        warnings.extend(voice_warnings)
+        if reduction is not None:
+            gain_reduction[f"voice '{voice.name}' compressor"] = round(reduction, 2)
+        rendered.append(outputs)
+    bus_source = scratch / "bus_pre.wav"
+    _sum_files([outputs["dry"] for outputs in rendered], bus_source)
+    bus_current = bus_source
+    if vocal_bus is not None and vocal_bus.gain_db:
+        gained = scratch / "bus_gained.wav"
+        _apply_gain(bus_current, vocal_bus.gain_db, gained)
+        bus_current = gained
+    if vocal_bus is not None and vocal_bus.compressor is not None and vocal_bus.compressor.enabled:
+        compressed = scratch / "bus_compressed.wav"
+        _ffmpeg(
+            [
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(bus_current),
+                "-af",
+                _compressor_filter(vocal_bus.compressor),
+                str(compressed),
+            ]
+        )
+        gain_reduction["bus compressor"] = round(gated_rms_db(bus_current) - gated_rms_db(compressed), 2)
+        bus_current = compressed
+    if vocal_bus is not None and vocal_bus.limiter is not None and vocal_bus.limiter.enabled:
+        limited = scratch / "bus_limited.wav"
+        _ffmpeg(
+            [
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(bus_current),
+                "-af",
+                _limiter_filter(vocal_bus.limiter.ceiling_db),
+                str(limited),
+            ]
+        )
+        reduction = audio.wav_peak_db(bus_current) - audio.wav_peak_db(limited)
+        gain_reduction["bus limiter"] = round(reduction, 2)
+        if reduction > 2.0:
+            warnings.append(f"the bus limiter takes off {reduction:.1f} dB; something earlier is too hot")
+        bus_current = limited
+    reverb_return_path: Path | None = None
+    delay_return_path: Path | None = None
+    if returns is not None:
+        reverb_sends = [outputs["reverb"] for outputs in rendered if "reverb" in outputs]
+        if reverb_sends and ir_path is not None:
+            summed = scratch / "reverb_send.wav"
+            _sum_files(reverb_sends, summed)
+            reverb_return_path = scratch / "reverb_return.wav"
+            _reverb_return(summed, ir_path, reverb_return_path)
+        delay_sends = [outputs["delay"] for outputs in rendered if "delay" in outputs]
+        if delay_sends and returns.delay is not None:
+            summed = scratch / "delay_send.wav"
+            _sum_files(delay_sends, summed)
+            delay_return_path = scratch / "delay_return.wav"
+            _delay_return(summed, _delay_ms(returns.delay, starting_bpm), returns.delay.feedback, delay_return_path)
+    return ProcessedVocals(
+        dry=bus_current,
+        reverb_return=reverb_return_path,
+        delay_return=delay_return_path,
+        gain_reduction=gain_reduction,
+        warnings=warnings,
+    )
+
+
+def _loudness_report(path: Path, raw_f32: bool = False) -> dict:
+    """Integrated LUFS, loudness range, true peak and short-term max via ebur128.
+
+    With ``raw_f32`` the input is the uncorrected float mix probe (headerless f32le stereo at
+    44.1 kHz), so the loudness is measured before the gain correction — loudness scales with
+    gain, so the correction can be computed from it.
+    """
+    command = ["-i", str(path), "-af", "ebur128=peak=true", "-f", "null", "-"]
+    if raw_f32:
+        command = [
+            "-f",
+            "f32le",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-i",
+            str(path),
+            "-af",
+            "ebur128=peak=true",
+            "-f",
+            "null",
+            "-",
+        ]
+    result = _ffmpeg(command)
+    text = result.stderr
+    integrated = re.findall(r"I:\s*(-?\d+\.?\d*)\s*LUFS", text)
+    lra = re.findall(r"LRA:\s*(-?\d+\.?\d*)\s*LU", text)
+    peak = re.findall(r"Peak:\s*(-?\d+\.?\d*)\s*dBFS", text)
+    short_term = [float(value) for value in re.findall(r"S:\s*(-?\d+\.?\d*)", text) if float(value) > -100.0]
+    return {
+        "integrated_lufs": round(float(integrated[-1]), 2) if integrated else None,
+        "loudness_range_lu": round(float(lra[-1]), 2) if lra else None,
+        "true_peak_db": round(float(peak[-1]), 2) if peak else None,
+        "short_term_max_lufs": round(max(short_term), 2) if short_term else None,
+    }
+
+
 def _combine_vocals(segments: list[tuple[Path, float]], target: Path) -> None:
     """Place each vocal piece at its start time and sum them into one vocal track."""
     args = ["-y", "-loglevel", "error"]
@@ -1451,7 +1900,7 @@ def _combine_vocals(segments: list[tuple[Path, float]], target: Path) -> None:
 
 def mix_tracks(
     backing: Path,
-    vocal: Path,
+    vocal: Path | None,
     target: Path,
     *,
     vocal_level_db: float = 6.0,
@@ -1461,6 +1910,11 @@ def mix_tracks(
     compress: bool = False,
     ducking: bool = False,
     duck_db: float = 4.0,
+    voices: list[ProcessedVoice] | None = None,
+    vocal_bus: VocalBus | None = None,
+    returns: Returns | None = None,
+    master: MasterSettings | None = None,
+    starting_bpm: float | None = None,
 ) -> dict:
     """Mix the vocal into the backing, balancing levels by measurement.
 
@@ -1477,36 +1931,56 @@ def mix_tracks(
     the one in the finished file. The peak is measured on a float render, so the export is
     corrected to ``normalize_peak_db`` (default -1 dBFS) from the true peak, or guarded to
     -0.1 dBFS when normalization is off: a clipped file is never written.
+
+    With ``voices`` the staged vocal pipeline runs instead of a single vocal file: each voice
+    keeps its own chain (EQ, compressor), gain, pan and sends, the results are summed into the
+    vocal bus (``vocal_bus``: gain, compressor, limiter) and the bus feeds the same measurement
+    and mix as before, so ``vocal_level_db`` means the same thing. ``returns`` adds a shared
+    reverb (a generated impulse response) and delay fed by the voices' sends; ``master`` adds a
+    true-peak-safe limiter and, with ``loudness_target_lufs``, a static gain to hit a loudness
+    target (the peak normalization is superseded; the result reports what was measured).
+    Everything off keeps the graph byte-identical to a plain mix.
     """
     original_vocal = vocal
     with tempfile.TemporaryDirectory() as scratch:
         scratch_path = Path(scratch)
-        vocal = scratch_path / "vocal_mix_rate.wav"
-        _ffmpeg(
-            ["-y", "-loglevel", "error", "-i", str(original_vocal), "-ac", "1", "-ar", "44100", str(vocal)]
-        )
-        if compress:
-            processed = scratch_path / "vocal_processed.wav"
+        processed: ProcessedVocals | None = None
+        if voices is not None:
+            processed = _render_processed_vocals(voices, vocal_bus, returns, starting_bpm, scratch_path)
+            vocal = processed.dry
+            if compress:
+                processed.warnings.append(
+                    "compress was ignored: the voice chain has its own compressor (use its settings)"
+                )
+        else:
+            if vocal is None:
+                raise SingingError("A vocal file is required when there are no voices.")
+            vocal = scratch_path / "vocal_mix_rate.wav"
             _ffmpeg(
-                [
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-i",
-                    str(vocal),
-                    "-af",
-                    "highpass=f=75,acompressor=threshold=-24dB:ratio=3:attack=10:release=250:makeup=2",
-                    str(processed),
-                ]
+                ["-y", "-loglevel", "error", "-i", str(original_vocal), "-ac", "1", "-ar", "44100", str(vocal)]
             )
-            vocal = processed
+            if compress:
+                vocal_processed = scratch_path / "vocal_processed.wav"
+                _ffmpeg(
+                    [
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-i",
+                        str(vocal),
+                        "-af",
+                        "highpass=f=75,acompressor=threshold=-24dB:ratio=3:attack=10:release=250:makeup=2",
+                        str(vocal_processed),
+                    ]
+                )
+                vocal = vocal_processed
         mix_backing = backing
         effective_duck = 0.0
         if ducking and duck_db > 0:
             mix_backing = scratch_path / "backing_ducked.wav"
             _duck_backing(backing, vocal, mix_backing, duck_db)
             effective_duck = duck_db
-        return _mix_tracks_at_mix_rate(
+        info = _mix_tracks_at_mix_rate(
             backing,
             mix_backing,
             vocal,
@@ -1517,7 +1991,14 @@ def mix_tracks(
             vocal_reverb=vocal_reverb,
             normalize_peak_db=normalize_peak_db,
             duck_db=effective_duck,
+            returns_paths=(processed.reverb_return, processed.delay_return) if processed else (None, None),
+            master=master,
+            staged_vocal=processed is not None,
         )
+        if processed is not None:
+            info["gain_reduction_db"] = processed.gain_reduction
+            info["warnings"] = processed.warnings + info["warnings"]
+        return info
 
 
 def _mix_tracks_at_mix_rate(
@@ -1532,7 +2013,19 @@ def _mix_tracks_at_mix_rate(
     vocal_reverb: bool,
     normalize_peak_db: float | None,
     duck_db: float = 0.0,
+    returns_paths: tuple[Path | None, Path | None] = (None, None),
+    master: MasterSettings | None = None,
+    staged_vocal: bool = False,
 ) -> dict:
+    """Mix at 44.1 kHz, measure the balance and correct the export's level.
+
+    The legacy graph (no staged vocal, no returns, no master) is kept exactly as it was, so a
+    plain mix stays byte-identical. With a staged vocal the graph skips the legacy mono pan
+    (the processed bus is already stereo, so panning it would collapse it); returns and master
+    settings add the return inputs (scaled with the vocal), the master limiter (a true-peak-safe
+    margin under the ceiling) and the gain correction; the correction is computed on the float
+    probe and applied before the limiter, so the limiter always sees the final level.
+    """
     backing_db, vocal_db = active_levels(measure_backing, vocal)
     # vocal_level_db means the level the listener hears over the band during phrases. With
     # ducking the band dips by duck_db, so the vocal is targeted duck_db lower against the
@@ -1541,23 +2034,55 @@ def _mix_tracks_at_mix_rate(
     vocal_gain = 10.0 ** (vocal_gain_db / 20.0)
     trim_db = 20.0 * math.log10(backing_volume) if backing_volume > 0 else -120.0
     balance_db = (vocal_db + vocal_gain_db) - (backing_db + trim_db - duck_db)
+    limiter_on = master is not None and master.limiter is not None and master.limiter.enabled
+    staged = staged_vocal or returns_paths != (None, None) or master is not None
 
     def render(output_gain_db: float, destination: Path, float_output: bool = False) -> None:
-        command = [
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(mix_backing),
-            "-i",
-            str(vocal),
-            "-filter_complex",
-            _mix_filters(vocal_gain, backing_volume, vocal_reverb, output_gain_db),
-            "-map",
-            "[m]",
-            "-ar",
-            "44100",
-        ]
+        if not staged:
+            command = [
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(mix_backing),
+                "-i",
+                str(vocal),
+                "-filter_complex",
+                _mix_filters(vocal_gain, backing_volume, vocal_reverb, output_gain_db),
+                "-map",
+                "[m]",
+                "-ar",
+                "44100",
+            ]
+        else:
+            # the staged graph: the processed bus is already stereo, so it skips the legacy pan;
+            # the returns ride with the vocal gain (they are part of the vocal's sound)
+            command = ["-y", "-loglevel", "error", "-i", str(mix_backing), "-i", str(vocal)]
+            extra: list[tuple[int, str]] = []
+            input_index = 2
+            for path, kind in zip(returns_paths, ("rv", "dl"), strict=True):
+                if path is not None:
+                    command += ["-i", str(path)]
+                    extra.append((input_index, kind))
+                    input_index += 1
+            vocal_filters = f"volume={vocal_gain:.4f}"
+            if vocal_reverb:
+                vocal_filters += ",aecho=1.0:1.0:60:0.25"
+            filters = [f"[0:a]volume={backing_volume:.3f}[b]", f"[1:a]{vocal_filters}[v]"]
+            mix_labels = "[b][v]"
+            for extra_index, kind in extra:
+                filters.append(f"[{extra_index}:a]volume={vocal_gain:.4f}[{kind}]")
+                mix_labels += f"[{kind}]"
+            graph = ";".join(filters)
+            graph += f";{mix_labels}amix=inputs={2 + len(extra)}:duration=longest:normalize=0[pm]"
+            label = "pm"
+            if output_gain_db:
+                graph += f";[{label}]volume={output_gain_db:.2f}dB[g]"
+                label = "g"
+            if limiter_on:
+                graph += f";[{label}]{_limiter_filter(master.limiter.ceiling_db - LIMITER_MARGIN_DB)}[ml]"
+                label = "ml"
+            command += ["-filter_complex", graph, "-map", f"[{label}]", "-ar", "44100"]
         if float_output:
             command += ["-f", "f32le"]
         command.append(str(destination))
@@ -1569,7 +2094,13 @@ def _mix_tracks_at_mix_rate(
     probe = scratch / "probe_f32.raw"
     render(0.0, probe, float_output=True)
     true_peak = _float_peak_db(probe)
-    if normalize_peak_db is not None:
+    loudness_target = master.loudness_target_lufs if master is not None else None
+    if loudness_target is not None:
+        # loudness scales with gain, so the correction to hit the target is read off the probe
+        probe_loudness = _loudness_report(probe, raw_f32=True)
+        integrated = probe_loudness["integrated_lufs"]
+        correction = round(loudness_target - integrated, 2) if integrated is not None else 0.0
+    elif normalize_peak_db is not None:
         correction = round(normalize_peak_db - true_peak, 2)
     elif true_peak > -0.1:
         correction = round(-0.1 - true_peak, 2)  # clipping guard: raw level, but never clipped
@@ -1577,6 +2108,32 @@ def _mix_tracks_at_mix_rate(
         correction = 0.0
     render(correction, target)
     peak = _peak_db(target)
+
+    loudness: dict | None = None
+    limiter_reduction: float | None = None
+    master_warnings: list[str] = []
+    if master is not None:
+        loudness = _loudness_report(target)
+        if loudness_target is not None and loudness["integrated_lufs"] is not None:
+            if abs(loudness["integrated_lufs"] - loudness_target) > 1.0:
+                master_warnings.append(
+                    f"the mix landed at {loudness['integrated_lufs']} LUFS, not the {loudness_target:g} LUFS target"
+                )
+        if limiter_on:
+            # the probe is already limited, so this is a lower bound on the limiter's work
+            limiter_reduction = round(true_peak + correction - peak, 2)
+            if limiter_reduction > 2.0:
+                master_warnings.append(
+                    f"the master limiter takes off {limiter_reduction:.1f} dB; leave more headroom or tame the bus"
+                )
+            if loudness["true_peak_db"] is not None and loudness["true_peak_db"] > master.limiter.ceiling_db + 0.05:
+                master_warnings.append(
+                    f"true peak {loudness['true_peak_db']:g} dBFS is over the {master.limiter.ceiling_db:g} dBFS ceiling"
+                )
+        if not limiter_on and peak > -0.05:
+            master_warnings.append(
+                "the mix clips at the target; lower loudness_target_lufs or enable the master limiter"
+            )
 
     # verify the balance by measurement on the uncorrected probe: the mix holds band + vocal
     # (uncorrelated), so subtracting the band's energy — measured from the backing file over the
@@ -1613,6 +2170,9 @@ def _mix_tracks_at_mix_rate(
         "vocal_to_original_backing_db": round(balance_db - duck_db, 1),
         "vocal_to_backing_measured_db": None if measured_db is None else round(measured_db, 1),
         "balance_check": balance_check,
+        "loudness": loudness,
+        "limiter_reduction_db": limiter_reduction,
+        "warnings": master_warnings,
     }
 
 
@@ -2003,6 +2563,52 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         vocal_reverb: Annotated[
             bool, Field(description="Gentle reverb on the vocal (off by default: clarity first).")
         ] = False,
+        vocal_chain: Annotated[
+            VocalChain | None,
+            Field(
+                description="Processing chain for a single vocal: EQ then compressor (de-esser and "
+                "saturation are later stages; leave them off). With several vocals, put the chain "
+                "on each segment instead. When omitted, a <source>.vocal_chain.json sidecar (if "
+                "present) loads automatically."
+            ),
+        ] = None,
+        vocal_sends: Annotated[
+            VocalSends | None,
+            Field(
+                description="Send levels from the single vocal to the shared returns, e.g. "
+                "{'reverb_db': -6, 'delay_db': -12}; null = no send. With several vocals, put "
+                "sends on each segment instead."
+            ),
+        ] = None,
+        vocal_bus: Annotated[
+            VocalBus | None,
+            Field(
+                description="The summed-voice bus for several voices (duets): one gain, optional "
+                "glue compressor and limiter. Applies after the per-voice chains."
+            ),
+        ] = None,
+        returns: Annotated[
+            Returns | None,
+            Field(
+                description="Shared effect returns, fed by each voice's sends: {'reverb': {'decay_s', "
+                "'predelay_ms', 'damping'}, 'delay': {'delay_ms' or 'tempo_sync', 'feedback'}}."
+            ),
+        ] = None,
+        master: Annotated[
+            MasterSettings | None,
+            Field(
+                description="Master stage: a true-peak limiter (sits 0.3 dB under its ceiling and is "
+                "verified) and/or loudness_target_lufs, applied as one static gain measured with "
+                "EBU R128 (supersedes normalize_peak_db)."
+            ),
+        ] = None,
+        save_chain: Annotated[
+            bool,
+            Field(
+                description="Save the effective chain/bus/returns/master to <source>.vocal_chain.json "
+                "(loaded automatically by later mixes of this song)."
+            ),
+        ] = False,
         reverb: Annotated[
             ReverbSettings | None,
             Field(
@@ -2074,6 +2680,18 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         vocal reverb on: the reverb rides with the vocal), and the effective backing effects.
         The mix is normalized to normalize_peak_db unless null, and clipped exports are turned
         down (see clipping and gain_correction_db).
+
+        ``vocal_chain``/``vocal_sends`` (single vocal) or the per-segment chain/sends/gain/pan run
+        each voice through its own processing before the voices are summed into the bus
+        (``vocal_bus``: gain, glue compressor, limiter); the balance is then measured on the
+        processed bus, so ``vocal_level_db`` keeps its meaning. ``returns`` feeds a shared
+        convolution reverb and delay from the voices' sends; ``master`` adds a true-peak-safe
+        limiter and/or a loudness target (one static gain from an EBU R128 measurement, verified
+        after the render). The result's ``processing`` block echoes the effective settings,
+        per-stage gain reduction, the measured loudness (integrated, range, true peak,
+        short-term max) and the limiter's work; ``warnings`` call out anything suspicious. The
+        effective chain can be saved as a ``<source>.vocal_chain.json`` sidecar (save_chain) and
+        loads automatically on later mixes when no chain option is passed.
         """
         store = _get_store()
         assert store is not None
@@ -2092,6 +2710,59 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             vocal_path = None  # built from the segments inside the claim block below
         else:
             vocal_path = _resolve_vocal_path(vocal, store)
+        sidecar_path = source_path.with_name(source_path.stem + VOCAL_CHAIN_SUFFIX)
+        chain_source = "parameters"
+        if (
+            all(value is None for value in (vocal_chain, vocal_sends, vocal_bus, returns, master))
+            and sidecar_path.is_file()
+        ):
+            data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            vocal_chain = VocalChain.model_validate(data["vocal_chain"]) if data.get("vocal_chain") else None
+            vocal_sends = VocalSends.model_validate(data["vocal_sends"]) if data.get("vocal_sends") else None
+            vocal_bus = VocalBus.model_validate(data["vocal_bus"]) if data.get("vocal_bus") else None
+            returns = Returns.model_validate(data["returns"]) if data.get("returns") else None
+            master = MasterSettings.model_validate(data["master"]) if data.get("master") else None
+            chain_source = "sidecar"
+        if vocals and (vocal_chain is not None or vocal_sends is not None):
+            raise SingingError(
+                "vocal_chain/vocal_sends apply to a single vocal; with vocals, put them on each segment."
+            )
+        voice_list: list[ProcessedVoice] | None = None
+        process_voices = (
+            vocal_chain is not None
+            or vocal_sends is not None
+            or vocal_bus is not None
+            or returns is not None
+            or master is not None
+            or (
+                vocals is not None
+                and any(
+                    segment.chain is not None
+                    or segment.sends is not None
+                    or segment.gain_db
+                    or segment.pan
+                    or segment.reverb_mix is not None
+                    for segment in vocals
+                )
+            )
+        )
+        if process_voices:
+            if vocals:
+                voice_list = [
+                    ProcessedVoice(
+                        path=path,
+                        start_seconds=segment.start_seconds,
+                        name=segment.name or f"voice {position + 1}",
+                        gain_db=segment.gain_db,
+                        pan=segment.pan,
+                        chain=segment.chain,
+                        sends=segment.sends,
+                        reverb_mix=segment.reverb_mix,
+                    )
+                    for position, ((path, _), segment) in enumerate(zip(resolved_segments, vocals, strict=True))
+                ]
+            else:
+                voice_list = [ProcessedVoice(path=vocal_path, name="voice", chain=vocal_chain, sends=vocal_sends)]
         midi = mido.MidiFile(source_path)
         track_index = find_track(midi, guide_track)
         names = _track_names(midi)
@@ -2114,7 +2785,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 index for index in note_tracks if not (specs.get(names[index]) and specs[names[index]].mute)
             ]
         use_stems = backing_levels is not None or bool(specs)
-        section_timeline = sections.timeline_seconds(sections.read_sections(source_path))
+        resolved_sections = sections.read_sections(source_path)
+        section_timeline = sections.timeline_seconds(resolved_sections)
+        starting_bpm = resolved_sections[0].bpm if resolved_sections else None
         effects = renderers.effect_options(reverb, chorus)
         effects_echo = {
             "reverb": reverb.model_dump() if reverb is not None else None,
@@ -2128,7 +2801,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             store.claimed_path(None, f"{source_path.stem}_vocals", extension=".wav") as vocals_wav,
             store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
         ):
-            if resolved_segments:
+            if voice_list is None and resolved_segments:
                 # several vocal pieces (takes, or a vocal rendered in chunks): place each at its
                 # start time and sum them into one vocal track
                 _combine_vocals(resolved_segments, vocals_wav)
@@ -2186,14 +2859,49 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 compress=compress,
                 ducking=ducking,
                 duck_db=duck_db,
+                voices=voice_list,
+                vocal_bus=vocal_bus,
+                returns=returns,
+                master=master,
+                starting_bpm=starting_bpm,
             )
+            if save_chain:
+                payload: dict[str, Any] = {}
+                if vocal_chain is not None:
+                    payload["vocal_chain"] = vocal_chain.model_dump(exclude_none=True)
+                if vocal_sends is not None:
+                    payload["vocal_sends"] = vocal_sends.model_dump(exclude_none=True)
+                if vocal_bus is not None:
+                    payload["vocal_bus"] = vocal_bus.model_dump(exclude_none=True)
+                if returns is not None:
+                    payload["returns"] = returns.model_dump(exclude_none=True)
+                if master is not None:
+                    payload["master"] = master.model_dump(exclude_none=True)
+                sidecar_path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+        gain_reduction = info.pop("gain_reduction_db", {})
+        loudness = info.pop("loudness", None)
+        limiter_reduction = info.pop("limiter_reduction_db", None)
+        warnings = info.pop("warnings", [])
+        processing = None
+        if process_voices:
+            processing = {
+                "chain_source": chain_source,
+                "vocal_chain": vocal_chain.model_dump(exclude_none=True) if vocal_chain is not None else None,
+                "vocal_sends": vocal_sends.model_dump(exclude_none=True) if vocal_sends is not None else None,
+                "vocal_bus": vocal_bus.model_dump(exclude_none=True) if vocal_bus is not None else None,
+                "returns": returns.model_dump(exclude_none=True) if returns is not None else None,
+                "master": master.model_dump(exclude_none=True) if master is not None else None,
+                "gain_reduction_db": gain_reduction,
+                "loudness": loudness,
+                "limiter_reduction_db": limiter_reduction,
+            }
         return {
             "filename": target.name,
             "path": str(target),
             "uri": f"midi://{target.name}",
             "mime_type": "audio/wav",
             "source": source_path.name,
-            "vocal": vocal_path.name,
+            "vocal": vocal_path.name if vocal_path is not None else f"{len(resolved_segments)} vocal segments",
             "backing": backing_wav.name,
             "levels": {
                 "vocal_level_db": vocal_level_db,
@@ -2208,6 +2916,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             "compress": compress,
             "ducking": ducking,
             "guide_removed": _track_names(midi)[track_index],
+            "processing": processing,
+            "warnings": warnings,
             **info,
         }
 

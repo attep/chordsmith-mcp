@@ -536,6 +536,27 @@ class MixLevels(TypedDict):
     duck_db: float | None
 
 
+class LoudnessInfo(TypedDict, total=False):
+    integrated_lufs: float | None
+    loudness_range_lu: float | None
+    true_peak_db: float | None
+    short_term_max_lufs: float | None
+
+
+class MixProcessing(TypedDict, total=False):
+    """The staged vocal pipeline's effective settings and measurements."""
+
+    chain_source: str
+    vocal_chain: dict | None
+    vocal_sends: dict | None
+    vocal_bus: dict | None
+    returns: dict | None
+    master: dict | None
+    gain_reduction_db: dict[str, float]
+    loudness: LoudnessInfo | None
+    limiter_reduction_db: float | None
+
+
 class MixResult(TypedDict):
     filename: str
     path: str
@@ -564,3 +585,5 @@ class MixResult(TypedDict):
     vocal_to_original_backing_db: float
     vocal_to_backing_measured_db: float | None
     balance_check: str
+    processing: MixProcessing | None
+    warnings: list[str]

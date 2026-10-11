@@ -12,6 +12,41 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.20.0] - 2026-10-11
+
+Vocal processing, stage 1: per-voice chains, a duet bus, shared reverb/delay returns, and a
+master stage. Every part is off by default, so a plain mix is untouched.
+
+### Added
+
+- **Per-voice processing chains on `mix_song_with_vocals`**: `vocal_chain` (single vocal) or a
+  `chain` per `vocals` segment — EQ (high-pass, up to six bells, low/high shelf) and a
+  compressor with real settings (threshold, ratio, attack, release, makeup, knee; the defaults
+  mirror the legacy fixed chain). Each voice also takes `gain_db`, `pan` and `reverb_mix` (an
+  insert reverb on that voice alone). The result reports each compressor's net gain reduction
+  (measured on the rendered files) and warns when one works hard.
+- **The bus** (`vocal_bus`): one gain for the summed voices plus an optional glue compressor
+  and limiter, with measured reduction (a bus limiter taking off more than 2 dB warns).
+- **Shared returns** (`returns`): a convolution reverb — a deterministic generated impulse
+  response with `decay_s`, `predelay_ms` and `damping`, normalized to unit energy so the wet
+  amount means what it says — and a delay (`delay_ms`, or `tempo_sync` note values at the
+  song's starting tempo, with `feedback`), fed by per-voice `sends`
+  (`reverb_db`/`delay_db`).
+- **The master stage** (`master`): a true-peak limiter that sits 0.3 dB under its ceiling
+  (inter-sample room; the finished mix's true peak is verified and warned about) and/or
+  `loudness_target_lufs` — one static gain from an EBU R128 measurement of the mix
+  (reproducible, no pumping) that supersedes the peak normalization. The new `processing`
+  result block echoes the effective settings, per-stage gain reduction, the measured loudness
+  (integrated LUFS, range, true peak, short-term max), the limiter's reduction, and warnings.
+- **Chain sidecar**: `save_chain: true` writes `<source>.vocal_chain.json`; later mixes of the
+  song load it automatically when no chain option is passed (`processing.chain_source` reports
+  whether the settings came from the parameters or the sidecar).
+
+### Changed
+
+- `mix_song_with_vocals` payload/description budgets deliberately raised (136 → 148 KB
+  payload, 17 → 19 KB descriptions) for the new schemas.
+
 ## [0.19.1] - 2026-10-10
 
 ### Added

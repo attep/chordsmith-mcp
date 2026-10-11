@@ -18,6 +18,22 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from chordsmith import audio, diffsinger, renderers, server, singing
+from chordsmith.models import (
+    DelayReturn,
+    EqBell,
+    EqShelf,
+    LimiterSettings,
+    MasterSettings,
+    ReverbReturn,
+    Returns,
+    VocalBus,
+    VocalChain,
+    VocalCompressor,
+    VocalDeesser,
+    VocalEq,
+    VocalSaturation,
+    VocalSends,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -643,6 +659,356 @@ def test_mix_clipping_guard_works_without_normalization(tmp_path):
         samples = array.array("h")
         samples.frombytes(handle.readframes(handle.getnframes()))
     assert max(abs(value) for value in samples) < 32767
+
+
+# ------------------------------------------------------------------ vocal processing (stage 1)
+
+
+def test_legacy_mix_filters_are_unchanged():
+    # the all-off path must stay exactly the graph v0.19.1 shipped: the byte-identity
+    # requirement depends on this string never drifting
+    assert singing._mix_filters(0.5, 1.0, False, 0.0) == (
+        "[0:a]volume=1.000[b];[1:a]pan=stereo|c0=c0|c1=c0,volume=0.5000[v];"
+        "[b][v]amix=inputs=2:duration=longest:normalize=0[m]"
+    )
+    reverb = singing._mix_filters(0.25, 0.8, True, -1.5)
+    assert "aecho=1.0:1.0:60:0.25" in reverb
+    assert reverb.endswith(",volume=-1.50dB[m]")
+
+
+def test_voice_chain_filters_apply_eq_then_compressor():
+    voice = singing.ProcessedVoice(
+        path=Path("voice.wav"),
+        start_seconds=1.5,
+        gain_db=-2.0,
+        pan=-1.0,
+        chain=VocalChain(
+            eq=VocalEq(
+                highpass_hz=80.0,
+                bells=[EqBell(hz=300.0, gain_db=-2.0, q=1.2)],
+                high_shelf=EqShelf(hz=8000.0, gain_db=2.0),
+            ),
+            compressor=VocalCompressor(enabled=True, threshold_db=-20.0, ratio=4.0),
+        ),
+    )
+    parts = singing._voice_chain_filters(voice)
+    assert parts[0] == "aformat=channel_layouts=mono"
+    assert parts[1] == "adelay=1500:all=1"
+    assert parts[2] == "pan=stereo|c0=1.0000*c0|c1=0.0000*c0"  # hard left
+    assert parts[3] == "volume=-2dB"
+    highpass = parts.index("highpass=f=80")
+    bell = parts.index("equalizer=f=300:width_type=q:width=1.2:g=-2")
+    shelf = parts.index("highshelf=f=8000:width_type=q:width=0.707:g=2")
+    compressor = next(index for index, part in enumerate(parts) if part.startswith("acompressor="))
+    assert highpass < bell < shelf < compressor
+    assert "makeup=1.258925" in parts[compressor]  # 2 dB makeup as a linear gain
+
+
+def test_deesser_and_saturation_are_planned_not_wired():
+    deesser = singing.ProcessedVoice(path=Path("v.wav"), chain=VocalChain(deesser=VocalDeesser(enabled=True)))
+    with pytest.raises(singing.SingingError, match="de-esser"):
+        singing._voice_chain_filters(deesser)
+    saturation = singing.ProcessedVoice(
+        path=Path("v.wav"), chain=VocalChain(saturation=VocalSaturation(enabled=True))
+    )
+    with pytest.raises(singing.SingingError, match="Saturation"):
+        singing._voice_chain_filters(saturation)
+
+
+def test_delay_ms_resolves_tempo_sync():
+    assert singing._delay_ms(DelayReturn(tempo_sync="1/4"), 120.0) == 500.0
+    assert singing._delay_ms(DelayReturn(tempo_sync="1/8d"), 120.0) == 375.0
+    assert singing._delay_ms(DelayReturn(delay_ms=300.0), None) == 300.0
+    assert singing._delay_ms(DelayReturn(tempo_sync="1/8"), None) == 250.0  # 120 BPM fallback
+
+
+def test_limiter_filter_uses_a_linear_ceiling_and_no_auto_level():
+    assert singing._limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false"
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_reverb_ir_is_predelayed_and_unit_energy(tmp_path):
+    ir_path = singing._reverb_ir(tmp_path, ReverbReturn(decay_s=0.5, predelay_ms=50.0, damping=0.5))
+    with wave.open(str(ir_path), "rb") as handle:
+        assert handle.getnchannels() == 2
+        rate = handle.getframerate()
+        samples = array.array("h")
+        samples.frombytes(handle.readframes(handle.getnframes()))
+    predelay_samples = round(rate * 0.05)
+    assert max(abs(value) for value in samples[: predelay_samples - 10]) < 50  # silence before the room
+    total = sum((value / 32768.0) ** 2 for value in samples)
+    assert 0.9 <= total <= 1.1  # unit energy: a convolution keeps the signal's level
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_voice_chain_reports_compressor_work(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_sine_wav(backing, 440.0, 3000, channels=2)
+    _write_sine_wav(vocal, 660.0, 8000)  # well above the threshold: the compressor really works
+    target = tmp_path / "mix.wav"
+    voices = [
+        singing.ProcessedVoice(
+            path=vocal,
+            name="lead",
+            gain_db=-1.0,
+            chain=VocalChain(
+                eq=VocalEq(highpass_hz=75.0),
+                compressor=VocalCompressor(enabled=True, threshold_db=-20.0, ratio=3.0, makeup_db=0.0),
+            ),
+        )
+    ]
+    info = singing.mix_tracks(backing, None, target, voices=voices)
+    assert "voice 'lead' compressor" in info["gain_reduction_db"]
+    assert info["gain_reduction_db"]["voice 'lead' compressor"] > 1.0
+    assert info["balance_check"] == "ok"
+    assert info["clipping"] is False
+    assert info["warnings"] == []
+    assert info["loudness"] is None  # no master stage: no loudness pass, no extra work
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_mix_returns_extend_the_tail(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_sine_wav(backing, 440.0, 3000, seconds=1.0, channels=2)
+    _write_sine_wav(vocal, 660.0, 20000, seconds=0.5)
+    target = tmp_path / "mix.wav"
+    voices = [singing.ProcessedVoice(path=vocal, sends=VocalSends(reverb_db=-6.0, delay_db=-9.0))]
+    info = singing.mix_tracks(
+        backing,
+        None,
+        target,
+        voices=voices,
+        returns=Returns(
+            reverb=ReverbReturn(decay_s=0.8, predelay_ms=20.0),
+            delay=DelayReturn(delay_ms=250.0, feedback=0.3),
+        ),
+    )
+    assert info["duration_seconds"] > 1.2  # the room and the echoes ring past the dry mix
+    assert info["balance_check"] in ("ok", "mismatch")
+    assert info["warnings"] == []
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_master_limiter_holds_the_ceiling_and_reports_loudness(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    # tones, not constants: a constant starts with a step that the true-peak meter's
+    # oversampling filter rings on (an artifact of the test signal, not the limiter)
+    _write_sine_wav(backing, 440.0, 22000, seconds=3.0, channels=2)
+    _write_sine_wav(vocal, 660.0, 22000, seconds=3.0)
+    target = tmp_path / "mix.wav"
+    info = singing.mix_tracks(
+        backing,
+        vocal,
+        target,
+        vocal_level_db=6.0,
+        normalize_peak_db=None,
+        master=MasterSettings(limiter=LimiterSettings(enabled=True, ceiling_db=-1.0)),
+    )
+    assert info["clipping"] is False
+    assert info["peak_db"] <= -1.0  # the limiter's margin keeps the sample peak under the ceiling
+    # and the true peak verifies within the 0.3 dB margin (ceiling - margin + meter tolerance)
+    assert info["loudness"]["true_peak_db"] <= -0.7
+    assert info["limiter_reduction_db"] is not None
+    assert info["warnings"] == []
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_master_loudness_target_applies_static_gain(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    _write_sine_wav(backing, 440.0, 3000, seconds=3.0, channels=2)
+    _write_sine_wav(vocal, 660.0, 6000, seconds=3.0)
+    target = tmp_path / "mix.wav"
+    info = singing.mix_tracks(
+        backing,
+        vocal,
+        target,
+        normalize_peak_db=None,
+        master=MasterSettings(loudness_target_lufs=-18.0),
+    )
+    assert abs(info["loudness"]["integrated_lufs"] + 18.0) <= 1.0
+    assert info["loudness"]["true_peak_db"] is not None
+    assert info["warnings"] == []
+
+
+async def test_mix_without_processing_stays_on_the_legacy_path(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the staged pipeline must not run when no processing option is given")
+
+    def fake_render(source, target, audio_format, soundfont=None, effects=None):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setattr(singing, "_render_processed_vocals", boom)
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    result = await _call("mix_song_with_vocals", {"source": song, "vocal": "vocal.wav"})
+    assert not result.isError, result.content[0].text
+    assert result.structuredContent["processing"] is None
+    assert result.structuredContent["warnings"] == []
+
+
+async def test_mix_chain_sidecar_round_trip(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    captured = []
+
+    def fake_render(source, target, audio_format, soundfont=None, effects=None):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        captured.append(kwargs)
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+            "gain_reduction_db": {"voice 'voice' compressor": 3.0},
+            "loudness": {"integrated_lufs": -18.0},
+            "limiter_reduction_db": 0.5,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    saved = await _call(
+        "mix_song_with_vocals",
+        {
+            "source": song,
+            "vocal": "vocal.wav",
+            "vocal_chain": {"eq": {"highpass_hz": 80}, "compressor": {"enabled": True, "ratio": 4}},
+            "vocal_sends": {"reverb_db": -8},
+            "vocal_bus": {"gain_db": -2},
+            "save_chain": True,
+        },
+    )
+    assert not saved.isError, saved.content[0].text
+    data = saved.structuredContent
+    assert data["processing"]["chain_source"] == "parameters"
+    assert data["processing"]["vocal_chain"]["compressor"]["ratio"] == 4.0
+    assert data["processing"]["vocal_sends"] == {"reverb_db": -8.0}
+    assert data["processing"]["gain_reduction_db"] == {"voice 'voice' compressor": 3.0}
+    assert data["processing"]["loudness"] == {"integrated_lufs": -18.0}
+    assert data["processing"]["limiter_reduction_db"] == 0.5
+    sidecar = store.root / f"{Path(song).stem}.vocal_chain.json"
+    assert sidecar.is_file()
+    assert captured[0]["voices"][0].chain is not None
+    assert captured[0]["voices"][0].sends.reverb_db == -8.0
+    assert captured[0]["vocal_bus"].gain_db == -2.0
+
+    loaded = await _call("mix_song_with_vocals", {"source": song, "vocal": "vocal.wav", "overwrite": True})
+    assert not loaded.isError, loaded.content[0].text
+    assert loaded.structuredContent["processing"]["chain_source"] == "sidecar"
+    assert loaded.structuredContent["processing"]["vocal_chain"]["eq"]["highpass_hz"] == 80.0
+    assert captured[1]["voices"][0].chain.eq.highpass_hz == 80.0
+    assert captured[1]["voices"][0].sends.reverb_db == -8.0
+    assert captured[1]["vocal_bus"].gain_db == -2.0
+
+
+async def test_mix_chain_with_vocals_segments_is_rejected(store):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    result = await _call(
+        "mix_song_with_vocals",
+        {
+            "source": song,
+            "vocals": [{"file": "vocal.wav", "start_seconds": 0}],
+            "vocal_chain": {"eq": {"highpass_hz": 80}},
+        },
+    )
+    assert result.isError
+    assert "each segment" in result.content[0].text
+
+
+async def test_mix_segment_processing_reaches_the_voices(store, monkeypatch):
+    song = await _make_band_song(store)
+    (store.root / "vocal.wav").write_bytes(b"RIFF0000")
+    captured = {}
+
+    def fake_render(source, target, audio_format, soundfont=None, effects=None):
+        target.write_bytes(b"RIFF0000")
+
+    def fake_mix(backing, vocal, target, **kwargs):
+        captured.update(kwargs)
+        captured["vocal"] = vocal
+        target.write_bytes(b"RIFF0000")
+        return {
+            "peak_db": -1.0,
+            "clipping": False,
+            "gain_correction_db": 0.0,
+            "normalize_peak_db": -1.0,
+            "duration_seconds": 1.0,
+            "backing_rms_db": -30.0,
+            "vocal_rms_db": -24.0,
+            "vocal_gain_db": 0.0,
+            "vocal_to_backing_db": 6.0,
+            "vocal_to_original_backing_db": 6.0,
+            "vocal_to_backing_measured_db": 6.0,
+            "balance_check": "ok",
+        }
+
+    monkeypatch.setattr(singing.audio, "render", fake_render)
+    monkeypatch.setattr(singing, "mix_tracks", fake_mix)
+    result = await _call(
+        "mix_song_with_vocals",
+        {
+            "source": song,
+            "vocals": [
+                {
+                    "file": "vocal.wav",
+                    "start_seconds": 0,
+                    "name": "lead",
+                    "gain_db": -2,
+                    "pan": -0.5,
+                    "chain": {"compressor": {"enabled": True}},
+                    "sends": {"reverb_db": -6},
+                }
+            ],
+            "returns": {"reverb": {"decay_s": 0.5}},
+        },
+    )
+    assert not result.isError, result.content[0].text
+    voice = captured["voices"][0]
+    assert voice.name == "lead"
+    assert voice.gain_db == -2.0
+    assert voice.pan == -0.5
+    assert voice.sends.reverb_db == -6.0
+    assert voice.chain.compressor.enabled is True
+    assert captured["returns"].reverb.decay_s == 0.5
+    assert captured["vocal"] is None  # the voices replace the single combined vocal
+    assert result.structuredContent["vocal"] == "1 vocal segments"
+    assert result.structuredContent["processing"]["chain_source"] == "parameters"
 
 
 async def test_mix_echoes_compress_and_ducking(store, monkeypatch):

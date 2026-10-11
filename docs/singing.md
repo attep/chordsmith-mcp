@@ -186,7 +186,8 @@ is singing** (all channels, so a stereo band is judged as a whole) and places th
 measuring, so 24 kHz VOICEVOX output is judged as it will be mixed (the resampler costs it a
 couple of dB). The mono vocal is panned to stereo before mixing, so
 the measured balance is the real one; `backing_volume` trims the backing (default `1.0`) and
-`vocal_reverb` is **off** by default (it adds a gentle echo, not a room reverb). The finished mix
+`vocal_reverb` is **off** by default (it adds a gentle echo, not a room reverb — for a real room
+use the `returns.reverb` below). The finished mix
 is normalized to `normalize_peak_db` (default `-1` dBFS; set null to keep the raw level), so
 exports are not left very quiet. The result reports `backing_rms_db`, `vocal_rms_db`,
 `vocal_gain_db`, the calculated `vocal_to_backing_db`, the **measured**
@@ -214,13 +215,14 @@ FluidSynth applies its reverb/chorus by send amount (a track with no send uses t
 a subtle reverb; send 0 is fully dry). The vocal's `vocal_reverb` is a separate effect and is
 never applied to instruments.
 
-The mix has level, per-stem trims, an optional vocal compressor, optional ducking, and
+The plain mix has level, per-stem trims, an optional vocal compressor, optional ducking, and
 normalization — no EQ. The peak is measured on a float render before the 16-bit export, so a hot
 mix is turned down from its true peak and a clipped file is never written (`clipping` reports
 whether the export clips; `gain_correction_db` shows the correction). When the band masks the
 voice (cymbals are the usual culprit), shape it in the arrangement (keep cymbals out from under
 the vocal, write softer velocities), raise `vocal_level_db`, trim the offending track with
-`backing_levels`, or turn on `ducking`.
+`backing_levels`, or turn on `ducking` — or reach for the per-voice EQ in the processing block
+below.
 
 **Vocal dynamics (`compress`, off by default):** the vocal gets a gentle high-pass and compressor
 before the balance is measured, which roughly halves its note-to-note level swings (measured on
@@ -240,6 +242,40 @@ between phrases.
 `{"Drums": -4, "Pad": 2}`. Each backing track is rendered separately and mixed with its trim, so
 a loud drum track can sit under the pad without touching the arrangement; tracks not listed keep
 their level (or a spec's `gain_db`). It costs one render per track, so the mix takes longer.
+
+**Vocal processing (all off by default):** per-voice chains, a bus for several voices, shared
+reverb/delay returns, and a master stage. Every part is optional and only costs what it does;
+with no processing option the mix is exactly the plain graph.
+
+- **Per-voice chain** (`vocal_chain` for a single vocal; per-segment `chain` with `vocals`):
+  EQ (`highpass_hz`, up to six `bells` `{hz, gain_db, q}`, `low_shelf`/`high_shelf` `{hz,
+  gain_db}`) then a `compressor` with real settings (`threshold_db`, `ratio`, `attack_ms`,
+  `release_ms`, `makeup_db`, `knee_db` — enabling it with defaults mirrors the legacy
+  `compress`). Each voice also takes `gain_db`, `pan` (`-1` left … `1` right) and `reverb_mix`
+  (0–1: an insert reverb on that voice alone). The result's `processing.gain_reduction_db`
+  reports each compressor's net reduction (makeup included) and warns past 6 dB.
+- **Bus** (`vocal_bus`): `gain_db` for the summed voices plus an optional `compressor` and
+  `limiter` (`ceiling_db`) — a glue stage for duets. A bus limiter taking off more than 2 dB
+  warns.
+- **Returns** (`returns`): `reverb` (`decay_s`, `predelay_ms`, `damping`) — a deterministic,
+  unit-energy impulse response convolved from the summed sends, so the wet amount means what it
+  says — and `delay` (`delay_ms`, or `tempo_sync` `1/4`/`1/8`/`1/8d`/`1/16` at the song's
+  starting tempo, with `feedback`). Voices feed them through `sends` (`reverb_db`/`delay_db`);
+  the returns ride with the vocal gain and count as part of the vocal in the balance check.
+- **Master** (`master`): `limiter` (`enabled`, `ceiling_db`) sits 0.3 dB under its ceiling so
+  inter-sample peaks stay inside it, and the finished mix's true peak is verified (a warning if
+  it slips over). `loudness_target_lufs` applies one static gain measured with EBU R128 —
+  integrated loudness scales with gain, so a single measurement pass is enough, with no
+  pumping — and supersedes `normalize_peak_db`. The `processing.loudness` block reports the
+  measured integrated LUFS, loudness range, true peak and short-term max, plus the limiter's
+  reduction.
+- **The sidecar**: `save_chain: true` writes the effective settings to
+  `<source>.vocal_chain.json`; a later mix of the same song loads it automatically when no
+  chain option is passed (`processing.chain_source` says whether the settings came from
+  `parameters` or the `sidecar`).
+
+A de-esser and saturation are modeled but not wired yet (enabling them returns a clear error):
+they are stage 2/3 work.
 
 ## Settings
 
