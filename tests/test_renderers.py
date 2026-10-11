@@ -370,6 +370,225 @@ async def test_render_audio_stems_use_signed_urls_when_configured(store, monkeyp
         assert stem["download_url"].startswith("https://example.test/")
 
 
+async def test_spec_sections_round_trip(store, engine_available):
+    song = await _make_band(store)
+    await _call(
+        "set_song_sections",
+        {
+            "filename": song,
+            "sections": [{"name": "A", "bars": 4, "bpm": 120}, {"name": "B", "bars": 4, "bpm": 120}],
+        },
+    )
+    result = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Bass": {"engine": "fluidsynth", "program": 38, "sections": {"B": {"program": 81}}}},
+        },
+    )
+    assert not result.isError, result.content[0].text
+    spec = result.structuredContent["tracks"]["Bass"]
+    assert spec["sections"] == {"B": {"preset": None, "bank": None, "program": 81}}
+    sidecar = json.loads((store.root / f"{song[:-4]}.instruments.json").read_text(encoding="utf-8"))
+    assert sidecar["tracks"]["Bass"]["sections"]["B"]["program"] == 81
+    loaded = renderers.load_specs(store.root / song)
+    assert loaded["Bass"].sections["B"].program == 81
+
+
+async def test_override_program_applies_section_timeline(store, engine_available):
+    from chordsmith.singing import extract_track
+
+    song = await _make_band(store)
+    await _call(
+        "set_song_sections",
+        {
+            "filename": song,
+            "sections": [{"name": "A", "bars": 4, "bpm": 120}, {"name": "B", "bars": 4, "bpm": 120}],
+        },
+    )
+    stem = store.root / "stem.mid"
+    extract_track(store.root / song, stem, 2)  # the Bass track
+    spec = renderers.InstrumentSpec(program=38, sections={"B": renderers.SectionInstrument(program=81)})
+    rewritten = renderers.override_program(stem, spec)
+    file = mido.MidiFile(rewritten)
+    tpb = file.ticks_per_beat
+    events = []
+    for track in file.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type == "program_change":
+                events.append((tick, message.type, message.program))
+            elif message.type == "control_change":
+                events.append((tick, message.type, message.control))
+    assert (0, "program_change", 38) in events  # section A uses the track default
+    assert (16 * tpb, "program_change", 81) in events  # section B switches exactly at its start
+
+    banked = renderers.override_program(
+        stem,
+        renderers.InstrumentSpec(
+            bank=0, program=38, sections={"B": renderers.SectionInstrument(bank=0, program=81)}
+        ),
+    )
+    file = mido.MidiFile(banked)
+    ordered = []
+    for message in file.tracks[0]:
+        if message.type == "control_change" and message.control in (0, 32):
+            ordered.append(("cc", message.control, message.value))
+        elif message.type == "program_change":
+            ordered.append(("pc", message.program))
+    # bank select lands before the program change at both boundaries
+    assert ordered[:3] == [("cc", 0, 0), ("cc", 32, 0), ("pc", 38)]
+    assert ordered[3:] == [("cc", 0, 0), ("cc", 32, 0), ("pc", 81)]
+
+
+async def test_set_track_instrument_section_validation(store, engine_available, tmp_path):
+    song = await _make_band(store)
+    no_map = await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "sections": {"B": {"program": 81}}}}},
+    )
+    assert no_map.isError and "no section map" in no_map.content[0].text
+
+    await _call(
+        "set_song_sections",
+        {
+            "filename": song,
+            "sections": [{"name": "A", "bars": 4, "bpm": 120}, {"name": "B", "bars": 4, "bpm": 120}],
+        },
+    )
+    unknown = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Bass": {"engine": "fluidsynth", "sections": {"Nope": {"program": 81}}}},
+        },
+    )
+    assert unknown.isError and "Unknown section(s) Nope" in unknown.content[0].text
+    assert "A, B" in unknown.content[0].text
+
+    kit_a = tmp_path / "a.sf2"
+    kit_b = tmp_path / "b.sf2"
+    kit_a.write_bytes(_make_sf2([("Synth Bass 1", 0, 38)]))
+    kit_b.write_bytes(_make_sf2([("Lead 2", 0, 81)]))
+    cross = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {
+                "Bass": {
+                    "engine": "fluidsynth",
+                    "preset": str(kit_a),
+                    "sections": {"B": {"preset": str(kit_b), "program": 81}},
+                }
+            },
+        },
+    )
+    assert cross.isError and "not supported yet" in cross.content[0].text
+
+    bad_program = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {
+                "Bass": {"engine": "fluidsynth", "preset": str(kit_a), "sections": {"B": {"program": 99}}}
+            },
+        },
+    )
+    assert bad_program.isError and "000-099" in bad_program.content[0].text  # checked per section too
+
+
+@pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
+async def test_section_program_changes_keep_held_voices(store):
+    from chordsmith.singing import extract_track
+
+    await _call(
+        "create_chord_progression",
+        {"chords": ["Am"] * 8, "filename": "held", "tempo": 120},
+    )
+    await _call(
+        "set_song_sections",
+        {
+            "filename": "held.mid",
+            "sections": [{"name": "A", "bars": 4, "bpm": 120}, {"name": "B", "bars": 4, "bpm": 120}],
+        },
+    )
+    held = [
+        {"pitch": "C2", "start_beat": 0, "beats": 32, "velocity": 90}  # sounds through both sections
+    ]
+    with_held = (
+        await _call(
+            "add_track",
+            {"filename": "held.mid", "track_name": "Bass", "notes": held, "output_filename": "held_bass"},
+        )
+    ).structuredContent["filename"]
+    stem = store.root / "held_stem.mid"
+    extract_track(store.root / with_held, stem, 2)
+
+    renderer = renderers.RENDERERS["fluidsynth"]
+    switch = renderers.InstrumentSpec(program=38, sections={"B": renderers.SectionInstrument(program=81)})
+    plain = renderers.InstrumentSpec(program=38)
+    first = store.root / "held_first.wav"
+    second = store.root / "held_second.wav"
+    renderer.render(stem, switch, first)
+    renderer.render(stem, plain, second)
+    # the held note never restarts, so the program change must not alter its sound at all
+    assert first.read_bytes() == second.read_bytes()
+
+    # a note that starts in section B does use the new program
+    notes = [
+        {"pitch": "C2", "start_beat": 0, "beats": 16, "velocity": 90},
+        {"pitch": "C2", "start_beat": 16, "beats": 8, "velocity": 90},
+    ]
+    with_new = (
+        await _call(
+            "add_track",
+            {"filename": "held.mid", "track_name": "Bass", "notes": notes, "output_filename": "held_bass2"},
+        )
+    ).structuredContent["filename"]
+    stem2 = store.root / "held_stem2.mid"
+    extract_track(store.root / with_new, stem2, 2)
+    third = store.root / "held_third.wav"
+    fourth = store.root / "held_fourth.wav"
+    renderer.render(stem2, switch, third)
+    renderer.render(stem2, plain, fourth)
+    assert third.read_bytes() != fourth.read_bytes()
+
+
+@pytest.mark.skipif(not _full_audio_ready(), reason="ffmpeg/FluidSynth/soundfont not installed")
+async def test_bake_instruments_materializes_the_timeline(store, engine_available):
+    song = await _make_band(store)
+    await _call(
+        "set_song_sections",
+        {
+            "filename": song,
+            "sections": [{"name": "A", "bars": 4, "bpm": 120}, {"name": "B", "bars": 4, "bpm": 120}],
+        },
+    )
+    await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Bass": {"engine": "fluidsynth", "program": 38, "sections": {"B": {"program": 81}}}},
+        },
+    )
+    result = await _call("bake_instruments", {"filename": song, "output_filename": "baked"})
+    assert not result.isError, result.content[0].text
+    baked = store.root / result.structuredContent["filename"]
+    assert baked.is_file()
+    # the original file is untouched
+    assert renderers.load_specs(store.root / song)["Bass"].program == 38
+    # the copy carries the timeline in the Bass track
+    file = mido.MidiFile(baked)
+    bass = next(
+        track
+        for track in file.tracks
+        if next((m.name for m in track if m.type == "track_name"), "") == "Bass"
+    )
+    programs = [(m.program) for m in bass if m.type == "program_change"]
+    assert programs == [38, 81]
+
+
 def test_effect_options_map_engine_settings():
     from chordsmith.models import ChorusSettings, ReverbSettings
 

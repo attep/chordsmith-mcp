@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from chordsmith import audio, results
 from chordsmith.models import ChorusSettings, ReverbSettings
+from chordsmith.sections import SECTION_MARKER_PREFIX, read_sections
 from chordsmith.soundfont import SoundFontError, available_labels, find_preset, read_presets
 from chordsmith.storage import FileStore
 
@@ -185,6 +186,23 @@ class RenderError(ValueError):
     """Raised when a track cannot be rendered (missing engine, silent stem, ...)."""
 
 
+class SectionInstrument(BaseModel):
+    """Per-section instrument override for one track, e.g. a lead that switches to sawtooth.
+
+    Only the fields given are overridden; the track's own spec fills the rest. The change lands
+    exactly at the section's start (bank select before the program change), and notes already
+    sounding keep their original preset — FluidSynth assigns the preset per voice.
+    """
+
+    preset: str | None = Field(
+        None,
+        description="Must be the same .sf2 as the track's preset: per-section SoundFont "
+        "switching is not supported yet.",
+    )
+    bank: int | None = Field(None, ge=0, le=127, description="CC0 bank select for this section.")
+    program: int | None = Field(None, ge=0, le=127, description="MIDI program (0-127) for this section.")
+
+
 class InstrumentSpec(BaseModel):
     """How one track should be rendered, e.g. a different soundfont for the bass."""
 
@@ -210,6 +228,12 @@ class InstrumentSpec(BaseModel):
         description="fluidsynth: MIDI program (0-127) — a GM instrument number minus 1 (see "
         "list_instruments for the names); on a drum track it picks the kit. Omit to keep the "
         "file's own program.",
+    )
+    sections: dict[str, SectionInstrument] | None = Field(
+        None,
+        description="Per-section overrides keyed by section name (from set_song_sections), e.g. "
+        "{'Chorus': {'program': 81}}; a change lands exactly at the section start and held "
+        "notes keep their original sound. Sections not listed use the track's own program/bank.",
     )
     gain_db: float = Field(
         0.0,
@@ -354,15 +378,118 @@ def save_specs(midi_path: Path, specs: dict[str, InstrumentSpec]) -> Path:
     return sidecar
 
 
-def override_program(midi: Path, spec: InstrumentSpec) -> Path:
-    """Write a copy of ``midi`` with the spec's bank/program applied to every note channel.
+def section_markers(midi: mido.MidiFile) -> list[tuple[int, str]]:
+    """Section starts ``(tick, name)`` from the conductor's ``section:`` markers, in order."""
+    markers: list[tuple[int, str]] = []
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type == "marker" and message.text.startswith(SECTION_MARKER_PREFIX):
+                markers.append((tick, message.text[len(SECTION_MARKER_PREFIX) :].strip()))
+    markers.sort()
+    return markers
 
-    Returns ``midi`` itself when the spec sets neither. The copy strips the file's own program
-    changes (and bank selects) and inserts the spec's at time zero, so the track plays the chosen
-    GM instrument (or drum kit) from the first note. The sidecar MIDI of a render lives in the
-    caller's scratch directory, so the copy is temporary too.
+
+def _program_events(
+    tick: int, channels: list[int], bank: int | None, program: int | None
+) -> list[tuple[int, int, mido.Message]]:
+    """Bank-select + program-change events at ``tick`` (bank before program), one per channel."""
+    events: list[tuple[int, int, mido.Message]] = []
+    for channel in channels:
+        if bank is not None:
+            events.append(
+                (tick, 0, mido.Message("control_change", control=0, value=bank, time=0, channel=channel))
+            )
+            events.append(
+                (tick, 1, mido.Message("control_change", control=32, value=0, time=0, channel=channel))
+            )
+        if program is not None:
+            events.append((tick, 2, mido.Message("program_change", program=program, time=0, channel=channel)))
+    return events
+
+
+def _strip_program_events(track: mido.MidiTrack) -> None:
+    """Remove a track's own program changes and bank selects (the spec's timeline replaces them)."""
+    track[:] = [
+        message
+        for message in track
+        if message.type != "program_change"
+        and not (message.type == "control_change" and message.control in (0, 32))
+    ]
+
+
+def program_timeline(
+    file: mido.MidiFile, spec: InstrumentSpec, channels: list[int]
+) -> list[tuple[int, int, mido.Message]]:
+    """The spec's resolved bank/program events at their absolute ticks, for the given channels.
+
+    Without ``spec.sections`` that is one set at time zero. With section overrides the events
+    land at each section's start: the section's override merged over the track's own
+    program/bank. Sections with nothing to apply emit nothing (the channel keeps its program).
+    Raises :class:`RenderError` when the file has no section map or a spec names a section the
+    file does not have.
     """
-    if spec.bank is None and spec.program is None:
+    if not spec.sections:
+        return _program_events(0, channels, spec.bank, spec.program)
+    markers = section_markers(file)
+    if not markers:
+        raise RenderError(
+            "This track's spec has section overrides, but the file has no section map; call "
+            "set_song_sections or remove the overrides."
+        )
+    available = [name for _, name in markers]
+    unknown = sorted(set(spec.sections) - set(available))
+    if unknown:
+        raise RenderError(
+            f"Section(s) {', '.join(unknown)} in the instrument spec are not in this file. "
+            f"Sections: {', '.join(available)}."
+        )
+    events: list[tuple[int, int, mido.Message]] = []
+    for tick, name in markers:
+        override = spec.sections.get(name)
+        bank = override.bank if override is not None and override.bank is not None else spec.bank
+        program = override.program if override is not None and override.program is not None else spec.program
+        events += _program_events(tick, channels, bank, program)
+    return events
+
+
+def _rewrite_track(track: mido.MidiTrack, events: list[tuple[int, int, mido.Message]]) -> None:
+    """Merge the given absolute-tick events into a track and rewrite its delta times."""
+    existing: list[tuple[int, int, mido.Message | mido.MetaMessage]] = []
+    tick = 0
+    for message in track:
+        tick += message.time
+        if message.type == "end_of_track":
+            continue
+        existing.append((tick, 3, message))
+    original_end = tick
+    merged = sorted(existing + list(events), key=lambda entry: (entry[0], entry[1]))
+    new_track = mido.MidiTrack()
+    last = 0
+    for event_tick, _, message in merged:
+        new_track.append(message.copy(time=max(0, event_tick - last)))
+        last = event_tick
+    end = max(original_end, last)
+    new_track.append(mido.MetaMessage("end_of_track", time=max(0, end - last)))
+    track[:] = new_track
+
+
+def override_program(midi: Path, spec: InstrumentSpec) -> Path:
+    """Write a copy of ``midi`` with the spec's bank/program timeline applied to every note channel.
+
+    Returns ``midi`` itself when the spec sets nothing to apply. The copy strips the file's own
+    program changes (and bank selects) and inserts the resolved timeline — one set at time zero,
+    or one at each section start with ``sections`` (bank select before the program change).
+    Notes already sounding keep their original preset: FluidSynth assigns the preset per voice,
+    so a program change only affects notes that begin after it. The copy lives next to the
+    caller's scratch MIDI.
+    """
+    has_overrides = any(
+        override.program is not None or override.bank is not None
+        for override in (spec.sections or {}).values()
+    )
+    if spec.bank is None and spec.program is None and not has_overrides:
         return midi
     file = mido.MidiFile(midi)
     channels = sorted(
@@ -374,20 +501,9 @@ def override_program(midi: Path, spec: InstrumentSpec) -> Path:
         }
     )
     for track in file.tracks:
-        track[:] = [
-            message
-            for message in track
-            if message.type != "program_change"
-            and not (message.type == "control_change" and message.control in (0, 32))
-        ]
-    head: list[mido.Message] = []
-    for channel in channels:
-        if spec.bank is not None:
-            head.append(mido.Message("control_change", control=0, value=spec.bank, time=0, channel=channel))
-            head.append(mido.Message("control_change", control=32, value=0, time=0, channel=channel))
-        if spec.program is not None:
-            head.append(mido.Message("program_change", program=spec.program, time=0, channel=channel))
-    file.tracks[0][:0] = head
+        _strip_program_events(track)
+    events = program_timeline(file, spec, channels)
+    _rewrite_track(file.tracks[0], events)
     target = midi.with_name(midi.stem + ".inst.mid")
     file.save(target)
     return target
@@ -473,6 +589,36 @@ def preset_label(spec: InstrumentSpec, channel: int) -> str | None:
     return preset.label()
 
 
+def _validate_sections(source: Path, spec: InstrumentSpec, channel: int) -> None:
+    """Check a spec's section overrides against the file's section map and the target SoundFont."""
+    if not spec.sections:
+        return
+    resolved = read_sections(source)
+    if not resolved:
+        raise RenderError(
+            "The file has no section map; call set_song_sections before adding section overrides."
+        )
+    available = [section.name for section in resolved]
+    unknown = sorted(set(spec.sections) - set(available))
+    if unknown:
+        raise RenderError(f"Unknown section(s) {', '.join(unknown)}. Sections: {', '.join(available)}.")
+    target = spec.preset or audio.find_soundfont()
+    for override in spec.sections.values():
+        if override.preset is not None and (
+            target is None or Path(override.preset).resolve() != Path(target).resolve()
+        ):
+            raise RenderError(
+                "Per-section SoundFont switching is not supported yet: a section preset must be "
+                "the same .sf2 as the track's preset."
+            )
+        merged = InstrumentSpec(
+            preset=spec.preset,
+            bank=override.bank if override.bank is not None else spec.bank,
+            program=override.program if override.program is not None else spec.program,
+        )
+        preset_label(merged, channel)
+
+
 # ------------------------------------------------------------------ stem combination
 
 
@@ -527,11 +673,13 @@ def register(mcp: FastMCP, store_provider) -> None:
 
         Writes a small JSON sidecar next to the file; the MIDI itself is never modified. Each
         track can get its own soundfont (``preset``), a different GM instrument (``program``
-        0-127, or a drum kit on a drum track; ``bank`` selects the bank), and a ``gain_db`` trim
-        for the combined mix. Track names must exist in the file, a preset file must be readable,
-        and a requested bank/program must exist in the SoundFont it targets — a miss is an error
-        that lists what the bank has, so nothing falls back silently. Returns the full spec map
-        and the resolved preset label per track.
+        0-127, or a drum kit on a drum track; ``bank`` selects the bank), a ``gain_db`` trim for
+        the combined mix, and ``sections`` overrides that change the program/bank at a section's
+        start (see set_song_sections; held notes keep their original sound). Track names must
+        exist in the file, a preset file must be readable, section names must exist in the file's
+        section map, and every requested bank/program must exist in the SoundFont it targets — a
+        miss is an error that lists what the bank has, so nothing falls back silently. Returns
+        the full spec map and the resolved preset label per track.
         """
         store: FileStore = store_provider()
         source = store.existing_path(filename)
@@ -551,6 +699,7 @@ def register(mcp: FastMCP, store_provider) -> None:
             if spec.preset is not None and not Path(spec.preset).is_file():
                 raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
             preset_label(spec, channels.get(name, 0))  # validate bank/program against the sf2
+            _validate_sections(source, spec, channels.get(name, 0))
             specs[name] = spec
         if specs:
             save_specs(source, specs)
@@ -641,3 +790,68 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "resolved": resolved,
             }
         return result
+
+    @mcp.tool(title="Bake instruments into MIDI", annotations=_CREATES)
+    def bake_instruments(
+        filename: Annotated[str, Field(description="MIDI file in the output folder.")],
+        output_filename: Annotated[
+            str | None, Field(description="Name for the baked copy (default: <name>_instruments).")
+        ] = None,
+        overwrite: Annotated[bool, Field(description="Replace an existing copy.")] = False,
+    ) -> results.BakeResult:
+        """Write a copy of the file with the instrument specs' bank/program events baked in.
+
+        The original is never modified. Every track with a set_track_instrument spec gets its
+        resolved bank/program timeline as real MIDI events in the copy — including per-section
+        overrides at their exact boundaries — so other players and DAWs hear the intended
+        instruments without ChordSmith. A MIDI file cannot carry a SoundFont, so the result also
+        returns the required .sf2 per track as companion metadata. Tracks that share a MIDI
+        channel share one program timeline (a standard MIDI limitation; a warning says so).
+        """
+        store: FileStore = store_provider()
+        source = store.existing_path(filename)
+        specs = load_specs(source)
+        if not specs:
+            raise RenderError("This file has no instrument specs; call set_track_instrument first.")
+        midi = mido.MidiFile(source)
+        names = track_names(midi)
+        channels = track_channels(midi)
+        warnings: list[str] = []
+        channel_settings: dict[int, tuple[int | None, int | None]] = {}
+        baked: dict[str, InstrumentSpec] = {}
+        for index in note_tracks(midi):
+            name = names[index]
+            spec = specs.get(name)
+            if spec is None:
+                continue
+            has_overrides = any(
+                override.program is not None or override.bank is not None
+                for override in (spec.sections or {}).values()
+            )
+            if spec.bank is None and spec.program is None and not has_overrides:
+                baked[name] = spec  # only a trim (gain_db): nothing representable in MIDI
+                continue
+            channel = channels.get(name)
+            if channel is not None:
+                settings = (spec.bank, spec.program)
+                if channel in channel_settings and channel_settings[channel] != settings:
+                    warnings.append(
+                        f"Tracks share channel {channel + 1}; the MIDI channel keeps one program timeline."
+                    )
+                channel_settings[channel] = settings
+            track_channels_here = [channel] if channel is not None else []
+            _strip_program_events(midi.tracks[index])
+            _rewrite_track(midi.tracks[index], program_timeline(midi, spec, track_channels_here))
+            baked[name] = spec
+        with store.claimed_path(output_filename, f"{source.stem}_instruments", overwrite) as target:
+            if target == source:
+                raise ValueError("Choose a different output_filename; the original file is never modified.")
+            midi.save(target)
+        return {
+            "source": source.name,
+            "filename": target.name,
+            "path": str(target),
+            "uri": f"midi://{target.name}",
+            "tracks": {name: spec.model_dump() for name, spec in baked.items()},
+            "warnings": warnings,
+        }

@@ -12,6 +12,32 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.15.0] - 2026-10-10
+
+Section-based instrument selection (patch brief milestone 5).
+
+### Added
+
+- **Per-section program/bank overrides** in `set_track_instrument` specs:
+  `{"sections": {"Climax": {"program": 30}}}` switches a track's sound at that section's start
+  without splitting the part into separate tracks. Bank select lands before the program change;
+  sections not listed keep the track's own program/bank; section names are validated against
+  the file's section map and every section's program is validated against the SoundFont.
+- **Held voices keep their preset.** Program changes only affect notes that begin after them
+  (FluidSynth assigns the preset per voice) — verified by a byte-identical render test where a
+  note sustains across the boundary and a differing-render test where a new note starts under
+  the new sound.
+- **`bake_instruments`** writes a copy of a file with the specs' bank/program timeline
+  materialized as real MIDI events (per-section changes at their exact boundaries), with the
+  required `.sf2` per track returned as companion metadata. Shared channels keep one timeline
+  (a MIDI limitation) and are reported in `warnings`.
+
+### Limitations (documented)
+
+- Per-section **SoundFont switching** (different `.sf2` files across sections) is not supported
+  yet; a section preset must be the same file as the track's preset, and a mismatch is rejected
+  with a clear message.
+
 ## [0.14.0] - 2026-10-10
 
 Instrumental reverb and chorus (patch brief milestone 4).

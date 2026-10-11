@@ -9,6 +9,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [Rhythm options](#rhythm-options)
 - [add_track](#add_track)
 - [set_song_sections](#set_song_sections)
+- [bake_instruments](#bake_instruments)
 - [get_midi_file](#get_midi_file)
 - [import_midi](#import_midi)
 - [render_audio](#render_audio)
@@ -234,6 +235,24 @@ integrated over the whole map (not the initial BPM applied to the song). Replace
 section map; the sidecar (`<name>.sections.json`) follows the file through rename and delete.
 Old single-tempo songs simply have no sections and keep working unchanged.
 
+## bake_instruments
+
+Writes a **copy** of a MIDI file with the [set_track_instrument](#set_track_instrument) specs'
+bank/program events baked in as real MIDI events — including per-section overrides at their
+exact boundaries — so other players and DAWs hear the intended instruments without ChordSmith.
+The original is never modified.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | MIDI file in the output folder |
+| `output_filename` | Default: `<name>_instruments` |
+| `overwrite` | Replace an existing copy |
+
+A MIDI file cannot carry a SoundFont, so the result also returns the required `.sf2` per track
+as **companion metadata** (the `tracks` map). Tracks that share a MIDI channel share one program
+timeline — a standard MIDI limitation, reported as a warning when it applies. Tracks whose spec
+is only a `gain_db` trim are listed but have nothing representable to bake.
+
 ## get_midi_file
 
 Returns the MIDI file itself, so clients that only expose tools (no resources) can hand the file
@@ -326,6 +345,7 @@ Each spec has:
 | `preset` | Path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
+| `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
@@ -347,6 +367,11 @@ bank/program is checked against the soundfont it will play from — a miss is an
 what that bank actually has, so nothing falls back silently. The result echoes the **resolved
 preset** per track (e.g. `"128-016 Power"`; bank and program are 0-based). The specs follow the
 file through rename and delete.
+
+**Section overrides** switch a track's program/bank mid-song without splitting it into separate
+tracks: `{"sections": {"Intro": {"program": 24}, "Climax": {"program": 30}}}`. The events land at
+the section boundaries with held notes untouched; per-section `.sf2` switching (different
+SoundFont files) is not supported yet and is rejected with a clear message.
 
 To use your own `.sf2` files, put them where the server can read them and pass that path as
 `preset`: drop them into the output folder (visible to the server as `/data/…` in the Docker

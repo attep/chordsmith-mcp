@@ -186,11 +186,18 @@ class EngineEntry(TypedDict):
     notes: str
 
 
+class SectionOverride(TypedDict):
+    preset: str | None
+    bank: int | None
+    program: int | None
+
+
 class InstrumentTrack(TypedDict):
     engine: str
     preset: str | None
     bank: int | None
     program: int | None
+    sections: dict[str, SectionOverride] | None
     gain_db: float
 
 
@@ -229,6 +236,15 @@ class InstrumentMapResult(TypedDict):
     path: str
     tracks: dict[str, InstrumentTrack]
     resolved: dict[str, str | None]
+
+
+class BakeResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    tracks: dict[str, InstrumentTrack]
+    warnings: list[str]
 
 
 class SectionEntry(TypedDict):
