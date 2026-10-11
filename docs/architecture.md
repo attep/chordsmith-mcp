@@ -48,6 +48,7 @@ Consequences:
 | `offload.py` | Runs long tool bodies on worker threads so renders never block the event loop |
 | `singing.py` | Vocal scores, lyrics mapping, render jobs, mixing (engine dispatch) |
 | `diffsinger.py` | DiffSinger ONNX adapter for English voicebanks (mounted, never bundled) |
+| `diffsinger_worker.py` | The render worker process: phrase-chunked rendering, progress lines, atomic output |
 | `auth.py` | OAuth 2.1 authorization server for HTTP transports (sign-in, DCR/CIMD, PKCE) |
 
 ## Data flow

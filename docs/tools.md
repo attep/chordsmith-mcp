@@ -11,7 +11,9 @@ for something specific ("use drop2 voicing") or understand a result.
 - [set_song_sections](#set_song_sections)
 - [bake_instruments](#bake_instruments)
 - [get_midi_file](#get_midi_file)
+- [get_file](#get_file)
 - [import_midi](#import_midi)
+- [import_audio](#import_audio)
 - [render_audio](#render_audio)
 - [render_audio_job and get_render_job](#render_audio_job-and-get_render_job)
 - [list_chord_types](#list_chord_types)
@@ -268,6 +270,13 @@ to you.
 The signed URL works without the OAuth login and stops working when it expires; the signing
 secret lives in the state folder.
 
+## get_file
+
+Returns **any** output file — MIDI, wav or mp3 — so a render, stem, mix or imported take can be
+checked or handed over. Same options as [get_midi_file](#get_midi_file) (`filename`,
+`return_as`, `expires_in`); `mime_type` follows the file kind. Asking `get_midi_file` for an
+audio file now fails with a pointer here instead of a bare "not found".
+
 ## import_midi
 
 Imports a MIDI file made elsewhere (a DAW, a generator, another assistant) into the output
@@ -287,6 +296,20 @@ The report has: `midi_type`, `ticks_per_beat`, `duration_seconds`, `total_notes`
 events in several tracks, missing tempo/meter events, SysEx events (stored but ignored by
 rendering), no notes. The imported file then works with the whole workflow — analyze,
 sections, per-track instruments, stems and the singing tools.
+
+## import_audio
+
+Imports an audio file (`.wav` or `.mp3`) into the output folder — a vocal take, a render made
+elsewhere, or a piece of a vocal rendered in chunks. The bytes are stored verbatim and the
+result reports `size_bytes`, `sha256`, `duration_seconds`, `sample_rate`, `channels` and (for
+wav) `peak_db`, so the file can be handed to [mix_song_with_vocals](singing.md#mixing-and-export)
+as a `vocal` or a `vocals` segment without guessing what it is.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Name for the imported file, e.g. `"take.wav"` |
+| `data_base64` (required) | The audio bytes, base64-encoded (up to 25 MB decoded) |
+| `overwrite` | Replace an existing file of that name |
 
 ## render_audio
 
@@ -466,9 +489,16 @@ make it return `?` (unknown) or wrong chords. `N.C.` means no notes are sounding
 
 ## list_generated_files
 
-No options. Returns the output folder path and its files (newest first), with size, date, a
-`kind` (`midi`/`wav`/`mp3`) and a link scheme (`midi://` or `audio://`). Rendered audio is
-listed too, so you can confirm a render, stem or mix actually landed on disk.
+Returns the output folder path, a `total` count and its files (newest first), each with size,
+date, a `kind` (`midi`/`wav`/`mp3`), an `empty` flag (0-byte crash leftovers) and a link
+scheme (`midi://` or `audio://`). Rendered audio is listed too, so you can confirm a render,
+stem or mix actually landed on disk.
+
+| Option | Description |
+|---|---|
+| `name_contains` | Only files whose name contains this text (case-insensitive) |
+| `kind` | Only `"midi"`, `"wav"` or `"mp3"` files |
+| `limit` | Most files to return, newest first (default 200) |
 
 ## delete_midi_file and rename_midi_file
 

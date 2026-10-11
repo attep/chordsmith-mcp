@@ -95,11 +95,13 @@ class FileEntry(TypedDict):
     uri: str
     kind: str
     size_bytes: int
+    empty: bool
     modified: str
 
 
 class ListFilesResult(TypedDict):
     output_dir: str
+    total: int
     files: list[FileEntry]
 
 
@@ -203,6 +205,18 @@ class RenderJobResult(TypedDict):
     progress: list[RenderJobTrack] | None
     result: RenderAudioResult | None
     error: str | None
+
+
+class RenderJobEntry(TypedDict):
+    job_id: str
+    status: str
+    created_at: str
+    tracks: list[str] | None
+    error: str | None
+
+
+class RenderJobsResult(TypedDict):
+    jobs: list[RenderJobEntry]
 
 
 class EngineEntry(TypedDict):
@@ -320,6 +334,24 @@ class ImportResult(TypedDict):
     warnings: list[str]
 
 
+class GetFileResult(_FileIdentity, DeliveryFields):
+    mime_type: str
+
+
+class ImportAudioResult(TypedDict):
+    filename: str
+    path: str
+    uri: str
+    size_bytes: int
+    sha256: str
+    mime_type: str
+    format: str
+    duration_seconds: float
+    sample_rate: int
+    channels: int
+    peak_db: float | None
+
+
 class ExportEntry(_FileIdentity, DeliveryFields):
     pass
 
@@ -388,6 +420,8 @@ class ScoreResult(TypedDict):
     source: str
     track: TrackInfo
     tempo_bpm: float
+    tempo_changes: list[TempoChangeEntry]
+    sections: list[SectionEntry]
     transpose: int
     total_seconds: float
     warnings: list[str]
@@ -442,7 +476,24 @@ class JobResult(_JobBase, total=False):
     mode: str | None
     frames: int | None
     peak_db: float | None
+    source: str | None
+    created_at: str | None
+    progress: str | None
     error: str | None
+
+
+class SingingJobEntry(TypedDict):
+    job_id: str
+    status: str
+    source: str | None
+    voice_id: str
+    created_at: str
+    progress: str | None
+    error: str | None
+
+
+class SingingJobsResult(TypedDict):
+    jobs: list[SingingJobEntry]
 
 
 class MixLevels(TypedDict):
@@ -464,6 +515,7 @@ class MixResult(TypedDict):
     backing_levels: dict[str, float] | None
     instruments: dict[str, InstrumentTrack] | None
     effects: EffectsEntry | None
+    vocal_segments: list[dict] | None
     compress: bool | None
     ducking: bool | None
     guide_removed: str

@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import json
 import math
 import time
 import wave
@@ -896,21 +897,27 @@ async def test_diffsinger_job_dispatch(store, fake_engine, monkeypatch):
         )
     ).structuredContent
 
-    def fake_render(specs, output, **kwargs):
-        with wave.open(str(output), "wb") as handle:
-            handle.setnchannels(1)
-            handle.setsampwidth(2)
-            handle.setframerate(44100)
-            handle.writeframes(b"\x01\x00" * 4410)
-        return {
-            "duration_seconds": 0.1,
-            "sample_rate": 44100,
-            "frames": 9,
-            "peak_db": -20.0,
-            "mode": kwargs.get("mode"),
-        }
+    class _FakeWorker:
+        """Stand-in for the render worker process: writes a tiny wav and emits its lines."""
 
-    monkeypatch.setattr(diffsinger, "render", fake_render)
+        def __init__(self, command, **_kwargs):
+            spec = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+            output = Path(spec["output"])
+            with wave.open(str(output), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(44100)
+                handle.writeframes(b"\x01\x00" * 4410)
+            self.stdout = io.StringIO(
+                '{"chunk": 1, "chunks": 1}\n'
+                '{"done": true, "duration_seconds": 0.1, "chunks": 1, "mode": "nectar", "peak_db": -20.0}\n'
+            )
+            self.stderr = io.StringIO("")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(singing.subprocess, "Popen", lambda *args, **kwargs: _FakeWorker(*args, **kwargs))
     started = await _call(
         "render_singing",
         {
@@ -921,7 +928,7 @@ async def test_diffsinger_job_dispatch(store, fake_engine, monkeypatch):
     )
     assert not started.isError
     job = await _wait_for_job(started.structuredContent["job_id"])
-    assert job["status"] == "done"
+    assert job["status"] == "done", job.get("error")
     assert job["mode"] == "nectar"
     assert (store.root / job["filename"]).is_file()
 

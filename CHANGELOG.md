@@ -12,6 +12,43 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.18.0] - 2026-10-10
+
+The abyssal-piece fixes: long vocal renders, restart recovery and the file/listing tools.
+
+### Fixed
+
+- **Full-length vocal renders no longer crash the server.** The acoustic model's attention is
+  O(n²) in frames — a 195-second score needed gigabytes in one inference and took the whole
+  server down (five restarts, exit code 0, no OOM kill: the VM went under it). DiffSinger now
+  renders in **phrase-sized chunks split at rests** (never inside a note; a single long note is
+  its own chunk) and stitches them at exact offsets on a silence canvas. Each job also runs in
+  a **worker process**, so a native crash kills only the worker and the job reports the real
+  error instead of "Session terminated".
+- **No more 0-byte "results".** Renders write to a `.part` file and rename only when complete;
+  the server also sweeps stale empty media files at startup, and the listing flags them.
+
+### Added
+
+- **Scores, mappings and jobs persist** (singing and render jobs) to the state directory and
+  reload at startup; a job that was running when the server went down comes back **failed with
+  the reason**. The "kept for 24 hours" promise is now real.
+- **`list_singing_jobs` and `list_render_jobs`** — find a job whose reply was lost.
+- **`mix_song_with_vocals` accepts `vocals`**: a list of pieces with `start_seconds`, to join
+  takes or a vocal rendered in parts (the issue-3 workaround, now native).
+- **`import_audio`** (wav/mp3, with duration/sample-rate/channels/peak report) and **`get_file`**
+  (fetch any output file; `get_midi_file`'s not-found error now points there).
+- **`list_generated_files` filters** (`name_contains`, `kind`, `limit`) and an `empty` flag.
+- **`prepare_vocal_score` returns the section and tempo map** (`sections`, `tempo_changes`)
+  alongside the starting `tempo_bpm`, so a nine-tempo song is not mistaken for one tempo.
+- Job progress: `get_singing_job` reports `progress` ("rendering phrase 3/7"), plus `source`
+  and `created_at`.
+
+### Changed
+
+- The tools/list payload ceiling was raised from 116 KB to 128 KB and the description budget
+  from 15 KB to 17 KB (four new tools).
+
 ## [0.17.0] - 2026-10-10
 
 Mixing improvements from the Lanterns Below wet-stems test (items 1–2).

@@ -315,16 +315,23 @@ def effect_options(
     return options
 
 
-def _has_audio(path: Path, threshold: int = 2) -> bool:
-    """Whether a wav holds any signal above the noise floor (silent engines fail loudly)."""
+def _has_audio(path: Path) -> bool:
+    """Whether a wav holds any signal at all (silent engines fail loudly).
+
+    The scan is dense (every second sample) and short-circuits on the first nonzero value: a
+    deliberately quiet guide track (velocity 1) still counts as audio, while a broken engine —
+    which produces pure zeros — is caught. The old sparse scan sampled every 16th sample and
+    mistook such guides for silence.
+    """
     import wave
 
     with wave.open(str(path), "rb") as handle:
         frames = handle.readframes(handle.getnframes())
-    return any(
-        abs(int.from_bytes(frames[i : i + 2], "little", signed=True)) >= threshold
-        for i in range(0, len(frames) - 1, 32)
-    )
+    import array
+
+    samples = array.array("h")
+    samples.frombytes(frames)
+    return any(samples[::2])
 
 
 class FluidSynthRenderer:

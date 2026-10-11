@@ -33,12 +33,20 @@ backing. Two engines are supported:
    word, a warning suggests swapping them. `holds` merges a note into the following ones (one
    sustained pitch).
 3. `render_singing` starts a background job and returns immediately; `get_singing_job` reports
-   `queued`, `running`, `done` (with the vocal file) or `failed` (with the error). Repeating the
-   same request reuses the finished job instead of rendering twice.
+   `queued`, `running`, `done` (with the vocal file) or `failed` (with the error), plus
+   `progress` while it runs. Repeating the same request reuses the finished job instead of
+   rendering twice. **Long scores render safely**: DiffSinger runs in a worker process and
+   renders phrase-sized chunks split at rests (the model's memory grows with the square of the
+   score's length, so a whole three-minute song cannot render in one pass), then stitches them
+   at exact offsets. Scores, mappings and jobs are saved to disk — a restart keeps them, and a
+   job that was running when the server went down comes back failed with the reason (use
+   `list_singing_jobs` to find one).
 4. `mix_song_with_vocals` renders the backing **without the guide track** and balances levels by
    measurement: the vocal is placed `vocal_level_db` (default 6 dB) above the backing's active
    level, `vocal_reverb` is off by default, the backing can carry FluidSynth `reverb`/`chorus`
-   (per-track amounts via spec sends), and the mix is turned down if it would clip. A
+   (per-track amounts via spec sends), and the mix is turned down if it would clip. Give it one
+   `vocal` file (or job id), or `vocals`: a list of pieces with `start_seconds` that are joined
+   first — for several takes or a vocal rendered in parts. A
    [section map](tools.md#set_song_sections) is honored end to end: the score's note seconds
    integrate every tempo change, so lyrics stay in sync through tempo and meter shifts.
 5. `export_vocal_song` returns the mix as WAV and MP3, the vocal alone, and the untouched MIDI —

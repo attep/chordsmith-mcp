@@ -66,6 +66,19 @@ class NoteInput(BaseModel):
         return self
 
 
+class VocalSegment(BaseModel):
+    """One vocal piece for mix_song_with_vocals, e.g. {"file": "verse.wav", "start_seconds": 12.5}.
+
+    Use a list of segments to mix several takes or to join a vocal that was rendered in pieces;
+    each piece is placed at its start time and the pieces are summed into one vocal track.
+    """
+
+    file: str = Field(description="Vocal file in the output folder, or a finished singing job id.")
+    start_seconds: float = Field(
+        0.0, ge=0.0, le=100000.0, description="Where this piece starts in the song, in seconds."
+    )
+
+
 class SongSection(BaseModel):
     """One song section, e.g. {"name": "Intro", "bars": 8, "bpm": 140}.
 

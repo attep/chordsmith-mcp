@@ -9,10 +9,15 @@ combined), so successful stems are never redone. Jobs live 24 hours.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import mido
@@ -24,6 +29,8 @@ from chordsmith import delivery, renderers, results
 from chordsmith.models import ChorusSettings, ReverbSettings
 
 RENDER_JOB_TTL_SECONDS = 24 * 3600
+
+logger = logging.getLogger(__name__)
 
 _CREATES = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
@@ -56,11 +63,76 @@ _JOBS: dict[str, RenderJob] = {}
 _JOBS_LOCK = threading.Lock()
 
 
+def _state_file() -> Path:
+    return delivery.state_dir() / "render_jobs.json"
+
+
+def _persist() -> None:
+    """Save the render job records so a restart never loses a running job's history."""
+    try:
+        with _JOBS_LOCK:
+            payload = {
+                key: {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "created_at": job.created_at,
+                    "progress": dict(job.progress),
+                    "errors": dict(job.errors),
+                    "result": job.result,
+                    "error": job.error,
+                }
+                for key, job in _JOBS.items()
+            }
+        target = _state_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        part.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(part, target)
+    except OSError as exc:
+        logger.warning("Could not persist render jobs: %s", exc)
+
+
+def _load() -> None:
+    """Reload render jobs; ones cut off by a restart come back failed, with the reason."""
+    target = _state_file()
+    if not target.is_file():
+        return
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not load render jobs: %s", exc)
+        return
+    interrupted = 0
+    with _JOBS_LOCK:
+        for key, data in payload.items():
+            job = RenderJob(
+                job_id=data["job_id"],
+                status=data["status"],
+                created_at=data["created_at"],
+                progress=dict(data.get("progress") or {}),
+                errors=dict(data.get("errors") or {}),
+                result=data.get("result"),
+                error=data.get("error"),
+            )
+            if job.status in ("queued", "running"):
+                job.status = "failed"
+                job.error = "The server restarted during the render; start it again."
+                interrupted += 1
+            _JOBS[key] = job
+    if interrupted:
+        logger.warning("Marked %d interrupted render job(s) as failed", interrupted)
+        _persist()
+
+
 def _prune() -> None:
     cutoff = time.time() - RENDER_JOB_TTL_SECONDS
+    removed = False
     with _JOBS_LOCK:
         for job_id in [key for key, job in _JOBS.items() if job.created_at < cutoff]:
             del _JOBS[job_id]
+            removed = True
+    if removed:
+        _persist()
 
 
 def _payload(job: RenderJob) -> dict:
@@ -86,11 +158,13 @@ def _run(job: RenderJob, runner, args: dict) -> None:
     except Exception as exc:  # the job must never die silently
         job.error = str(exc)
         job.status = "failed"
+    _persist()
 
 
 def register(mcp: FastMCP, store_provider, runner) -> None:
     """Register the render job tools; ``runner(args, set_state) -> result`` does the render."""
     _runner = runner
+    _load()
 
     @mcp.tool(title="Render audio (background job)", annotations=_CREATES)
     def render_audio_job(
@@ -164,6 +238,7 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
             job.progress = {name: "pending" for name in wanted}
         with _JOBS_LOCK:
             _JOBS[job.job_id] = job
+        _persist()
         args = {
             "filename": filename,
             "format": format,
@@ -197,3 +272,29 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
         if job is None:
             raise ValueError(f"Render job '{job_id}' not found (jobs expire after 24 hours).")
         return _payload(job)
+
+    @mcp.tool(title="List render jobs", annotations=_READ_ONLY)
+    def list_render_jobs() -> results.RenderJobsResult:
+        """Return the recent render jobs (newest first): id, status, tracks and progress.
+
+        Read-only; use it to find a job whose reply was lost — records survive server restarts,
+        and a job that was running when the server went down comes back reported as failed with
+        the reason. Jobs live 24 hours.
+        """
+        _prune()
+        with _JOBS_LOCK:
+            jobs = sorted(_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        return {
+            "jobs": [
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "created_at": datetime.fromtimestamp(job.created_at, timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "tracks": sorted(job.progress) or None,
+                    "error": job.error,
+                }
+                for job in jobs
+            ]
+        }

@@ -125,6 +125,53 @@ def _effect_options(effects: dict[str, float | int] | None) -> list[str]:
     return args
 
 
+def probe_media(path: Path) -> dict:
+    """Duration, sample rate and channels of an audio file.
+
+    Uses ffprobe when available (any format); falls back to the wave module for wav files.
+    """
+    import json
+
+    ffprobe = os.environ.get("CHORDSMITH_FFPROBE") or shutil.which("ffprobe")
+    if ffprobe:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=sample_rate,channels,duration",
+                    "-of",
+                    "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            stream = json.loads(result.stdout)["streams"][0]
+            return {
+                "duration_seconds": round(float(stream.get("duration") or 0.0), 3),
+                "sample_rate": int(stream.get("sample_rate") or 0),
+                "channels": int(stream.get("channels") or 0),
+            }
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, IndexError, json.JSONDecodeError):
+            pass
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            return {
+                "duration_seconds": round(handle.getnframes() / rate, 3),
+                "sample_rate": rate,
+                "channels": handle.getnchannels(),
+            }
+    except (OSError, wave.Error) as exc:
+        raise AudioError(f"Could not read '{path.name}': {exc}") from exc
+
+
 def render(
     midi_path: Path,
     target: Path,

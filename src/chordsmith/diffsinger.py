@@ -16,7 +16,7 @@ import logging
 import os
 import threading
 import wave
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,8 @@ FRAME_MS = 1000.0 * HOP_SIZE / SAMPLE_RATE
 HEAD_FRAMES = 8
 TAIL_FRAMES = 8
 DEFAULT_STEPS = 20
+DEFAULT_CHUNK_SECONDS = 30.0  # long scores render in phrase-sized chunks (attention is O(n^2))
+MIN_CHUNK_GAP_SECONDS = 0.3  # a gap at least this long is a clean split point (a rest)
 DEFAULT_DEPTH = 0.6
 MODES = {"root": "Root", "fragrance": "Fragrance", "nectar": "Nectar"}
 CREDIT = "Hoshino Hanami ~AI*dol~ by Lotte V"
@@ -606,6 +608,98 @@ def _word_inputs(
         else:
             word_dur.append(TAIL_FRAMES)
     return word_div, word_dur
+
+
+@dataclass
+class Chunk:
+    """One renderable phrase: notes with their times shifted to start at zero."""
+
+    start_seconds: float
+    notes: list[NoteSpec]
+
+    @property
+    def seconds(self) -> float:
+        return max((note.start_seconds + note.seconds for note in self.notes), default=0.0)
+
+
+def plan_chunks(
+    notes: list[NoteSpec],
+    max_seconds: float = DEFAULT_CHUNK_SECONDS,
+    min_gap: float = MIN_CHUNK_GAP_SECONDS,
+) -> list[Chunk]:
+    """Split notes into phrase-sized chunks so long scores render with bounded memory.
+
+    The acoustic model's attention is O(n^2) in frames, so a whole three-minute score is what
+    makes a render run out of memory; phrase chunks bound it by the phrase. Boundaries are
+    placed only at note boundaries (never inside a note) and prefer the largest rest in the
+    window, so a chunk is a singable phrase. A single note longer than ``max_seconds`` becomes
+    its own chunk. Notes in a chunk are shifted to start at zero; the chunk remembers its
+    absolute start so the caller can stitch at exact offsets.
+    """
+    ordered = sorted(notes, key=lambda note: note.start_seconds)
+    chunks: list[Chunk] = []
+    total = len(ordered)
+    index = 0
+    while index < total:
+        start = ordered[index].start_seconds
+        cursor = index + 1
+        while cursor < total and (
+            ordered[cursor].start_seconds + ordered[cursor].seconds - start <= max_seconds
+        ):
+            cursor += 1
+        if cursor < total:
+            # the chunk must end before `cursor`; prefer the largest rest in (index, cursor]
+            best: int | None = None
+            best_gap = -1.0
+            for candidate in range(index + 1, cursor + 1):
+                previous = ordered[candidate - 1]
+                gap = ordered[candidate].start_seconds - (previous.start_seconds + previous.seconds)
+                if gap >= min_gap and gap > best_gap:
+                    best_gap = gap
+                    best = candidate
+            cut = best if best is not None else cursor
+        else:
+            cut = total
+        chunk_notes = [
+            replace(note, start_seconds=round(note.start_seconds - start, 6)) for note in ordered[index:cut]
+        ]
+        chunks.append(Chunk(start_seconds=start, notes=chunk_notes))
+        index = cut
+    return chunks
+
+
+def stitch_chunks(
+    rendered: list[tuple[float, Path]], output: Path, total_seconds: float | None = None
+) -> float:
+    """Sum rendered chunk wavs onto a silence canvas at their exact start offsets.
+
+    Chunks never overlap a note; where a release tail overlaps the next chunk's start the tails
+    sum (overlap-add), which is what a continuous render would have produced. Writes a 44.1 kHz
+    mono wav and returns its duration in seconds.
+    """
+    _require_dependencies()
+    pieces: list[tuple[int, np.ndarray]] = []
+    rate = SAMPLE_RATE
+    for start, path in rendered:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            samples = np.frombuffer(handle.readframes(handle.getnframes()), dtype=np.int16)
+        pieces.append((round(start * rate), samples.astype(np.float32) / 32768.0))
+    length = max((offset + len(samples) for offset, samples in pieces), default=0)
+    if total_seconds is not None:
+        length = max(length, round(total_seconds * rate))
+    canvas = np.zeros(length, dtype=np.float32)
+    for offset, samples in pieces:
+        canvas[offset : offset + len(samples)] += samples
+    peak = float(np.abs(canvas).max())
+    if peak > 0.891:  # keep exports below -1 dBFS
+        canvas = canvas * (0.891 / peak)
+    with wave.open(str(output), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes((np.clip(canvas, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
+    return length / rate
 
 
 def render(

@@ -88,8 +88,11 @@ class FileStore:
     def existing_path(self, name: str) -> Path:
         path = self._inside(self.root / self.safe_name(name))
         if not path.is_file():
-            available = ", ".join(f["filename"] for f in self.list_files()[:20]) or "none yet"
-            raise StorageError(f"File '{name}' not found. Available files: {available}.")
+            midi = [entry["filename"] for entry in self.list_files() if entry["kind"] == "midi"][:20]
+            available = ", ".join(midi) or "none yet"
+            raise StorageError(
+                f"File '{name}' not found. MIDI files: {available}. (Audio files are served by get_file.)"
+            )
         return path
 
     def existing_media_path(self, name: str) -> Path:
@@ -116,6 +119,22 @@ class FileStore:
         source.rename(target)
         return target
 
+    def remove_empty_media(self) -> list[str]:
+        """Delete 0-byte media files and return their names.
+
+        These are crash leftovers: a job that claimed its output name and then died left a
+        0-byte file that looks like a result. The sweep runs at server startup, when nothing can
+        be writing (all writes land via a ``.part`` file and a rename, so live files are never
+        seen empty).
+        """
+        root = self.ensure_root()
+        removed: list[str] = []
+        for path in root.iterdir():
+            if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS and path.stat().st_size == 0:
+                path.unlink()
+                removed.append(path.name)
+        return removed
+
     def list_files(self) -> list[dict]:
         root = self.ensure_root()
         files = []
@@ -136,6 +155,7 @@ class FileStore:
                     "uri": f"{'audio' if kind != 'midi' else 'midi'}://{path.name}",
                     "kind": kind,
                     "size_bytes": stat.st_size,
+                    "empty": stat.st_size == 0,
                     "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(
                         timespec="seconds"
                     ),

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import tempfile
+import wave
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -491,15 +492,34 @@ def analyze_midi(
 
 
 @mcp.tool(title="List generated files", annotations=READ_ONLY)
-def list_generated_files() -> results.ListFilesResult:
+def list_generated_files(
+    name_contains: Annotated[
+        str | None, Field(description="Only files whose name contains this text (case-insensitive).")
+    ] = None,
+    kind: Annotated[
+        Literal["midi", "wav", "mp3"] | None, Field(description="Only files of this kind.")
+    ] = None,
+    limit: Annotated[
+        int, Field(ge=1, le=2000, description="Most files to return, newest first (default 200).")
+    ] = 200,
+) -> results.ListFilesResult:
     """Return the files in the output folder (MIDI and rendered audio, newest first).
 
-    Read-only; each entry has a kind (midi/wav/mp3), so you can confirm that a render, stem or
-    mix actually landed on disk. Use it to find file names for get_midi_file, analyze_midi,
-    transpose_midi or the singing tools.
+    Read-only; each entry has a kind (midi/wav/mp3), a size and an ``empty`` flag, so you can
+    confirm a render landed and spot 0-byte leftovers. Filter with ``name_contains`` and
+    ``kind`` and cap the reply with ``limit``; ``total`` says how many files matched before the
+    cap. Use it to find file names for get_midi_file, get_file, analyze_midi, transpose_midi or
+    the singing tools.
     """
     root = store.ensure_root()
-    return {"output_dir": str(root), "files": store.list_files()}
+    files = store.list_files()
+    if name_contains:
+        needle = name_contains.lower()
+        files = [entry for entry in files if needle in entry["filename"].lower()]
+    if kind:
+        files = [entry for entry in files if entry["kind"] == kind]
+    total = len(files)
+    return {"output_dir": str(root), "total": total, "files": files[:limit]}
 
 
 ReturnAs = delivery.ReturnAs
@@ -525,6 +545,84 @@ def get_midi_file(
     result = delivery.deliver_file(path.name, data, return_as, expires_in)
     result["mime_type"] = "audio/midi"
     return result
+
+
+@mcp.tool(title="Get file", annotations=READ_ONLY)
+def get_file(
+    filename: Annotated[str, Field(description="File in the output folder: .mid, .wav or .mp3.")],
+    return_as: ReturnAs = "base64",
+    expires_in: Annotated[
+        int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
+    ] = delivery.DEFAULT_TTL_SECONDS,
+) -> results.GetFileResult:
+    """Return any output file — MIDI, wav or mp3 — so it can be checked or handed to the user.
+
+    Read-only; like get_midi_file but for every kind of file: rendered stems, mixes, vocal
+    takes, imports. base64 returns the bytes inline (with size and sha256); url returns a
+    signed, expiring link (needs CHORDSMITH_PUBLIC_URL). Use list_generated_files to find
+    names.
+    """
+    path = store.existing_media_path(filename)
+    data = path.read_bytes()
+    result = delivery.deliver_file(path.name, data, return_as, expires_in)
+    suffix = path.suffix.lower()
+    result["mime_type"] = {".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(suffix, "audio/midi")
+    return result
+
+
+MAX_IMPORT_AUDIO_BYTES = 25 * 1024 * 1024  # import_audio: keep one base64 call to a sane size
+
+
+@mcp.tool(title="Import audio", annotations=CREATES)
+def import_audio(
+    filename: Annotated[str, Field(description="Name for the imported file, e.g. 'take.wav' or 'take.mp3'.")],
+    data_base64: Annotated[str, Field(description="The audio bytes, base64-encoded (up to 25 MB decoded).")],
+    overwrite: Overwrite = False,
+) -> results.ImportAudioResult:
+    """Import an audio file (wav or mp3) into the output folder, e.g. a vocal take or a render
+    made elsewhere.
+
+    The bytes are stored verbatim; the result reports size, sha256, duration, sample rate,
+    channels and (for wav) the sample peak, so the file can be used with mix_song_with_vocals
+    (as a vocal or a vocal segment) without guessing what it is. MP3 metadata needs ffprobe
+    (part of the Docker image's ffmpeg).
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".wav", ".mp3"):
+        raise ValueError("Import a .wav or .mp3 file (MIDI files go through import_midi).")
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("data_base64 is not valid base64.") from None
+    if len(data) > MAX_IMPORT_AUDIO_BYTES:
+        raise ValueError(
+            f"The file is {len(data)} bytes; the import limit is {MAX_IMPORT_AUDIO_BYTES} bytes."
+        )
+    if suffix == ".wav" and data[:4] != b"RIFF":
+        raise ValueError("The bytes are not a RIFF wav file.")
+    with store.claimed_path(filename, "imported", overwrite, suffix) as target:
+        target.write_bytes(data)
+    try:
+        probe = audio.probe_media(target)
+    except audio.AudioError as exc:
+        raise ValueError(str(exc)) from None
+    peak_db: float | None = None
+    if suffix == ".wav":
+        try:
+            peak_db = round(audio.wav_peak_db(target), 2)
+        except (OSError, wave.Error):
+            peak_db = None
+    return {
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"audio://{target.name}",
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "mime_type": "audio/wav" if suffix == ".wav" else "audio/mpeg",
+        "format": suffix[1:],
+        **probe,
+        "peak_db": peak_db,
+    }
 
 
 @mcp.tool(title="Import MIDI", annotations=CREATES)
@@ -1178,6 +1276,9 @@ def main() -> None:
     args = parser.parse_args()
     mcp.settings.host = args.host
     mcp.settings.port = args.port
+    removed = store.remove_empty_media()
+    if removed:
+        logger.warning("Removed %d empty file(s) left by a crash: %s", len(removed), ", ".join(removed))
     if args.transport != "stdio":
         public_url = os.environ.get("CHORDSMITH_PUBLIC_URL", "").strip().rstrip("/")
         if public_url:

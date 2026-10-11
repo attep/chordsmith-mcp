@@ -16,13 +16,15 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 import wave
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -32,8 +34,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from chordsmith import audio, delivery, diffsinger, renderers, results
-from chordsmith.models import ChorusSettings, ReverbSettings
+from chordsmith import audio, delivery, diffsinger, renderers, results, sections
+from chordsmith.models import ChorusSettings, ReverbSettings, VocalSegment
 from chordsmith.offload import offloaded
 from chordsmith.storage import FileStore
 from chordsmith.theory import midi_note_name
@@ -175,6 +177,8 @@ class SingingJob:
     settings: dict
     cache_key: str
     created_at: float
+    source: str = ""
+    progress: str | None = None
     echo_settings: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
@@ -190,14 +194,95 @@ class _Registry:
 
     def prune(self) -> None:
         cutoff = time.time() - REGISTRY_TTL_SECONDS
+        removed = False
         with self.lock:
             for store_dict in (self.scores, self.mappings, self.jobs):
                 for key in [k for k, v in store_dict.items() if v.created_at < cutoff]:
                     del store_dict[key]
+                    removed = True
+        if removed:
+            _persist_singing()
 
 
 _registry = _Registry()
 _get_store: Callable[[], FileStore] | None = None
+
+
+# ------------------------------------------------------------------ registry persistence
+
+
+def _singing_state_dir() -> Path:
+    return delivery.state_dir() / "singing"
+
+
+def _write_state(target: Path, payload: dict) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    part.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(part, target)
+
+
+def _persist_singing() -> None:
+    """Save scores, mappings and jobs as JSON in the state directory.
+
+    The records used to live only in memory, so every restart lost the whole singing setup and
+    any running job; they now survive restarts (and the state directory is the one the signed
+    download links already use).
+    """
+    try:
+        directory = _singing_state_dir()
+        with _registry.lock:
+            scores = {key: asdict(value) for key, value in _registry.scores.items()}
+            mappings = {key: asdict(value) for key, value in _registry.mappings.items()}
+            jobs = {key: asdict(value) for key, value in _registry.jobs.items()}
+        _write_state(directory / "scores.json", scores)
+        _write_state(directory / "mappings.json", mappings)
+        _write_state(directory / "jobs.json", jobs)
+    except OSError as exc:
+        logger.warning("Could not persist the singing registry: %s", exc)
+
+
+def _load_singing() -> None:
+    """Reload the registry; jobs cut off by a restart come back failed, with the reason."""
+    directory = _singing_state_dir()
+    loaded = {"scores": {}, "mappings": {}, "jobs": {}}
+    for name, key in (("scores.json", "scores"), ("mappings.json", "mappings"), ("jobs.json", "jobs")):
+        path = directory / name
+        if not path.is_file():
+            continue
+        try:
+            loaded[key] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load %s: %s", path.name, exc)
+    interrupted = 0
+    with _registry.lock:
+        for key, data in loaded["scores"].items():
+            try:
+                data["notes"] = [ScoreNote(**note) for note in data.get("notes", [])]
+                _registry.scores[key] = VocalScore(**data)
+            except TypeError as exc:
+                logger.warning("Skipping unreadable score %s: %s", key, exc)
+        for key, data in loaded["mappings"].items():
+            try:
+                data["notes"] = [MappingNote(**note) for note in data.get("notes", [])]
+                _registry.mappings[key] = VocalMapping(**data)
+            except TypeError as exc:
+                logger.warning("Skipping unreadable mapping %s: %s", key, exc)
+        for key, data in loaded["jobs"].items():
+            try:
+                job = SingingJob(**data)
+            except TypeError as exc:
+                logger.warning("Skipping unreadable job %s: %s", key, exc)
+                continue
+            if job.status in ("queued", "running"):
+                job.status = "failed"
+                job.error = "The server restarted during the render; start it again."
+                job.progress = None
+                interrupted += 1
+            _registry.jobs[key] = job
+    if interrupted:
+        logger.warning("Marked %d interrupted singing job(s) as failed", interrupted)
+        _persist_singing()
 
 
 # ------------------------------------------------------------------ score preparation
@@ -398,11 +483,31 @@ def _score_prefers_flats(score: VocalScore) -> bool:
 
 def _score_payload(score: VocalScore) -> dict:
     flats = _score_prefers_flats(score)
+    source_path = Path(score.source)
+    store = _get_store()
+    if store is not None:
+        try:
+            source_path = store.existing_path(score.source)
+        except Exception:  # the source may have been deleted; the section map is then empty
+            source_path = Path(score.source)
+    section_map = sections.read_sections(source_path) if source_path.is_file() else []
+    tempo_changes: list[dict] = []
+    try:
+        midi = mido.MidiFile(source_path)
+        tempo_changes = [
+            {"beat": round(tick / midi.ticks_per_beat, 3), "bpm": round(bpm, 2)}
+            for tick, bpm in _tempo_map(midi)
+        ]
+    except (OSError, ValueError):
+        tempo_changes = [{"beat": 0.0, "bpm": round(score.tempo_bpm, 2)}]
     return {
         "score_id": score.score_id,
         "source": score.source,
         "track": {"index": score.track_index + 1, "name": score.track_name},
+        # the single tempo is the starting tempo; tempo_changes and sections carry the rest
         "tempo_bpm": score.tempo_bpm,
+        "tempo_changes": tempo_changes,
+        "sections": [section.payload() for section in section_map],
         "transpose": score.transpose,
         "total_seconds": round(score.total_seconds, 3),
         "warnings": score.warnings,
@@ -829,33 +934,72 @@ def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore, p
     if mode not in diffsinger.MODES:
         raise SingingError(f"Unknown DiffSinger mode '{mode}'; use one of {', '.join(diffsinger.MODES)}.")
     specs = [
-        diffsinger.NoteSpec(
-            phonemes=note.phonemes or [],
-            start_seconds=note.start_seconds,
-            seconds=note.seconds,
-            midi=note.key or 60,
-        )
+        {
+            "phonemes": note.phonemes or [],
+            "start_seconds": note.start_seconds,
+            "seconds": note.seconds,
+            "midi": note.key or 60,
+        }
         for note in mapping.notes
         if not note.is_rest
     ]
     if not specs:
         raise SingingError("Nothing to sing: every note is a rest.")
-    if any(not spec.phonemes for spec in specs):
+    if any(not spec["phonemes"] for spec in specs):
         raise SingingError("English notes need phonemes; re-run map_vocal_lyrics with language='en'.")
-    info = diffsinger.render(
-        specs,
-        path,
-        mode=mode,
-        steps=int(job.settings.get("steps", 20)),
-        depth=float(job.settings.get("depth", 0.6)),
-        velocity=float(job.settings.get("velocity", 1.0)),
-        gender=float(job.settings.get("gender", 0.0)),
-        expr=float(job.settings.get("expr", 1.0)),
-        energy=float(job.settings.get("energy", 1.0)),
-        seed=job.settings.get("seed"),
-        total_seconds=mapping.total_seconds,
-    )
-    return {"info": info}
+    # The render runs in a worker process (chunked at rests): a long score's acoustic model
+    # needs memory that scales with the phrase, and a native crash must never take the server
+    # down with it. Progress arrives as JSON lines on stdout.
+    spec = {
+        "notes": specs,
+        "output": str(path),
+        "mode": mode,
+        "steps": int(job.settings.get("steps", 20)),
+        "depth": float(job.settings.get("depth", 0.6)),
+        "velocity": float(job.settings.get("velocity", 1.0)),
+        "gender": float(job.settings.get("gender", 0.0)),
+        "expr": float(job.settings.get("expr", 1.0)),
+        "energy": float(job.settings.get("energy", 1.0)),
+        "seed": job.settings.get("seed"),
+        "total_seconds": mapping.total_seconds,
+    }
+    with tempfile.TemporaryDirectory() as scratch:
+        spec_path = Path(scratch) / "render_spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        process = subprocess.Popen(
+            [sys.executable, "-m", "chordsmith.diffsinger_worker", str(spec_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        info: dict | None = None
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "chunk" in message:
+                job.progress = f"rendering phrase {message['chunk']}/{message['chunks']}"
+            if message.get("done"):
+                info = message
+        stderr = process.stderr.read() if process.stderr is not None else ""
+        code = process.wait()
+    if code != 0 or info is None:
+        detail = (stderr or "").strip().splitlines()[-6:]
+        reason = " | ".join(detail) if detail else "no error output"
+        raise SingingError(f"The render worker exited (code {code}): {reason}")
+    return {
+        "info": {
+            "duration_seconds": info.get("duration_seconds"),
+            "chunks": info.get("chunks"),
+            "mode": info.get("mode"),
+            "peak_db": info.get("peak_db"),
+        }
+    }
 
 
 def _run_job(
@@ -867,12 +1011,15 @@ def _run_job(
         store = _get_store()
         assert store is not None
         # claim the name up front: overlapping jobs must never share a file (and the placeholder
-        # is removed again if the render fails)
+        # is removed again if the render fails); the audio itself lands via a .part file and a
+        # rename, so a crash can never leave a half-written (or 0-byte) result
         with store.claimed_path(None, f"{Path(score.source).stem}_vocal", extension=".wav") as path:
             if engine == "voicevox":
                 assert speakers is not None
                 result = _run_voicevox(job, mapping, score, *speakers)
-                path.write_bytes(result["data"])
+                part = path.with_name(path.stem + ".part" + path.suffix)
+                part.write_bytes(result["data"])
+                os.replace(part, path)
             else:
                 result = _run_diffsinger(job, mapping, score, path)
         with wave.open(str(path), "rb") as handle:
@@ -893,11 +1040,14 @@ def _run_job(
             job.result["query_voice_id"] = result["query_voice_id"]
         else:
             job.result.update({k: v for k, v in result["info"].items() if k not in ("duration_seconds",)})
+        job.progress = None
         job.status = "done"
+        _persist_singing()
     except Exception as exc:  # the job must fail loudly, never render twice
         logger.warning("Singing job %s failed: %s", job.job_id, exc)
         job.status = "failed"
         job.error = str(exc)
+        _persist_singing()
 
 
 def start_job(
@@ -930,10 +1080,12 @@ def start_job(
         settings=settings,
         cache_key=cache_key,
         created_at=time.time(),
+        source=Path(score.source).name,
         echo_settings=echo_settings if echo_settings is not None else dict(settings),
     )
     with _registry.lock:
         _registry.jobs[job.job_id] = job
+    _persist_singing()
     thread = threading.Thread(target=_run_job, args=(job, mapping, score, speakers), daemon=True)
     thread.start()
     return job, False
@@ -944,6 +1096,9 @@ def _job_payload(job: SingingJob) -> dict:
         "job_id": job.job_id,
         "status": job.status,
         "voice_id": job.voice_id,
+        "source": job.source or None,
+        "created_at": datetime.fromtimestamp(job.created_at, timezone.utc).isoformat(timespec="seconds"),
+        "progress": job.progress,
         # the full settings (defaults included), so the record shows exactly what was used
         "settings": job.echo_settings or job.settings,
     }
@@ -1227,6 +1382,31 @@ def active_levels(
     return backing_db, vocal_db
 
 
+def _resolve_vocal_path(name: str, store: FileStore) -> Path:
+    """A vocal file name or a finished singing job id -> the wav path."""
+    with _registry.lock:
+        job = _registry.jobs.get(name)
+    if job is not None:
+        if job.status != "done" or job.result is None:
+            raise SingingError(f"Job '{name}' is {job.status}; wait for it to finish first.")
+        return store.existing_media_path(job.result["filename"])
+    return store.existing_media_path(name)
+
+
+def _combine_vocals(segments: list[tuple[Path, float]], target: Path) -> None:
+    """Place each vocal piece at its start time and sum them into one vocal track."""
+    args = ["-y", "-loglevel", "error"]
+    for path, _ in segments:
+        args += ["-i", str(path)]
+    filters = []
+    labels = []
+    for index, (_, start_seconds) in enumerate(segments):
+        filters.append(f"[{index}:a]adelay={round(start_seconds * 1000)}:all=1[v{index}]")
+        labels.append(f"[v{index}]")
+    filters.append(f"{''.join(labels)}amix=inputs={len(segments)}:duration=longest:normalize=0[m]")
+    _ffmpeg([*args, "-filter_complex", ";".join(filters), "-map", "[m]", "-ar", "44100", str(target)])
+
+
 def mix_tracks(
     backing: Path,
     vocal: Path,
@@ -1442,6 +1622,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     """Register the singing tools on the ChordSmith server."""
     global _get_store
     _get_store = store_provider
+    _load_singing()
 
     @mcp.tool(title="List singing voices", annotations=_READ_ONLY)
     def list_singing_voices(
@@ -1577,6 +1758,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         score = build_score(store.existing_path(filename), track, transpose, legato)
         with _registry.lock:
             _registry.scores[score.score_id] = score
+        _persist_singing()
         return _score_payload(score)
 
     @mcp.tool(title="Map vocal lyrics", annotations=_READ_ONLY)
@@ -1628,6 +1810,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             _registry.versions[score_id] = _registry.versions.get(score_id, 0) + 1
             mapping.version = _registry.versions[score_id]
             _registry.mappings[mapping.mapping_id] = mapping
+        _persist_singing()
         return _mapping_payload(mapping)
 
     @mcp.tool(title="Render singing", annotations=_CREATES)
@@ -1685,11 +1868,51 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             raise SingingError(f"Job '{job_id}' not found (jobs expire after 24 hours).")
         return _job_payload(job)
 
+    @mcp.tool(title="List singing jobs", annotations=_READ_ONLY)
+    def list_singing_jobs() -> results.SingingJobsResult:
+        """Return the recent singing jobs (newest first): id, status, source and progress.
+
+        Read-only; use it to find a job whose reply was lost — jobs now survive server restarts
+        (records are saved to disk), and a job that was running when the server went down comes
+        back reported as failed with the reason. Jobs live 24 hours.
+        """
+        _registry.prune()
+        with _registry.lock:
+            jobs = sorted(_registry.jobs.values(), key=lambda job: job.created_at, reverse=True)
+        return {
+            "jobs": [
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "source": job.source or None,
+                    "voice_id": job.voice_id,
+                    "created_at": datetime.fromtimestamp(job.created_at, timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "progress": job.progress,
+                    "error": job.error,
+                }
+                for job in jobs
+            ]
+        }
+
     @mcp.tool(title="Mix song with vocals", annotations=_CREATES)
     @offloaded
     def mix_song_with_vocals(
         source: Annotated[str, Field(description="The MIDI file the score came from.")],
-        vocal: Annotated[str, Field(description="Vocal filename from a finished job, or the job id.")],
+        vocal: Annotated[
+            str | None,
+            Field(description="Vocal filename from a finished job, or the job id. Give this, or vocals."),
+        ] = None,
+        vocals: Annotated[
+            list[VocalSegment] | None,
+            Field(
+                description="Several vocal pieces to join first, e.g. [{'file': 'verse1.wav', "
+                "'start_seconds': 0}, {'file': 'verse2.wav', 'start_seconds': 41.2}] — for takes "
+                "or a vocal rendered in pieces. Each piece is placed at its start time and "
+                "summed into one vocal track. Give this, or vocal."
+            ),
+        ] = None,
         guide_track: Annotated[
             str | int | None,
             Field(
@@ -1798,14 +2021,20 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         store = _get_store()
         assert store is not None
         source_path = store.existing_path(source)
-        with _registry.lock:
-            job = _registry.jobs.get(vocal)
-        if job is not None:
-            if job.status != "done" or job.result is None:
-                raise SingingError(f"Job '{vocal}' is {job.status}; wait for it to finish first.")
-            vocal_path = store.existing_media_path(job.result["filename"])
+        if vocals and vocal:
+            raise SingingError("Give either vocal or vocals, not both.")
+        if not vocals and not vocal:
+            raise SingingError("Give a vocal file (or job id), or a list of vocals with their start_seconds.")
+        segment_list: list[dict] | None = None
+        resolved_segments: list[tuple[Path, float]] = []
+        if vocals:
+            segment_list = [segment.model_dump() for segment in vocals]
+            resolved_segments = [
+                (_resolve_vocal_path(segment.file, store), segment.start_seconds) for segment in vocals
+            ]
+            vocal_path = None  # built from the segments inside the claim block below
         else:
-            vocal_path = store.existing_media_path(vocal)
+            vocal_path = _resolve_vocal_path(vocal, store)
         midi = mido.MidiFile(source_path)
         track_index = find_track(midi, guide_track)
         names = _track_names(midi)
@@ -1833,8 +2062,16 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
             # the same backing file.
             store.claimed_path(None, f"{source_path.stem}_backing", extension=".wav") as backing_wav,
+            store.claimed_path(None, f"{source_path.stem}_vocals", extension=".wav") as vocals_wav,
             store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
         ):
+            if resolved_segments:
+                # several vocal pieces (takes, or a vocal rendered in chunks): place each at its
+                # start time and sum them into one vocal track
+                _combine_vocals(resolved_segments, vocals_wav)
+                vocal_path = vocals_wav
+            else:
+                vocals_wav.unlink(missing_ok=True)
             instruments: dict[str, dict] | None = None
             if not use_stems:
                 with store.claimed_path(
@@ -1901,6 +2138,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             "backing_levels": backing_levels,
             "instruments": instruments,
             "effects": effects_echo,
+            "vocal_segments": segment_list,
             "compress": compress,
             "ducking": ducking,
             "guide_removed": _track_names(midi)[track_index],
