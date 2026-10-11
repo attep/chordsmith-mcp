@@ -160,7 +160,10 @@ class VocalEq(BaseModel):
     """Corrective and tone EQ for one voice; the bands apply in this order."""
 
     highpass_hz: float | None = Field(
-        None, ge=20.0, le=500.0, description="High-pass corner in Hz (e.g. 75 to remove rumble); null skips it."
+        None,
+        ge=20.0,
+        le=500.0,
+        description="High-pass corner in Hz (e.g. 75 to remove rumble); null skips it.",
     )
     bells: list[EqBell] = Field(default_factory=list, max_length=6, description="Peaking bands, up to 6.")
     low_shelf: EqShelf | None = Field(None, description="Low shelf (e.g. cut mud under 300 Hz).")

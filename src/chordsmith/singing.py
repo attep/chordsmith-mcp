@@ -39,9 +39,9 @@ from chordsmith.models import (
     ChorusSettings,
     DelayReturn,
     MasterSettings,
+    Returns,
     ReverbReturn,
     ReverbSettings,
-    Returns,
     VocalBus,
     VocalChain,
     VocalCompressor,
@@ -1539,7 +1539,9 @@ def _eq_filters(eq: VocalEq) -> list[str]:
     if eq.low_shelf is not None:
         filters.append(f"lowshelf=f={eq.low_shelf.hz:g}:width_type=q:width=0.707:g={eq.low_shelf.gain_db:g}")
     if eq.high_shelf is not None:
-        filters.append(f"highshelf=f={eq.high_shelf.hz:g}:width_type=q:width=0.707:g={eq.high_shelf.gain_db:g}")
+        filters.append(
+            f"highshelf=f={eq.high_shelf.hz:g}:width_type=q:width=0.707:g={eq.high_shelf.gain_db:g}"
+        )
     return filters
 
 
@@ -1753,7 +1755,9 @@ def _delay_ms(delay: DelayReturn, starting_bpm: float | None) -> float:
         return delay.delay_ms
     bpm = starting_bpm or 120.0
     quarter = 60000.0 / bpm
-    return {"1/4": quarter, "1/8": quarter / 2, "1/8d": quarter * 0.75, "1/16": quarter / 4}[delay.tempo_sync or "1/4"]
+    return {"1/4": quarter, "1/8": quarter / 2, "1/8d": quarter * 0.75, "1/16": quarter / 4}[
+        delay.tempo_sync or "1/4"
+    ]
 
 
 def _render_processed_vocals(
@@ -1771,7 +1775,9 @@ def _render_processed_vocals(
         voice.reverb_mix is not None for voice in voices
     )
     if needs_ir:
-        reverb_settings = returns.reverb if returns is not None and returns.reverb is not None else ReverbReturn()
+        reverb_settings = (
+            returns.reverb if returns is not None and returns.reverb is not None else ReverbReturn()
+        )
         ir_path = _reverb_ir(scratch, reverb_settings)
     rendered: list[dict[str, Path]] = []
     for index, voice in enumerate(voices):
@@ -1836,7 +1842,9 @@ def _render_processed_vocals(
             summed = scratch / "delay_send.wav"
             _sum_files(delay_sends, summed)
             delay_return_path = scratch / "delay_return.wav"
-            _delay_return(summed, _delay_ms(returns.delay, starting_bpm), returns.delay.feedback, delay_return_path)
+            _delay_return(
+                summed, _delay_ms(returns.delay, starting_bpm), returns.delay.feedback, delay_return_path
+            )
     return ProcessedVocals(
         dry=bus_current,
         reverb_return=reverb_return_path,
@@ -1957,7 +1965,18 @@ def mix_tracks(
                 raise SingingError("A vocal file is required when there are no voices.")
             vocal = scratch_path / "vocal_mix_rate.wav"
             _ffmpeg(
-                ["-y", "-loglevel", "error", "-i", str(original_vocal), "-ac", "1", "-ar", "44100", str(vocal)]
+                [
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(original_vocal),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "44100",
+                    str(vocal),
+                ]
             )
             if compress:
                 vocal_processed = scratch_path / "vocal_processed.wav"
@@ -2117,18 +2136,24 @@ def _mix_tracks_at_mix_rate(
         if loudness_target is not None and loudness["integrated_lufs"] is not None:
             if abs(loudness["integrated_lufs"] - loudness_target) > 1.0:
                 master_warnings.append(
-                    f"the mix landed at {loudness['integrated_lufs']} LUFS, not the {loudness_target:g} LUFS target"
+                    f"the mix landed at {loudness['integrated_lufs']} LUFS, not the "
+                    f"{loudness_target:g} LUFS target"
                 )
         if limiter_on:
             # the probe is already limited, so this is a lower bound on the limiter's work
             limiter_reduction = round(true_peak + correction - peak, 2)
             if limiter_reduction > 2.0:
                 master_warnings.append(
-                    f"the master limiter takes off {limiter_reduction:.1f} dB; leave more headroom or tame the bus"
+                    f"the master limiter takes off {limiter_reduction:.1f} dB; "
+                    "leave more headroom or tame the bus"
                 )
-            if loudness["true_peak_db"] is not None and loudness["true_peak_db"] > master.limiter.ceiling_db + 0.05:
+            if (
+                loudness["true_peak_db"] is not None
+                and loudness["true_peak_db"] > master.limiter.ceiling_db + 0.05
+            ):
                 master_warnings.append(
-                    f"true peak {loudness['true_peak_db']:g} dBFS is over the {master.limiter.ceiling_db:g} dBFS ceiling"
+                    f"true peak {loudness['true_peak_db']:g} dBFS is over the "
+                    f"{master.limiter.ceiling_db:g} dBFS ceiling"
                 )
         if not limiter_on and peak > -0.05:
             master_warnings.append(
@@ -2759,10 +2784,14 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                         sends=segment.sends,
                         reverb_mix=segment.reverb_mix,
                     )
-                    for position, ((path, _), segment) in enumerate(zip(resolved_segments, vocals, strict=True))
+                    for position, ((path, _), segment) in enumerate(
+                        zip(resolved_segments, vocals, strict=True)
+                    )
                 ]
             else:
-                voice_list = [ProcessedVoice(path=vocal_path, name="voice", chain=vocal_chain, sends=vocal_sends)]
+                voice_list = [
+                    ProcessedVoice(path=vocal_path, name="voice", chain=vocal_chain, sends=vocal_sends)
+                ]
         midi = mido.MidiFile(source_path)
         track_index = find_track(midi, guide_track)
         names = _track_names(midi)
@@ -2901,7 +2930,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             "uri": f"midi://{target.name}",
             "mime_type": "audio/wav",
             "source": source_path.name,
-            "vocal": vocal_path.name if vocal_path is not None else f"{len(resolved_segments)} vocal segments",
+            "vocal": vocal_path.name
+            if vocal_path is not None
+            else f"{len(resolved_segments)} vocal segments",
             "backing": backing_wav.name,
             "levels": {
                 "vocal_level_db": vocal_level_db,
