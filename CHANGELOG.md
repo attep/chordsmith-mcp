@@ -12,6 +12,33 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.21.0] - 2026-10-12
+
+From the whisper tryout: voicebank-driven soft controls, an air layer for the vocal bus, and the
+de-esser and saturation enabled (they move up from the stage-2/3 plan).
+
+### Added
+
+- **Voicebank-driven soft controls**: `render_singing` now passes `breathiness`, `voicing` and
+  `tension` (0-1) through to the acoustic model when the configured voicebank's `dsconfig.yaml`
+  declares the matching `use_*_embed` — a voicebank with breathiness support gets a real
+  breathiness control, fed as a per-frame conditioning input only when the loaded ONNX model
+  declares it (Hanami declares none, so its renders are byte-identical to before). The refusal
+  for a bank without them now names the voicebank and the missing flag, and
+  `list_singing_voices` reports each bank's real `soft_controls` instead of a hardcoded false.
+- **An air layer on the vocal bus** (`vocal_bus.air_layer`): band-shaped noise gated by the
+  voice, sitting `level_db` under the vocal's measured level — air under the singing that
+  follows the words (noise colour, band corners, gate threshold/attack/release; it rides with
+  the vocal and never extends the mix). It is air, not a whisper.
+- **The de-esser and saturation are wired** (vocal chain): `deesser` maps to ffmpeg's deesser
+  (`intensity`/`frequency`/`makeup`) and `saturation` (`drive_db`) is a compensated tanh soft
+  clip; both sit between the EQ and the compressor. The "planned for the next stage" errors are
+  gone.
+
+### Changed
+
+- Tool payload budget 148 → 152 KB (the new schemas); descriptions stay within 19 KB.
+
 ## [0.20.1] - 2026-10-12
 
 Fixes from the Under the Birch Moon vocal test (v0.20.0).

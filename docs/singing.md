@@ -103,7 +103,13 @@ Soft controls (VOICEVOX):
 
 - `energy` (0.1–2.0): overall vocal level; keep it near 1.0 and shape softness with the cap.
 - `volume_cap` (0.05–1.0): clamps every frame's volume, so loud notes stay quiet (try `0.6`).
-- `breathiness` / `vibrato`: DiffSinger-only; VOICEVOX fails clearly if these are set.
+- `breathiness` / `voicing` / `tension` / `vibrato`: DiffSinger-only; VOICEVOX fails clearly if these are set.
+
+**Whispering:** only 満別花丸 ささやき is mostly air — measured, its harmonics-to-noise ratio sits near
+0 dB (≈28 dB for a normal singing voice) and it lands the written pitch only about a tenth of the
+time, so expect it to drift; the two ヒソヒソ styles are about half-breathy (≈11 dB HNR against
+≈25 dB for めたん's normal voice). All three sing Japanese or a hum only, and no mixer setting can
+add breath to a voice model that has none: breathiness comes from the voicebank, not the mix.
 
 ## English lyrics (DiffSinger)
 
@@ -139,7 +145,12 @@ shift; **default 0** keeps the voicebank's own character — large values sound 
 different audio each time; setting `seed` patches the diffusion noise deterministically and the
 same input then renders **identical bytes** (fair A/B tests). VOICEVOX has no seed control and can
 also vary slightly between renders — repeat an identical request to get the cached job's file.
-`energy` works as output gain; `breathiness` is refused (this voicebank has none). Rendering takes
+`energy` works as output gain; `breathiness`/`voicing`/`tension` pass through to voicebanks whose
+`dsconfig.yaml` declares the matching `use_*_embed` (Hanami declares none of them, so they are
+refused with an error naming what the voicebank lacks; a voicebank that has them works).
+In a mix, quietness comes from `vocal_level_db`, not from `energy`: the mix re-measures the vocal
+and places it where you asked, so a softer take lands at the same spot unless you lower the level.
+Rendering takes
 tens of seconds on CPU for a full song — it runs in the same background job flow as VOICEVOX. The
 job record echoes the full settings (defaults included), so it always shows what was used.
 
@@ -249,15 +260,21 @@ with no processing option the mix is exactly the plain graph.
 
 - **Per-voice chain** (`vocal_chain` for a single vocal; per-segment `chain` with `vocals`):
   EQ (`highpass_hz`, up to six `bells` `{hz, gain_db, q}`, `low_shelf`/`high_shelf` `{hz,
-  gain_db}`) then a `compressor` with real settings (`threshold_db`, `ratio`, `attack_ms`,
-  `release_ms`, `makeup_db`, `knee_db` — enabling it with defaults mirrors the legacy
-  `compress`). Each voice also takes `gain_db`, `pan` (`-1` left … `1` right) and `reverb_mix`
-  (0–1: an insert reverb on that voice alone). The result's `processing.gain_reduction_db`
-  reports each compressor's raw reduction, before makeup (like a DAW meter), and warns past
-  6 dB.
-- **Bus** (`vocal_bus`): `gain_db` for the summed voices plus an optional `compressor` and
-  `limiter` (`ceiling_db`) — a glue stage for duets. A bus limiter taking off more than 2 dB
-  warns.
+  gain_db}`), then a `deesser` (`intensity`/`frequency`/`makeup` — tames "s"/"sh" before the
+  compressor), `saturation` (`drive_db` — a compensated tanh soft clip that adds harmonics
+  without raising peaks), and a `compressor` with real settings (`threshold_db`, `ratio`,
+  `attack_ms`, `release_ms`, `makeup_db`, `knee_db` — enabling it with defaults mirrors the
+  legacy `compress`). Each voice also takes `gain_db`, `pan` (`-1` left … `1` right) and
+  `reverb_mix` (0–1: an insert reverb on that voice alone). The result's
+  `processing.gain_reduction_db` reports each compressor's raw reduction, before makeup (like a
+  DAW meter), and warns past 6 dB.
+- **Bus** (`vocal_bus`): `gain_db` for the summed voices plus an optional `compressor`,
+  `limiter` (`ceiling_db`) and `air_layer` — a glue stage for duets. The air layer is
+  band-shaped noise (`color`, `highpass_hz`, `lowpass_hz`) gated by the voice: it sits
+  `level_db` under the vocal's measured level and passes only while she sings (the gate's
+  `threshold_db`, `attack_ms`, `release_ms` shape how it follows; `processing` shows nothing
+  extra for it because it rides with the vocal). It is air, not a whisper — no words, no
+  consonants. A bus limiter taking off more than 2 dB warns.
 - **Returns** (`returns`): `reverb` (`decay_s`, `predelay_ms`, `damping`) — a deterministic,
   unit-energy impulse response convolved from the summed sends, so the wet amount means what it
   says — and `delay` (`delay_ms`, or `tempo_sync` `1/4`/`1/8`/`1/8d`/`1/16` at the song's
@@ -277,9 +294,6 @@ with no processing option the mix is exactly the plain graph.
   `<source>.vocal_chain.json`; a later mix of the same song loads it automatically when no
   chain option is passed (`processing.chain_source` says whether the settings came from
   `parameters` or the `sidecar`).
-
-A de-esser and saturation are modeled but not wired yet (enabling them returns a clear error):
-they are stage 2/3 work.
 
 ## Settings
 

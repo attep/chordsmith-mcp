@@ -99,6 +99,32 @@ def describe() -> dict | None:
         "languages": ["en"],
         "modes": list(MODES),
         "sample_rate": SAMPLE_RATE,
+        "soft_controls": soft_controls() or {},
+    }
+
+
+def soft_controls() -> dict | None:
+    """Which soft controls the configured voicebank supports, from its dsconfig flags.
+
+    DiffSinger voicebanks declare whether they were trained with the variance embeddings
+    (``use_breathiness_embed``, ``use_voicing_embed``, ``use_tension_embed``, ``use_energy_embed``).
+    Hanami ~AI❤dol~ declares none of them — breathiness cannot do anything for her — while a
+    voicebank with ``use_breathiness_embed: true`` gets the setting fed to its acoustic model.
+    Returns None when no voicebank is configured.
+    """
+    path = voicebank_path()
+    if path is None:
+        return None
+    try:
+        config = yaml.safe_load((path / "dsconfig.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    return {
+        "voicebank": path.name,
+        "breathiness": bool(config.get("use_breathiness_embed")),
+        "voicing": bool(config.get("use_voicing_embed")),
+        "tension": bool(config.get("use_tension_embed")),
+        "energy_embed": bool(config.get("use_energy_embed")),
     }
 
 
@@ -708,6 +734,55 @@ def stitch_chunks(
     return length / rate
 
 
+_EMBED_NEUTRAL = {"breathiness": 0.0, "voicing": 1.0, "tension": 0.0, "energy": 1.0}
+
+
+def _acoustic_inputs(
+    session,
+    *,
+    tokens,
+    ph_dur,
+    f0,
+    gender: float,
+    velocity: float,
+    spk_embed,
+    depth: float,
+    steps: int,
+    breathiness: float | None = None,
+    voicing: float | None = None,
+    tension: float | None = None,
+) -> dict:
+    """The acoustic model's inputs, plus the variance embeds the model declares.
+
+    A voicebank trained with breathiness/voicing/tension/energy embeddings expects those inputs
+    (its dsconfig says so, and ONNX refuses to run without them), so a user-set or neutral value
+    is fed whenever the loaded model declares the input. Hanami declares none of them, so its
+    inputs are exactly as before — existing renders stay byte-identical.
+    """
+    total_frames = int(ph_dur.sum())
+    inputs: dict = {
+        "tokens": tokens,
+        "durations": ph_dur,
+        "f0": f0,
+        "gender": np.full((1, total_frames), gender, dtype=np.float32),
+        "velocity": np.full((1, total_frames), velocity, dtype=np.float32),
+        "spk_embed": spk_embed,
+        "depth": np.array(depth, dtype=np.float32),
+        "steps": np.array(steps, dtype=np.int64),
+    }
+    declared = {value.name for value in session.get_inputs()}
+    for name, setting in (
+        ("breathiness", breathiness),
+        ("voicing", voicing),
+        ("tension", tension),
+        ("energy", None),  # the energy setting is output gain; the embed always gets its neutral
+    ):
+        if name in declared:
+            value = _EMBED_NEUTRAL[name] if setting is None else float(setting)
+            inputs[name] = np.full((1, total_frames), value, dtype=np.float32)
+    return inputs
+
+
 def render(
     notes: list[NoteSpec],
     output: Path,
@@ -719,6 +794,9 @@ def render(
     gender: float = 0.0,
     expr: float = 1.0,
     energy: float = 1.0,
+    breathiness: float | None = None,
+    voicing: float | None = None,
+    tension: float | None = None,
     seed: int | None = None,
     total_seconds: float | None = None,
 ) -> dict:
@@ -832,18 +910,23 @@ def render(
     f0 = (440.0 * np.power(2.0, (pitch_out - 69.0) / 12.0)).astype(np.float32).reshape(1, -1)
 
     # --- acoustic + vocoder
-    mel = session_for("dsmain/acoustic.onnx").run(
+    acoustic_session = session_for("dsmain/acoustic.onnx")
+    mel = acoustic_session.run(
         None,
-        {
-            "tokens": tokens,
-            "durations": ph_dur,
-            "f0": f0,
-            "gender": np.full((1, total_frames), gender, dtype=np.float32),
-            "velocity": np.full((1, total_frames), velocity, dtype=np.float32),
-            "spk_embed": np.tile(bank.embed("dsmain/embeds/acoustic", mode), (1, total_frames, 1)),
-            "depth": np.array(depth, dtype=np.float32),
-            "steps": np.array(steps, dtype=np.int64),
-        },
+        _acoustic_inputs(
+            acoustic_session,
+            tokens=tokens,
+            ph_dur=ph_dur,
+            f0=f0,
+            gender=gender,
+            velocity=velocity,
+            spk_embed=np.tile(bank.embed("dsmain/embeds/acoustic", mode), (1, total_frames, 1)),
+            depth=depth,
+            steps=steps,
+            breathiness=breathiness,
+            voicing=voicing,
+            tension=tension,
+        ),
     )[0]
     samples = session_for("dsvocoder/aidolgan.onnx").run(None, {"mel": mel, "f0": f0})[0][0]
     if not np.isfinite(samples).all():

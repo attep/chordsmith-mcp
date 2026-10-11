@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import time
 import wave
 from pathlib import Path
@@ -16,9 +17,11 @@ from pathlib import Path
 import mido
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
+from pydantic import ValidationError
 
 from chordsmith import audio, diffsinger, renderers, server, singing
 from chordsmith.models import (
+    AirLayer,
     DelayReturn,
     EqBell,
     EqShelf,
@@ -33,6 +36,20 @@ from chordsmith.models import (
     VocalEq,
     VocalSaturation,
     VocalSends,
+)
+
+try:  # the dev extra does not install the diffsinger extra's packages (CI skips those tests)
+    import numpy as _numpy
+except ImportError:
+    _numpy = None
+
+try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None
+
+needs_diffsinger_extra = pytest.mark.skipif(
+    _numpy is None or _yaml is None, reason="the diffsinger extra (numpy/PyYAML) is not installed"
 )
 
 pytestmark = pytest.mark.anyio
@@ -704,15 +721,29 @@ def test_voice_chain_filters_apply_eq_then_compressor():
     assert "makeup=1.258925" in parts[compressor]  # 2 dB makeup as a linear gain
 
 
-def test_deesser_and_saturation_are_planned_not_wired():
-    deesser = singing.ProcessedVoice(path=Path("v.wav"), chain=VocalChain(deesser=VocalDeesser(enabled=True)))
-    with pytest.raises(singing.SingingError, match="de-esser"):
-        singing._voice_chain_filters(deesser)
-    saturation = singing.ProcessedVoice(
-        path=Path("v.wav"), chain=VocalChain(saturation=VocalSaturation(enabled=True))
+def test_deesser_and_saturation_build_filters_in_order():
+    voice = singing.ProcessedVoice(
+        path=Path("v.wav"),
+        chain=VocalChain(
+            eq=VocalEq(highpass_hz=80.0),
+            deesser=VocalDeesser(enabled=True, intensity=0.7, frequency=0.4, makeup=0.2),
+            saturation=VocalSaturation(enabled=True, drive_db=6.0),
+            compressor=VocalCompressor(enabled=True),
+        ),
     )
-    with pytest.raises(singing.SingingError, match="Saturation"):
-        singing._voice_chain_filters(saturation)
+    parts = singing._voice_chain_filters(voice)
+    highpass = parts.index("highpass=f=80")
+    deesser = parts.index("deesser=i=0.7:f=0.4:m=0.2")
+    saturation = parts.index("volume=6dB,asoftclip=type=tanh,volume=-6dB")
+    compressor = next(index for index, part in enumerate(parts) if part.startswith("acompressor="))
+    assert highpass < deesser < saturation < compressor
+
+
+def test_air_layer_requires_band_order():
+    with pytest.raises(ValidationError):
+        AirLayer(highpass_hz=9000.0, lowpass_hz=5000.0)
+    air = AirLayer()  # defaults are a valid band
+    assert air.highpass_hz < air.lowpass_hz
 
 
 def test_delay_ms_resolves_tempo_sync():
@@ -1421,6 +1452,266 @@ async def test_diffsinger_job_dispatch(store, fake_engine, monkeypatch):
     assert job["status"] == "done", job.get("error")
     assert job["mode"] == "nectar"
     assert (store.root / job["filename"]).is_file()
+
+
+# ------------------------------------------------------------------ voicebank soft controls (A)
+
+
+@needs_diffsinger_extra
+def test_voicebank_soft_controls_read_from_dsconfig(tmp_path, monkeypatch):
+    bank = tmp_path / "TestBank"
+    bank.mkdir()
+    (bank / "dsconfig.yaml").write_text(
+        "use_breathiness_embed: true\nuse_voicing_embed: false\n"
+        "use_tension_embed: true\nuse_energy_embed: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHORDSMITH_DIFFSINGER_VOICE", str(bank))
+    controls = diffsinger.soft_controls()
+    assert controls == {
+        "voicebank": "TestBank",
+        "breathiness": True,
+        "voicing": False,
+        "tension": True,
+        "energy_embed": False,
+    }
+
+
+def test_settings_dict_is_voicebank_aware(monkeypatch):
+    monkeypatch.setattr(
+        diffsinger,
+        "soft_controls",
+        lambda: {"voicebank": "Hanami", "breathiness": False, "voicing": False, "tension": False},
+    )
+    with pytest.raises(singing.SingingError, match="Hanami"):
+        singing._settings_dict(singing.SoftSettings(breathiness=0.8), "diffsinger")
+    with pytest.raises(singing.SingingError, match="use_tension_embed"):
+        singing._settings_dict(singing.SoftSettings(tension=0.4), "diffsinger")
+    monkeypatch.setattr(
+        diffsinger,
+        "soft_controls",
+        lambda: {"voicebank": "Airy", "breathiness": True, "voicing": True, "tension": True},
+    )
+    data = singing._settings_dict(singing.SoftSettings(breathiness=0.8, voicing=0.4), "diffsinger")
+    assert data["breathiness"] == 0.8 and data["voicing"] == 0.4
+    with pytest.raises(singing.SingingError, match="vibrato"):
+        singing._settings_dict(singing.SoftSettings(vibrato=0.5), "diffsinger")
+    with pytest.raises(singing.SingingError, match="DiffSinger setting"):
+        singing._settings_dict(singing.SoftSettings(breathiness=0.5), "voicevox")
+
+
+@needs_diffsinger_extra
+def test_acoustic_inputs_feed_declared_embeds_only():
+    class _Input:
+        def __init__(self, name):
+            self.name = name
+
+    class _Session:
+        def __init__(self, names):
+            self._names = names
+
+        def get_inputs(self):
+            return [_Input(name) for name in self._names]
+
+    ph_dur = _numpy.array([[2, 2]], dtype="int64")
+    common = dict(
+        tokens=None, ph_dur=ph_dur, f0=None, gender=0.0, velocity=1.0, spk_embed=None, depth=0.6, steps=20
+    )
+    plain = diffsinger._acoustic_inputs(
+        _Session(["tokens", "durations", "f0", "gender", "velocity", "spk_embed", "depth", "steps"]),
+        **common,
+    )
+    assert set(plain) == {"tokens", "durations", "f0", "gender", "velocity", "spk_embed", "depth", "steps"}
+    embedded = diffsinger._acoustic_inputs(
+        _Session(
+            [
+                "tokens",
+                "durations",
+                "f0",
+                "gender",
+                "velocity",
+                "spk_embed",
+                "depth",
+                "steps",
+                "breathiness",
+                "voicing",
+                "energy",
+            ]
+        ),
+        **common,
+        breathiness=0.7,
+    )
+    assert embedded["breathiness"].tolist()[0] == pytest.approx([0.7] * 4, abs=1e-6)  # float32
+    assert embedded["voicing"].tolist()[0] == pytest.approx([1.0] * 4)  # neutral when unset
+    assert embedded["energy"].tolist()[0] == pytest.approx([1.0] * 4)  # energy setting is output gain
+    assert "tension" not in embedded  # not declared by this model
+
+
+@needs_voicebank
+async def test_diffsinger_job_passes_soft_embeds_to_the_worker(store, fake_engine, monkeypatch):
+    song = await _make_song(store)
+    score = (await _call("prepare_vocal_score", {"filename": song, "track": "Melody"})).structuredContent
+    mapping = (
+        await _call(
+            "map_vocal_lyrics",
+            {"score_id": score["score_id"], "lyrics": "so- di- um gold", "language": "en"},
+        )
+    ).structuredContent
+    captured = {}
+
+    class _FakeWorker:
+        def __init__(self, command, **_kwargs):
+            captured.update(json.loads(Path(command[-1]).read_text(encoding="utf-8")))
+            with wave.open(str(Path(captured["output"])), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(44100)
+                handle.writeframes(b"\x01\x00" * 4410)
+            self.stdout = io.StringIO(
+                '{"done": true, "duration_seconds": 0.1, "chunks": 1, "mode": "nectar", "peak_db": -20.0}\n'
+            )
+            self.stderr = io.StringIO("")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        diffsinger,
+        "soft_controls",
+        lambda: {"voicebank": "Airy", "breathiness": True, "voicing": True, "tension": True},
+    )
+    monkeypatch.setattr(singing.subprocess, "Popen", lambda *args, **kwargs: _FakeWorker(*args, **kwargs))
+    started = await _call(
+        "render_singing",
+        {
+            "mapping_id": mapping["mapping_id"],
+            "voice_id": "diffsinger:hanami/nectar",
+            "settings": {"breathiness": 0.7, "tension": 0.3},
+        },
+    )
+    assert not started.isError, started.content[0].text
+    job = await _wait_for_job(started.structuredContent["job_id"])
+    assert job["status"] == "done", job.get("error")
+    assert captured["breathiness"] == 0.7
+    assert captured["tension"] == 0.3
+    assert captured["voicing"] is None
+
+
+# ------------------------------------------------------------------ de-esser, saturation, air layer (B/C)
+
+
+def _band_mean_db(path, start: float, end: float, low: float, high: float) -> float:
+    # two high-passes in series: a single one leaks too much of the tone into the band
+    result = singing._ffmpeg(
+        [
+            "-i",
+            str(path),
+            "-af",
+            f"atrim={start}:{end},highpass=f={low}:poles=2,highpass=f={low}:poles=2,"
+            f"lowpass=f={high},volumedetect",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    match = re.search(r"mean_volume:\s*(-?[\d.]+) dB", result.stderr)
+    assert match, result.stderr[-300:]
+    return float(match.group(1))
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_deesser_reduces_sibilance(tmp_path):
+    voice = tmp_path / "voice.wav"
+    _write_sine_wav(voice, 7000.0, 12000)
+    plain, _reduction, _warnings = singing._render_voice(
+        singing.ProcessedVoice(path=voice), 0, tmp_path, None
+    )
+    deessed, _reduction, _warnings = singing._render_voice(
+        singing.ProcessedVoice(
+            path=voice,
+            chain=VocalChain(deesser=VocalDeesser(enabled=True, intensity=1.0, frequency=0.5)),
+        ),
+        1,
+        tmp_path,
+        None,
+    )
+    assert singing.gated_rms_db(deessed["dry"]) < singing.gated_rms_db(plain["dry"]) - 2.0
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+@pytest.mark.skipif(_numpy is None, reason="numpy is not installed")
+def test_saturation_adds_harmonics(tmp_path):
+    voice = tmp_path / "voice.wav"
+    _write_sine_wav(voice, 300.0, 20000)
+    plain, _reduction, _warnings = singing._render_voice(
+        singing.ProcessedVoice(path=voice), 0, tmp_path, None
+    )
+    driven, _reduction, _warnings = singing._render_voice(
+        singing.ProcessedVoice(
+            path=voice, chain=VocalChain(saturation=VocalSaturation(enabled=True, drive_db=12.0))
+        ),
+        1,
+        tmp_path,
+        None,
+    )
+
+    def harmonic_ratio(path):
+        with wave.open(str(path), "rb") as handle:
+            data = _numpy.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2").astype(float)
+        mono = data.reshape(-1, 2).mean(axis=1)
+        spectrum = _numpy.abs(_numpy.fft.rfft(mono * _numpy.hanning(len(mono))))
+        freqs = _numpy.fft.rfftfreq(len(mono), 1 / 44100)
+
+        def energy(center):
+            return float((spectrum[_numpy.abs(freqs - center) < 40] ** 2).sum())
+
+        return energy(900.0) / energy(300.0)
+
+    ratio_plain = harmonic_ratio(plain["dry"])
+    ratio_driven = harmonic_ratio(driven["dry"])
+    assert ratio_driven > max(ratio_plain * 10, 1e-4)  # the third harmonic appears
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_air_layer_follows_the_vocal(tmp_path):
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    # quiet but real backing: a digital-silence backing would collapse the gain staging
+    _write_sine_wav(backing, 220.0, 400, channels=2)
+    with wave.open(str(vocal), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(44100)
+        tone = array.array(
+            "h", (round(12000 * math.sin(2 * math.pi * 660 * i / 44100)) for i in range(22050))
+        )
+        handle.writeframes(tone.tobytes() + b"\x00\x00" * 22050)
+    voices = [singing.ProcessedVoice(path=vocal, name="voice")]
+    plain = tmp_path / "plain.wav"
+    airy = tmp_path / "airy.wav"
+    singing.mix_tracks(backing, None, plain, voices=voices, normalize_peak_db=-1.0)
+    info = singing.mix_tracks(
+        backing,
+        None,
+        airy,
+        voices=voices,
+        normalize_peak_db=-1.0,
+        vocal_bus=VocalBus(
+            air_layer=AirLayer(
+                level_db=-6.0,
+                highpass_hz=4000.0,
+                lowpass_hz=12000.0,
+                threshold_db=-50.0,
+                release_ms=50.0,
+            )
+        ),
+    )
+    assert info["duration_seconds"] == pytest.approx(1.0, abs=0.02)  # the air does not extend the mix
+    plain_sung = _band_mean_db(plain, 0.1, 0.4, 4000, 12000)
+    airy_sung = _band_mean_db(airy, 0.1, 0.4, 4000, 12000)
+    airy_silent = _band_mean_db(airy, 0.8, 0.95, 4000, 12000)
+    assert airy_sung > plain_sung + 10.0  # air is audible while she sings
+    assert airy_silent < airy_sung - 20.0  # the gate closes between phrases
 
 
 def test_voicebank_never_enters_the_repo():

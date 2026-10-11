@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from chordsmith import audio, delivery, diffsinger, renderers, results, sections
 from chordsmith.models import (
+    AirLayer,
     ChorusSettings,
     DelayReturn,
     MasterSettings,
@@ -849,7 +850,8 @@ class SoftSettings(BaseModel):
     """Soft-voice controls.
 
     VOICEVOX uses energy and volume_cap. DiffSinger voices use velocity, gender, expr, steps and
-    depth; breathiness is refused (this voicebank has none).
+    depth; breathiness/voicing/tension pass through to voicebanks that declare them (Hanami
+    declares none of the three and they are refused for it).
     """
 
     energy: float = Field(
@@ -862,7 +864,25 @@ class SoftSettings(BaseModel):
         description="VOICEVOX only: clamp every frame's volume so loud notes stay soft (e.g. 0.6).",
     )
     breathiness: float | None = Field(
-        None, ge=0.0, le=1.0, description="Not supported: this voicebank has no breathiness control."
+        None,
+        ge=0.0,
+        le=1.0,
+        description="DiffSinger only: breathiness embedding, 0-1. Needs a voicebank that declares "
+        "use_breathiness_embed (Hanami does not); refused with a clear error otherwise.",
+    )
+    voicing: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="DiffSinger only: voicing embedding, 0-1 (1 = fully voiced). Needs a voicebank "
+        "that declares use_voicing_embed.",
+    )
+    tension: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="DiffSinger only: tension embedding, 0-1. Needs a voicebank that declares "
+        "use_tension_embed.",
     )
     vibrato: float | None = Field(
         None, ge=0.0, le=1.0, description="Not supported yet (DiffSinger vibrato needs curve support)."
@@ -937,18 +957,31 @@ def resolve_speakers(voice_id: str, singers: list[dict]) -> tuple[int, int]:
 
 def _settings_dict(settings: SoftSettings | None, engine: str) -> dict:
     data = (settings or SoftSettings()).model_dump(exclude_none=True, exclude_defaults=True)
-    for unsupported in ("breathiness", "vibrato"):
-        if unsupported in data:
-            raise SingingError(
-                f"'{unsupported}' is not supported by the {engine} voices. "
-                "Use energy/volume_cap (VOICEVOX) or velocity/gender/expr (DiffSinger)."
-            )
     if engine == "voicevox":
+        for unsupported in ("breathiness", "voicing", "tension", "vibrato"):
+            if unsupported in data:
+                raise SingingError(
+                    f"'{unsupported}' is a DiffSinger setting; VOICEVOX uses energy/volume_cap."
+                )
         for diffsinger_only in ("velocity", "gender", "expr", "steps", "depth", "seed"):
             if diffsinger_only in data:
                 raise SingingError(
                     f"'{diffsinger_only}' is a DiffSinger setting; VOICEVOX uses energy/volume_cap."
                 )
+    else:
+        if "vibrato" in data:
+            raise SingingError(
+                "'vibrato' is not supported yet (DiffSinger vibrato needs pitch-curve support)."
+            )
+        capabilities = diffsinger.soft_controls()
+        if capabilities:
+            for param in ("breathiness", "voicing", "tension"):
+                if param in data and not capabilities.get(param):
+                    bank = capabilities.get("voicebank", "the configured voicebank")
+                    raise SingingError(
+                        f"'{param}' is not supported by {bank}: it declares no {param} embedding "
+                        f"(use_{param}_embed is false in its dsconfig). A voicebank with it will work."
+                    )
     return data
 
 
@@ -1015,6 +1048,9 @@ def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore, p
         "gender": float(job.settings.get("gender", 0.0)),
         "expr": float(job.settings.get("expr", 1.0)),
         "energy": float(job.settings.get("energy", 1.0)),
+        "breathiness": job.settings.get("breathiness"),
+        "voicing": job.settings.get("voicing"),
+        "tension": job.settings.get("tension"),
         "seed": job.settings.get("seed"),
         "total_seconds": mapping.total_seconds,
     }
@@ -1568,16 +1604,15 @@ def _voice_chain_filters(voice: ProcessedVoice, include_compressor: bool = True)
         parts.append(f"volume={voice.gain_db:g}dB")
     chain = voice.chain
     if chain is not None:
-        if chain.deesser is not None and chain.deesser.enabled:
-            raise SingingError(
-                "The de-esser is planned for the next stage; it is not wired yet (leave it disabled)."
-            )
-        if chain.saturation is not None and chain.saturation.enabled:
-            raise SingingError(
-                "Saturation is planned for a later stage; it is not wired yet (leave it disabled)."
-            )
         if chain.eq is not None:
             parts.extend(_eq_filters(chain.eq))
+        if chain.deesser is not None and chain.deesser.enabled:
+            deesser = chain.deesser
+            parts.append(f"deesser=i={deesser.intensity:g}:f={deesser.frequency:g}:m={deesser.makeup:g}")
+        if chain.saturation is not None and chain.saturation.enabled:
+            drive = chain.saturation.drive_db
+            # pre-gain into the tanh curve, then compensated: peaks stay put, harmonics are added
+            parts.append(f"volume={drive:g}dB,asoftclip=type=tanh,volume=-{drive:g}dB")
         if include_compressor and chain.compressor is not None and chain.compressor.enabled:
             parts.append(_compressor_filter(chain.compressor))
     return parts
@@ -2044,6 +2079,7 @@ def mix_tracks(
             returns_paths=(processed.reverb_return, processed.delay_return) if processed else (None, None),
             master=master,
             staged_vocal=processed is not None,
+            air_layer=vocal_bus.air_layer if (vocal_bus is not None and processed is not None) else None,
         )
         if processed is not None:
             info["gain_reduction_db"] = processed.gain_reduction
@@ -2067,6 +2103,7 @@ def _mix_tracks_at_mix_rate(
     returns_paths: tuple[Path | None, Path | None] = (None, None),
     master: MasterSettings | None = None,
     staged_vocal: bool = False,
+    air_layer: AirLayer | None = None,
 ) -> dict:
     """Mix at 44.1 kHz, measure the balance and correct the export's level.
 
@@ -2075,7 +2112,8 @@ def _mix_tracks_at_mix_rate(
     (the processed bus is already stereo, so panning it would collapse it); returns and master
     settings add the return inputs (scaled with the vocal), the master limiter (a true-peak-safe
     margin under the ceiling) and the gain correction; the correction is computed on the float
-    probe and applied before the limiter, so the limiter always sees the final level.
+    probe and applied before the limiter, so the limiter always sees the final level. An
+    ``air_layer`` adds band-shaped noise gated by the vocal bus (it rides with the vocal).
     """
     backing_db, vocal_db = active_levels(measure_backing, vocal)
     # vocal_level_db means the level the listener hears over the band during phrases. With
@@ -2086,7 +2124,35 @@ def _mix_tracks_at_mix_rate(
     trim_db = 20.0 * math.log10(backing_volume) if backing_volume > 0 else -120.0
     balance_db = (vocal_db + vocal_gain_db) - (backing_db + trim_db - duck_db)
     limiter_on = master is not None and master.limiter is not None and master.limiter.enabled
-    staged = staged_vocal or returns_paths != (None, None) or master is not None
+    staged = staged_vocal or returns_paths != (None, None) or master is not None or air_layer is not None
+    air_noise: Path | None = None
+    air_gain: float | None = None
+    if air_layer is not None:
+        # the noise runs as long as the longest input, so the air never extends the mix
+        duration = max(
+            _wav_duration(mix_backing),
+            _wav_duration(vocal),
+            *(_wav_duration(path) for path in returns_paths if path is not None),
+        )
+        air_noise = scratch / "air_noise.wav"
+        _ffmpeg(
+            [
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"anoisesrc=color={air_layer.color}:seed={IR_SEED + 7}:sample_rate=44100:"
+                f"duration={duration:.3f}",
+                "-ac",
+                "2",
+                str(air_noise),
+            ]
+        )
+        # measured, like the balance: the air sits level_db under the vocal's active level
+        air_gain_db = (vocal_db + air_layer.level_db) - gated_rms_db(air_noise)
+        air_gain = vocal_gain * 10.0 ** (air_gain_db / 20.0)
 
     def render(output_gain_db: float, destination: Path, float_output: bool = False) -> None:
         if not staged:
@@ -2116,16 +2182,42 @@ def _mix_tracks_at_mix_rate(
                     command += ["-i", str(path)]
                     extra.append((input_index, kind))
                     input_index += 1
+            air_index: int | None = None
+            if air_noise is not None:
+                command += ["-i", str(air_noise)]
+                air_index = input_index
             vocal_filters = f"volume={vocal_gain:.4f}"
             if vocal_reverb:
                 vocal_filters += ",aecho=1.0:1.0:60:0.25"
-            filters = [f"[0:a]volume={backing_volume:.3f}[b]", f"[1:a]{vocal_filters}[v]"]
+            if air_index is not None:
+                # the vocal is split: one copy for the mix, one as the gate's sidechain
+                filters = [
+                    f"[0:a]volume={backing_volume:.3f}[b]",
+                    f"[1:a]{vocal_filters},asplit=2[v][vsc]",
+                ]
+            else:
+                filters = [f"[0:a]volume={backing_volume:.3f}[b]", f"[1:a]{vocal_filters}[v]"]
             mix_labels = "[b][v]"
             for extra_index, kind in extra:
                 filters.append(f"[{extra_index}:a]volume={vocal_gain:.4f}[{kind}]")
                 mix_labels += f"[{kind}]"
+            inputs_count = 2 + len(extra)
+            if air_index is not None:
+                assert air_gain is not None and air_layer is not None
+                threshold = 10.0 ** (air_layer.threshold_db / 20.0)
+                filters.append(
+                    f"[{air_index}:a]highpass=f={air_layer.highpass_hz:g},"
+                    f"lowpass=f={air_layer.lowpass_hz:g}[airraw]"
+                )
+                filters.append(
+                    f"[airraw][vsc]sidechaingate=range=0:threshold={threshold:.6f}:"
+                    f"attack={air_layer.attack_ms:g}:release={air_layer.release_ms:g}[airgate]"
+                )
+                filters.append(f"[airgate]volume={air_gain:.6f}[airout]")
+                mix_labels += "[airout]"
+                inputs_count += 1
             graph = ";".join(filters)
-            graph += f";{mix_labels}amix=inputs={2 + len(extra)}:duration=longest:normalize=0[pm]"
+            graph += f";{mix_labels}amix=inputs={inputs_count}:duration=longest:normalize=0[pm]"
             label = "pm"
             if output_gain_db:
                 graph += f";[{label}]volume={output_gain_db:.2f}dB[g]"
@@ -2342,6 +2434,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                     )
                 result["engines"]["diffsinger"] = {"configured": False, "voices": []}
             else:
+                bank_controls = info.get("soft_controls") or {}
                 result["engines"]["diffsinger"] = {
                     "configured": True,
                     "voicebank": info["voicebank"],
@@ -2367,7 +2460,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                                 "expr": True,
                                 "steps": True,
                                 "depth": True,
-                                "breathiness": False,
+                                "breathiness": bool(bank_controls.get("breathiness")),
+                                "voicing": bool(bank_controls.get("voicing")),
+                                "tension": bool(bank_controls.get("tension")),
                                 "vibrato": False,
                             },
                         }
@@ -2641,7 +2736,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             VocalBus | None,
             Field(
                 description="The summed-voice bus for several voices (duets): one gain, optional "
-                "glue compressor and limiter. Applies after the per-voice chains."
+                "glue compressor, limiter and breathy air layer. Applies after the per-voice chains."
             ),
         ] = None,
         returns: Annotated[
@@ -2740,8 +2835,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
 
         ``vocal_chain``/``vocal_sends`` (single vocal) or the per-segment chain/sends/gain/pan run
         each voice through its own processing before the voices are summed into the bus
-        (``vocal_bus``: gain, glue compressor, limiter); the balance is then measured on the
-        processed bus, so ``vocal_level_db`` keeps its meaning. ``returns`` feeds a shared
+        (``vocal_bus``: gain, glue compressor, limiter, air layer); the balance is then measured
+        on the processed bus, so ``vocal_level_db`` keeps its meaning. ``returns`` feeds a shared
         convolution reverb and delay from the voices' sends; ``master`` adds a true-peak-safe
         limiter and/or a loudness target (one static gain from an EBU R128 measurement, verified
         after the render). The result's ``processing`` block echoes the effective settings,

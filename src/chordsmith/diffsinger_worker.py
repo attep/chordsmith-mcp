@@ -50,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
                 gender=float(spec.get("gender", 0.0)),
                 expr=float(spec.get("expr", 1.0)),
                 energy=float(spec.get("energy", 1.0)),
+                breathiness=spec.get("breathiness"),
+                voicing=spec.get("voicing"),
+                tension=spec.get("tension"),
                 seed=spec.get("seed"),
                 total_seconds=chunk.seconds,
             )

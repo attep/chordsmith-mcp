@@ -188,19 +188,55 @@ class VocalCompressor(BaseModel):
 
 
 class VocalDeesser(BaseModel):
-    """De-esser (planned for the next stage: enabling it returns a clear error for now)."""
+    """A de-esser: tames sibilance ("s"/"sh") after the EQ, before the compressor.
+
+    ``intensity`` sets how hard it works, ``frequency`` where it listens (0 = lower, 1 = higher)
+    and ``makeup`` adds a little level back after the reduction.
+    """
 
     enabled: bool = False
     intensity: float = Field(0.5, ge=0.0, le=1.0, description="De-essing intensity, 0-1.")
-    frequency: float = Field(0.5, ge=0.0, le=1.0, description="Detection frequency, 0-1.")
-    makeup: float = Field(0.0, ge=0.0, le=1.0, description="Makeup gain, 0-1.")
+    frequency: float = Field(
+        0.5, ge=0.0, le=1.0, description="Detection frequency, 0-1 (higher listens higher)."
+    )
+    makeup: float = Field(0.0, ge=0.0, le=1.0, description="Makeup gain after reduction, 0-1.")
 
 
 class VocalSaturation(BaseModel):
-    """Soft-clip saturation (planned for the next stage: enabling it returns an error for now)."""
+    """Soft-clip saturation: drive into a tanh curve, then compensated, so peaks stay put while
+    harmonics (warmth) are added."""
 
     enabled: bool = False
-    drive_db: float = Field(6.0, ge=0.0, le=24.0, description="Drive in dB.")
+    drive_db: float = Field(6.0, ge=0.0, le=24.0, description="Drive into the soft clipper in dB.")
+
+
+class AirLayer(BaseModel):
+    """A breathy air layer under the vocal: band-shaped noise that follows the singing.
+
+    The noise passes only while the voice sings (a sidechain gate listening to the vocal bus),
+    sits ``level_db`` under the vocal's measured level, and is band-limited between the corners.
+    It is air, not a whisper: no words, no consonants.
+    """
+
+    level_db: float = Field(
+        -20.0, ge=-40.0, le=0.0, description="How far under the vocal the air sits, in dB."
+    )
+    highpass_hz: float = Field(3000.0, ge=500.0, le=12000.0, description="Air band lower corner in Hz.")
+    lowpass_hz: float = Field(12000.0, ge=4000.0, le=20000.0, description="Air band upper corner in Hz.")
+    color: Literal["white", "pink"] = Field("pink", description="Noise colour (pink is softer).")
+    threshold_db: float = Field(
+        -40.0, ge=-60.0, le=-20.0, description="Vocal level that opens the gate, in dB."
+    )
+    attack_ms: float = Field(15.0, ge=1.0, le=200.0, description="Gate attack in ms.")
+    release_ms: float = Field(
+        250.0, ge=20.0, le=2000.0, description="Gate release in ms (how long the air lingers)."
+    )
+
+    @model_validator(mode="after")
+    def _band_order(self) -> AirLayer:
+        if self.highpass_hz >= self.lowpass_hz:
+            raise ValueError("highpass_hz must be below lowpass_hz")
+        return self
 
 
 class VocalSends(BaseModel):
@@ -232,6 +268,9 @@ class VocalBus(BaseModel):
     gain_db: float = Field(0.0, ge=-24.0, le=12.0, description="Bus level for the summed voices.")
     compressor: VocalCompressor | None = None
     limiter: LimiterSettings | None = None
+    air_layer: AirLayer | None = Field(
+        None, description="Optional breathy air layer under the summed voices (follows the singing)."
+    )
 
 
 class ReverbReturn(BaseModel):

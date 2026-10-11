@@ -24,10 +24,11 @@ DESCRIPTION_BUDGET_BYTES = 19 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
 # effects, import, sections), 108 KB (v0.16.0: background render jobs), 116 KB (v0.17.0: wet
 # mix + effect sends), 128 KB (v0.18.0: job listings, get_file, import_audio), 136 KB
-# (v0.19.0: create_empty_file, remove_track, automation, tuplets) and 148 KB (v0.20.0: vocal
-# chains, bus, returns, master; the description budget moved 17 -> 19 KB in the same patch).
+# (v0.19.0: create_empty_file, remove_track, automation, tuplets), 148 KB (v0.20.0: vocal
+# chains, bus, returns, master; the description budget moved 17 -> 19 KB in the same patch)
+# and 152 KB (v0.21.0: voicebank soft controls, air layer, de-esser/saturation enablement).
 # The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 148 * 1024
+PAYLOAD_CEILING_BYTES = 152 * 1024
 
 
 @pytest.fixture
