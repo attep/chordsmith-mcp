@@ -119,6 +119,17 @@ def main() -> None:
         assert peak > 1000, peak
         print(f"render:  {duration:.2f}s peak {peak} (program {result.get('plugin')})")
 
+        params = run(host, ["--params", "--plugin", str(synth)])
+        gain_index = next(p["index"] for p in params["parameters"] if p["name"] == "Gain")
+        values = run(host, ["--params", "--plugin", str(synth), "--param-values", str(gain_index)])
+        assert values["steps"] == 0, values  # a continuous parameter
+        quiet = scratch_path / "quiet.wav"
+        run(host, ["--render", "--plugin", str(synth), "--preset", "Sine",
+                   "--set", f"{gain_index}=0.1", "--midi", str(midi), "--wav", str(quiet), "--tail", "1.0"])
+        quiet_peak = wav_stats(quiet)[1]
+        assert quiet_peak < peak * 0.2, (quiet_peak, peak)  # 0.1 vs the 0.8 default
+        print(f"params:  Gain index {gain_index}, set to 0.1 -> peak {quiet_peak}")
+
         result = run(host, ["--process", "--plugin", str(gain),
                             "--in", str(source), "--out", str(processed)])
         out_duration, out_peak = wav_stats(processed)

@@ -28,6 +28,10 @@ VST effect chains, and `list_plugins` — built for both Windows and Linux serve
   labelled `source: "vst"` in `effective`.
 - **Per-track VST effect chains** (`effects` on any spec): effect plugins run over the rendered
   stem, in order, with the plugins' reported latency compensated, so stems stay aligned.
+- **`plugin_params`**: parameter values for vst instruments and effects — how plugins without
+  VST3 programs pick a patch (IK's SampleTank and Syntronik expose their patch selectors as
+  parameters). `list_plugins` gains `parameters`, `parameter_search` and `parameter_values` to
+  discover names and value indexes; the host gains `--params`, `--param-values` and `--set`.
 - **`list_plugins`**: the `.vst3` plugins under `CHORDSMITH_VST_DIR` (Docker: `/vst`), with
   `detail` loading one plugin for vendor, category, programs, parameters and latency.
 - `docs/vst.md`: Windows (IK suite) and Docker (Linux VST3) setup, free plugin suggestions and

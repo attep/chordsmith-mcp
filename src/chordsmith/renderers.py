@@ -219,6 +219,11 @@ class EffectPlugin(BaseModel):
     preset: str | None = Field(
         None, description="Program name or index inside the plugin; omit for its default state."
     )
+    params: dict[str, float] | None = Field(
+        None,
+        description="Parameter values applied after the preset, keyed by parameter name (or "
+        "index), e.g. {'Mix': 0.4}; list names with list_plugins parameter_search.",
+    )
 
 
 class InstrumentSpec(BaseModel):
@@ -249,6 +254,13 @@ class InstrumentSpec(BaseModel):
         None,
         description="vst: program name or index inside the plugin (see list_plugins detail); "
         "omit for the plugin's default state.",
+    )
+    plugin_params: dict[str, float] | None = Field(
+        None,
+        description="vst: parameter values applied after the preset, keyed by parameter name "
+        "(or index), e.g. {'Gain': 0.5}; list names with list_plugins parameter_search. This is "
+        "how plugins without VST3 programs (IK's SampleTank, Syntronik) pick a patch: find the "
+        "patch parameter, list its values and set the index.",
     )
     bank: int | None = Field(
         None,
@@ -470,7 +482,14 @@ class VstRenderer:
         if spec.plugin is None or not Path(spec.plugin).exists():
             raise RenderError(f"VST plugin '{spec.plugin}' does not exist.")
         try:
-            audio.render_vst(host, spec.plugin, spec.plugin_preset, midi, out)
+            audio.render_vst(
+                host,
+                spec.plugin,
+                spec.plugin_preset,
+                _resolve_sets(spec.plugin, spec.plugin_params),
+                midi,
+                out,
+            )
         except audio.AudioError as exc:
             raise RenderError(str(exc)) from None
         duration = audio.midi_duration(midi)
@@ -489,11 +508,11 @@ def apply_stem_effects(stem: Path, effects: list[EffectPlugin] | None) -> None:
     host = audio.find_vst_host()
     if host is None:
         raise RenderError("This track has VST effects, but the VST host is not installed.")
-    chain: list[tuple[str, str | None]] = []
+    chain: list[tuple[str, str | None, list[tuple[int, float]]]] = []
     for effect in effects:
         if not Path(effect.plugin).exists():
             raise RenderError(f"VST plugin '{effect.plugin}' does not exist.")
-        chain.append((effect.plugin, effect.preset))
+        chain.append((effect.plugin, effect.preset, _resolve_sets(effect.plugin, effect.params)))
     temp = stem.with_name(stem.stem + ".fx.wav")
     try:
         audio.process_vst(host, chain, stem, temp)
@@ -980,6 +999,47 @@ def _vst_label(spec: InstrumentSpec) -> str | None:
     return f"{label} - {spec.plugin_preset}" if spec.plugin_preset else label
 
 
+_PARAMETER_CACHE: dict[tuple[str, str], dict[str, int]] = {}
+
+
+def _parameter_indices(host: str, plugin: str) -> dict[str, int]:
+    """Parameter name -> index for a plugin (cached; the host loads the plugin once)."""
+    key = (host, plugin)
+    names = _PARAMETER_CACHE.get(key)
+    if names is None:
+        info = audio.vst_plugin_params(host, plugin)
+        names = {str(entry.get("name", "")): int(entry["index"]) for entry in info.get("parameters") or []}
+        _PARAMETER_CACHE[key] = names
+    return names
+
+
+def _resolve_sets(plugin: str, params: dict[str, float] | None) -> list[tuple[int, float]]:
+    """Turn a spec's parameter map into the (index, value) pairs the host takes."""
+    if not params:
+        return []
+    host = audio.find_vst_host()
+    if host is None:
+        raise RenderError(
+            "VST parameters need the VST host; set CHORDSMITH_VST_HOST or put vst_host on PATH."
+        )
+    names = _parameter_indices(host, plugin)
+    sets: list[tuple[int, float]] = []
+    for key, value in params.items():
+        if key.isdigit():
+            sets.append((int(key), float(value)))
+            continue
+        index = names.get(key)
+        if index is None:
+            close = next((name for name in names if key.lower() in name.lower()), None)
+            hint = f" Did you mean '{close}'?" if close else ""
+            raise RenderError(
+                f"'{Path(plugin).name}' has no parameter named '{key}'.{hint} "
+                "(list them with list_plugins parameter_search.)"
+            )
+        sets.append((index, float(value)))
+    return sets
+
+
 def _validate_vst(spec: InstrumentSpec) -> None:
     """Check a vst spec: a readable .vst3 instrument that loads, and no other engine's options."""
     if spec.plugin is None:
@@ -1027,6 +1087,7 @@ def _validate_vst(spec: InstrumentSpec) -> None:
             raise RenderError(
                 f"No program '{spec.plugin_preset}' in '{Path(spec.plugin).name}'. Programs: {listed}"
             )
+    _resolve_sets(spec.plugin, spec.plugin_params)  # parameter names must exist
 
 
 def _validate_effects(effects: list[EffectPlugin] | None) -> None:
@@ -1059,6 +1120,7 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
                     f"Effect {index}: no program '{effect.preset}' in '{Path(effect.plugin).name}'. "
                     f"Programs: {listed}"
                 )
+        _resolve_sets(effect.plugin, effect.params)  # parameter names must exist
 
 
 def section_gain_windows(
@@ -1341,6 +1403,28 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "vendor, category, programs, parameters, latency. Loads the plugin in the VST host."
             ),
         ] = None,
+        parameters: Annotated[
+            bool,
+            Field(
+                description="With detail: also return the plugin's parameters (index, name, steps, "
+                "current text; up to 500) — the keys plugin_params takes."
+            ),
+        ] = False,
+        parameter_search: Annotated[
+            str | None,
+            Field(
+                description="With detail: only parameters whose name contains this text "
+                "(case-insensitive), e.g. 'patch' or 'gain'."
+            ),
+        ] = None,
+        parameter_values: Annotated[
+            int | None,
+            Field(
+                description="With detail: dump the value strings of this parameter index (up to "
+                "200) — for discrete selectors like patch lists; the plain values are what "
+                "plugin_params takes."
+            ),
+        ] = None,
     ) -> results.PluginsResult:
         """List the .vst3 plugins found in CHORDSMITH_VST_DIR (Docker: /vst); read-only.
 
@@ -1359,6 +1443,8 @@ def register(mcp: FastMCP, store_provider) -> None:
             ]
         host = audio.find_vst_host()
         payload = None
+        parameter_list = None
+        value_list = None
         if detail is not None:
             if host is None:
                 raise RenderError(
@@ -1371,11 +1457,22 @@ def register(mcp: FastMCP, store_provider) -> None:
                     raise RenderError(f"Plugin '{detail}' is not a path or a scanned name.")
                 target = match["path"]
             payload = audio.vst_plugin_info(host, target)
+            if parameters or parameter_search is not None:
+                info = audio.vst_plugin_params(host, target)
+                entries = info.get("parameters") or []
+                if parameter_search:
+                    needle = parameter_search.lower()
+                    entries = [entry for entry in entries if needle in str(entry.get("name", "")).lower()]
+                parameter_list = entries[:500]
+            if parameter_values is not None:
+                value_list = audio.vst_param_values(host, target, parameter_values)
         return {
             "host": host,
             "directory": directory,
             "plugins": plugins,
             "detail": payload,
+            "parameters": parameter_list,
+            "parameter_values": value_list,
         }
 
     @mcp.tool(title="Bake instruments into MIDI", annotations=_CREATES)

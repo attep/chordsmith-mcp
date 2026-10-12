@@ -332,8 +332,26 @@ def vst_plugin_info(host: str, plugin: str) -> dict:
     return _run_vst_host(host, ["--list", "--plugin", plugin])
 
 
+def vst_plugin_params(host: str, plugin: str) -> dict:
+    """The plugin's parameters (index, name, steps, current value and text)."""
+    return _run_vst_host(host, ["--params", "--plugin", plugin])
+
+
+def vst_param_values(host: str, plugin: str, index: int, limit: int = 200) -> dict:
+    """The value strings of one discrete parameter (a patch list selector, for example)."""
+    return _run_vst_host(
+        host, ["--params", "--plugin", plugin, "--param-values", str(index), "--param-limit", str(limit)]
+    )
+
+
 def render_vst(
-    host: str, plugin: str, preset: str | None, midi_path: Path, target: Path, tail: float = 2.0
+    host: str,
+    plugin: str,
+    preset: str | None,
+    sets: list[tuple[int, float]] | None,
+    midi_path: Path,
+    target: Path,
+    tail: float = 2.0,
 ) -> dict:
     """Render a MIDI file through a VST3 instrument with the host (44.1 kHz, stereo)."""
     args = [
@@ -349,15 +367,24 @@ def render_vst(
     ]
     if preset:
         args += ["--preset", preset]
+    for index, value in sets or []:
+        args += ["--set", f"{index}={value:g}"]
     return _run_vst_host(host, args)
 
 
-def process_vst(host: str, chain: list[tuple[str, str | None]], source: Path, target: Path) -> dict:
+def process_vst(
+    host: str,
+    chain: list[tuple[str, str | None, list[tuple[int, float]]]],
+    source: Path,
+    target: Path,
+) -> dict:
     """Run a wav through effect plugins in order; the host compensates reported latency."""
     args = ["--process"]
-    for plugin, preset in chain:
+    for plugin, preset, sets in chain:
         args += ["--plugin", plugin]
         if preset:
             args += ["--preset", preset]
+        for index, value in sets:
+            args += ["--set", f"{index}={value:g}"]
     args += ["--in", str(source), "--out", str(target)]
     return _run_vst_host(host, args)

@@ -30,8 +30,9 @@ releases; the Docker image builds the Linux binary. Point ChordSmith at the bina
 
 ```
 vst_host --list --plugin X.vst3
-vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--tail SECONDS] --midi in.mid --wav out.wav
-vst_host --process [--plugin X.vst3 [--preset NAME|INDEX]]... --in in.wav --out out.wav
+vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]
+vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE]... [--tail SECONDS] --midi in.mid --wav out.wav
+vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE]...]... --in in.wav --out out.wav
 ```
 
 Every mode prints one JSON line on stdout (`{"ok": true, ...}` or `{"ok": false, "error": ...}`)
@@ -40,6 +41,13 @@ and exits non-zero on failure. Audio is 44.1 kHz stereo; `--render` renders the 
 
 `--list` loads the plugin and reports each type's vendor, category, whether it is an
 instrument, its programs (the values `plugin_preset` takes), parameter count and latency.
+
+`--params` lists the plugin's parameters (index, name, steps, current value and text);
+`--param-values INDEX` dumps a discrete parameter's value strings (a patch list, for example).
+`--set INDEX=VALUE` applies a parameter before rendering — for discrete parameters VALUE is the
+plain index (see `--param-values`), for toggles 0/1, for continuous parameters the 0-1 value.
+Plugins that expose no VST3 programs (IK's SampleTank, Syntronik) pick patches through such
+parameters.
 
 ## Notes and limits
 

@@ -28,8 +28,13 @@ server running **natively on Windows**:
    chordsmith-mcp` or `chordsmith-mcp` from a checkout) and call `list_plugins`.
 
 IK Multimedia plugins (MODO DRUM, MODO BASS, SampleTank, Syntronik, MixBox, T-RackS) must be
-authorized once in IK Product Manager; after that they load headless in the host. Their presets
-appear as VST3 programs (pick them with `plugin_preset`).
+authorized once in IK Product Manager; after that they load headless in the host. Plugins with
+VST3 programs (many synths) are picked with `plugin_preset`; the IK synths expose their patch
+selectors as **parameters** instead — use `list_plugins` with `parameter_search` (try
+`"patch"`, `"program"` or `"instrument"`) and `parameter_values` to find the patch index, then
+pass it in `plugin_params` (e.g. `{"Part 1 Patch": 123}`). MODO DRUM/MODO BASS load their
+default kit/model; MixBox's default chain passes audio cleanly, which makes it a safe first
+effect to try.
 
 The Linux Docker server does **not** load Windows plugins (Wine/yabridge is not supported): it
 uses Linux VST3s only (see below). The Docker image still includes `vst_host` and the test

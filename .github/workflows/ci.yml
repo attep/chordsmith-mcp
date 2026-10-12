@@ -43,6 +43,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev \
+            libfreetype6-dev libfontconfig1-dev pkg-config
       - name: Configure
         run: cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TEST_PLUGINS=ON
       - name: Build

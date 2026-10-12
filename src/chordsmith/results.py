@@ -259,6 +259,7 @@ class SectionOverride(TypedDict):
 class EffectEntry(TypedDict):
     plugin: str
     preset: str | None
+    params: dict[str, float] | None
 
 
 class InstrumentTrack(TypedDict):
@@ -267,6 +268,7 @@ class InstrumentTrack(TypedDict):
     sfz: str | None
     plugin: str | None
     plugin_preset: str | None
+    plugin_params: dict[str, float] | None
     effects: list[EffectEntry] | None
     bank: int | None
     program: int | None
@@ -335,6 +337,8 @@ class PluginsResult(TypedDict):
     directory: str | None
     plugins: list[PluginEntry]
     detail: dict | None
+    parameters: list[dict] | None
+    parameter_values: dict | None
 
 
 class InstrumentMapResult(TypedDict):

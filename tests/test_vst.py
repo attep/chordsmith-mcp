@@ -103,6 +103,11 @@ async def test_list_plugins_scans_and_describes(store, monkeypatch):
     assert first["is_instrument"] is True
     assert "Sine" in first["programs"] and "Saw" in first["programs"]
 
+    with_params = (
+        await _call("list_plugins", {"detail": "ToneSynth", "parameters": True, "parameter_search": "gain"})
+    ).structuredContent
+    assert any(entry["name"] == "Gain" for entry in with_params["parameters"])
+
     gain = (await _call("list_plugins", {"detail": str(GAIN)})).structuredContent["detail"]
     assert gain["types"][0]["is_instrument"] is False
     assert gain["types"][0]["latency_samples"] == 64
@@ -219,6 +224,38 @@ async def test_vst_effects_chain_is_applied_and_latency_compensated(store):
     # stem keeps the song's length and the peak drops by about 6 dB.
     assert _duration(fx_data) == pytest.approx(_duration(plain_data), abs=0.02)
     assert _peak_db(fx_data) == pytest.approx(_peak_db(plain_data) - 6.0, abs=1.5)
+
+
+async def test_vst_plugin_params_change_the_render(store):
+    song = await _make_song(store)
+    bad = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Melody": {"engine": "vst", "plugin": str(TONE), "plugin_params": {"Nope": 0.5}}},
+        },
+    )
+    assert bad.isError and "no parameter named" in bad.content[0].text
+
+    async def render_with(params, output):
+        spec = {"engine": "vst", "plugin": str(TONE)}
+        if params is not None:
+            spec["plugin_params"] = params
+        set_spec = await _call("set_track_instrument", {"filename": song, "tracks": {"Melody": spec}})
+        assert not set_spec.isError, set_spec.content[0].text
+        rendered = await _call(
+            "render_audio",
+            {"filename": song, "stems": True, "output_filename": output, "overwrite": True},
+        )
+        assert not rendered.isError, rendered.content[0].text
+        stem = next(s for s in rendered.structuredContent["stems"] if s["track"] == "Melody")
+        return _peak_db(base64.b64decode(stem["data_base64"]))
+
+    plain_peak = await render_with(None, "pp_plain")
+    quiet_peak = await render_with({"Gain": 0.2}, "pp_quiet")
+    # the test synth's Gain defaults to 0.8; 0.2 is about -12 dB
+    expected = plain_peak + 20 * math.log10(0.2 / 0.8)
+    assert quiet_peak == pytest.approx(expected, abs=1.5)
 
 
 async def test_bake_instruments_with_vst(store):

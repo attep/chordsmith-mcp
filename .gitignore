@@ -14,5 +14,7 @@ output/
 voicebank/
 sfz/
 vst/
+bin/
+state-local/
 host/build/
 *.zip

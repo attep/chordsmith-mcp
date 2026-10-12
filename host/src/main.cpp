@@ -40,11 +40,14 @@ struct Options {
     juce::String mode;
     juce::StringArray plugins;
     juce::StringArray presets;  // one per plugin (empty = the plugin's default state)
+    juce::StringArray sets;     // one per plugin: "index=plainValue;index=plainValue;..."
     juce::String midi;
     juce::String wav;
     juce::String input;
     juce::String output;
     double tail = 2.0;
+    int parameterValues = -1;
+    int parameterLimit = 200;
     bool help = false;
 };
 
@@ -76,9 +79,10 @@ int fail(const juce::String& message) {
 void printUsage() {
     std::cout << "usage:\n"
               << "  vst_host --list --plugin X.vst3\n"
-              << "  vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--tail SECONDS] "
-                 "--midi in.mid --wav out.wav\n"
-              << "  vst_host --process [--plugin X.vst3 [--preset NAME|INDEX]]... "
+              << "  vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]\n"
+              << "  vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE] "
+                 "[--tail SECONDS] --midi in.mid --wav out.wav\n"
+              << "  vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE]]... "
                  "--in in.wav --out out.wav\n";
 }
 
@@ -96,17 +100,29 @@ bool parseOptions(int argc, char** argv, Options& options, juce::String& error) 
         };
         if (arg == "--help" || arg == "-h") {
             options.help = true;
-        } else if (arg == "--list" || arg == "--render" || arg == "--process") {
+        } else if (arg == "--list" || arg == "--render" || arg == "--process" || arg == "--params") {
             options.mode = arg;
         } else if (arg == "--plugin") {
             options.plugins.add(value(arg));
             options.presets.add("");
+            options.sets.add("");
         } else if (arg == "--preset") {
             if (options.presets.isEmpty()) {
                 error = "--preset must follow a --plugin";
                 return false;
             }
             options.presets.set(options.presets.size() - 1, value(arg));
+        } else if (arg == "--set") {
+            if (options.sets.isEmpty()) {
+                error = "--set must follow a --plugin";
+                return false;
+            }
+            const int last = options.sets.size() - 1;
+            options.sets.set(last, options.sets[last] + value(arg) + ";");
+        } else if (arg == "--param-values") {
+            options.parameterValues = value(arg).getIntValue();
+        } else if (arg == "--param-limit") {
+            options.parameterLimit = value(arg).getIntValue();
         } else if (arg == "--midi") {
             options.midi = value(arg);
         } else if (arg == "--wav") {
@@ -193,6 +209,51 @@ bool applyPreset(juce::AudioPluginInstance& instance, const juce::String& preset
     }
     instance.setCurrentProgram(index);
     return true;
+}
+
+void configureBuses(juce::AudioPluginInstance& instance, bool instrument) {
+    // Turn every bus on, then prefer a plain stereo layout: plugins with several bus layouts
+    // (T-RackS, for one) can otherwise be left with a disabled input and output silence.
+    instance.enableAllBuses();
+    juce::AudioProcessor::BusesLayout layout;
+    if (!instrument) layout.inputBuses.add(juce::AudioChannelSet::stereo());
+    layout.outputBuses.add(juce::AudioChannelSet::stereo());
+    if (!instance.setBusesLayout(layout))
+        std::cerr << "warning: the plugin does not offer a plain stereo layout; using its default"
+                  << std::endl;
+}
+
+int plainValue(juce::AudioProcessorParameter& parameter) {
+    const int steps = parameter.getNumSteps();
+    const float value = parameter.getValue();
+    if (steps > 1) return static_cast<int>(std::lround(value * (steps - 1)));
+    if (steps == 1) return value > 0.5f ? 1 : 0;
+    return -1;
+}
+
+void applySets(juce::AudioPluginInstance& instance, const juce::String& sets) {
+    if (sets.isEmpty()) return;
+    auto& parameters = instance.getParameters();
+    for (const auto& entry : juce::StringArray::fromTokens(sets, ";", "")) {
+        if (entry.isEmpty()) continue;
+        const int index = entry.upToFirstOccurrenceOf("=", false, false).getIntValue();
+        const double plain = entry.fromFirstOccurrenceOf("=", false, false).getDoubleValue();
+        if (index < 0 || index >= parameters.size()) {
+            std::cerr << "warning: parameter " << index << " is out of range (0-"
+                      << parameters.size() - 1 << ")" << std::endl;
+            continue;
+        }
+        auto* parameter = parameters[index];
+        const int steps = parameter->getNumSteps();
+        float normalized = 0.0f;
+        if (steps > 1)
+            normalized = static_cast<float>(juce::jlimit(0.0, 1.0, plain / (steps - 1)));
+        else if (steps == 1)
+            normalized = plain > 0.5 ? 1.0f : 0.0f;
+        else
+            normalized = static_cast<float>(juce::jlimit(0.0, 1.0, plain));
+        parameter->setValue(normalized);
+    }
 }
 
 struct TimedMessage {
@@ -296,7 +357,7 @@ int runList(const Options& options) {
         auto instance = instantiate(description, typeError);
         if (instance != nullptr) {
             // Prepare so the wrapper reports real latency (VST3 refreshes it on setupProcessing).
-            instance->enableAllBuses();
+            configureBuses(*instance, description.isInstrument);
             instance->prepareToPlay(kSampleRate, kBlockSize);
             programCount = instance->getNumPrograms();
             parameters = instance->getParameters().size();
@@ -321,6 +382,61 @@ int runList(const Options& options) {
     return 0;
 }
 
+int runParams(const Options& options) {
+    if (options.plugins.isEmpty()) return fail("--params needs --plugin");
+    juce::String error;
+    juce::OwnedArray<juce::PluginDescription> types;
+    if (!loadTypes(options.plugins[0], types, error)) return fail(error);
+    auto instance = instantiate(*types[0], error);
+    if (instance == nullptr) return fail(error);
+    configureBuses(*instance, types[0]->isInstrument);
+    instance->prepareToPlay(kSampleRate, kBlockSize);
+
+    if (options.parameterValues >= 0) {
+        auto& parameters = instance->getParameters();
+        if (options.parameterValues >= parameters.size())
+            return fail("parameter index " + juce::String(options.parameterValues) + " is out of range");
+        auto* parameter = parameters[options.parameterValues];
+        const int steps = parameter->getNumSteps();
+        const int limit = juce::jmax(1, options.parameterLimit);
+        juce::String values;
+        int count = 0;
+        if (steps > 1) {
+            for (int value = 0; value < steps && count < limit; ++value, ++count) {
+                if (count > 0) values += ",";
+                values += "{\"plain\":" + juce::String(value) + ",\"text\":" +
+                          jsonString(parameter->getText((float) value / (float) (steps - 1), 120)) + "}";
+            }
+        }
+        std::cout << "{\"ok\":true,\"mode\":\"values\",\"plugin\":" << jsonString(types[0]->name)
+                  << ",\"index\":" << options.parameterValues
+                  << ",\"name\":" << jsonString(parameter->getName(120))
+                  << ",\"steps\":" << steps
+                  << ",\"truncated\":" << (count < steps ? "true" : "false")
+                  << ",\"values\":[" << values << "]}" << std::endl;
+        return 0;
+    }
+
+    auto& parameters = instance->getParameters();
+    juce::String json = "{\"ok\":true,\"mode\":\"params\",\"plugin\":" + jsonString(types[0]->name) +
+                        ",\"parameters\":[";
+    for (int i = 0; i < parameters.size(); ++i) {
+        if (i > 0) json += ",";
+        auto* parameter = parameters[i];
+        const int steps = parameter->getNumSteps();
+        const float value = parameter->getValue();
+        json += "{\"index\":" + juce::String(i) +
+                ",\"name\":" + jsonString(parameter->getName(120)) +
+                ",\"steps\":" + juce::String(steps) +
+                ",\"value\":" + juce::String(value, 4) +
+                ",\"plain\":" + juce::String(plainValue(*parameter)) +
+                ",\"text\":" + jsonString(parameter->getText(value, 120)) + "}";
+    }
+    json += "]}";
+    std::cout << json << std::endl;
+    return 0;
+}
+
 int runRender(const Options& options) {
     if (options.plugins.isEmpty()) return fail("--render needs --plugin");
     if (options.midi.isEmpty() || options.wav.isEmpty())
@@ -332,14 +448,14 @@ int runRender(const Options& options) {
         return fail("'" + types[0]->name + "' is an effect, not an instrument; use --process for effects");
     auto instance = instantiate(*types[0], error);
     if (instance == nullptr) return fail(error);
+    configureBuses(*instance, true);
+    instance->prepareToPlay(kSampleRate, kBlockSize);
     if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
+    applySets(*instance, options.sets[0]);
 
     std::vector<TimedMessage> events;
     double end = 0.0;
     if (!loadMidi(options.midi, events, end, error)) return fail(error);
-
-    instance->setPlayConfigDetails(0, 2, kSampleRate, kBlockSize);
-    instance->prepareToPlay(kSampleRate, kBlockSize);
 
     const juce::int64 totalFrames =
         static_cast<juce::int64>(std::ceil((end + juce::jmax(0.0, options.tail)) * kSampleRate));
@@ -395,9 +511,10 @@ int runProcess(const Options& options) {
             return fail("'" + types[0]->name + "' is an instrument; --process takes effects");
         auto instance = instantiate(*types[0], error);
         if (instance == nullptr) return fail(error);
-        if (!applyPreset(*instance, options.presets[i], error)) return fail(error);
-        instance->setPlayConfigDetails(2, 2, kSampleRate, kBlockSize);
+        configureBuses(*instance, false);
         instance->prepareToPlay(kSampleRate, kBlockSize);
+        if (!applyPreset(*instance, options.presets[i], error)) return fail(error);
+        applySets(*instance, options.sets[i]);
         latency += instance->getLatencySamples();
         chain.push_back(std::move(instance));
     }
@@ -435,6 +552,7 @@ int main(int argc, char** argv) {
         return options.mode.isEmpty() && !options.help ? 2 : 0;
     }
     if (options.mode == "--list") return runList(options);
+    if (options.mode == "--params") return runParams(options);
     if (options.mode == "--render") return runRender(options);
     if (options.mode == "--process") return runProcess(options);
     return fail("Unknown mode '" + options.mode + "'");

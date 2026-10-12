@@ -433,13 +433,14 @@ Each spec has:
 | `sfz` | sfizz: path to a `.sfz` instrument file (with its samples) the server can read; required when `engine` is `"sfizz"` |
 | `plugin` | vst: path to a `.vst3` instrument plugin the server can read (see [list_plugins](#list_plugins)); required when `engine` is `"vst"` |
 | `plugin_preset` | vst: program name or index inside the plugin (from `list_plugins` `detail`); omit for its default state |
+| `plugin_params` | vst: parameter values applied after the preset, keyed by parameter name (or index), e.g. `{"Gain": 0.5}`. How plugins **without** VST3 programs pick a patch: find the selector with `list_plugins` `parameter_search`, list its values with `parameter_values`, set the index |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
 | `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet. A section `gain_db` replaces the track's gain for that section: it is applied **exactly** to the rendered stem (and baked as CC11, which cannot boost above 0 dB) |
 | `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 | `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
-| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm"}]`. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
+| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}]`. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
 
@@ -528,9 +529,12 @@ No options, or a `detail` value. Read-only. Lists the `.vst3` plugins found unde
 as `plugin` — plus the resolved `host` binary. With `detail` (a path, or a name from the scan)
 the VST host loads that plugin and returns each of its types: vendor, category, whether it is
 an instrument, its `programs` (the values `plugin_preset` takes), parameter count and
-`latency_samples`. Plugins are user-supplied and never bundled; the host is a separate process,
-so a crashing plugin cannot take the server down. See [VST plugins](vst.md) for setup on
-Windows and Docker, and free plugin suggestions.
+`latency_samples`. `parameters: true` (optionally with `parameter_search`) returns the
+parameter list — index, name, steps, current text — the keys `plugin_params` takes;
+`parameter_values: <index>` dumps a discrete parameter's value strings (a patch selector's list,
+for example) so an index can be picked by name. Plugins are user-supplied and never bundled;
+the host is a separate process, so a crashing plugin cannot take the server down. See
+[VST plugins](vst.md) for setup on Windows and Docker, and free plugin suggestions.
 
 ## list_chord_types
 
