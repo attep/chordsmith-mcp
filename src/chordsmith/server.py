@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import tempfile
 import wave
 from collections.abc import Callable
@@ -1252,26 +1253,32 @@ def _render_stems(
             if progress is not None:
                 progress(name, "running")
             stem_midi = Path(scratch) / f"stem_{index}.mid"
+            working = Path(scratch) / f"stem_{index}.wav"
             singing.extract_track(source, stem_midi, index)
             spec = specs.get(name) or renderers.InstrumentSpec(preset=soundfont)
             renderer = renderers.get_renderer(spec.engine)
-            with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
-                try:
-                    renderer.render(stem_midi, spec, stem_wav, effects)
-                    windows = renderers.section_gain_windows(spec, section_timeline)
-                    if windows:
-                        renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
-                    renderers.apply_stem_effects(stem_wav, spec.effects)
-                except renderers.RenderError as exc:
-                    message = f"Track '{name}': {exc}"
-                    if not continue_on_error:
-                        raise ValueError(message) from None
-                    if progress is not None:
-                        progress(name, "failed", message)
-                    return ("failed", name, message)
+            try:
+                # Render into the scratch dir and only copy into the claimed output name when
+                # the stem is finished: a stem claimed up front would be visible (listings,
+                # download URLs) as a 0-byte placeholder while the engine works — minutes for a
+                # big sample library.
+                renderer.render(stem_midi, spec, working, effects)
+                windows = renderers.section_gain_windows(spec, section_timeline)
+                if windows:
+                    renderers.apply_section_gains(working, windows, spec.gain_db)
+                renderers.apply_stem_effects(working, spec.effects)
+                with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
+                    shutil.copyfile(working, stem_wav)
+            except renderers.RenderError as exc:
+                message = f"Track '{name}': {exc}"
+                if not continue_on_error:
+                    raise ValueError(message) from None
                 if progress is not None:
-                    progress(name, "done")
-                return ("ok", renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db), None)
+                    progress(name, "failed", message)
+                return ("failed", name, message)
+            if progress is not None:
+                progress(name, "done")
+            return ("ok", renderers.Stem(track=name, path=stem_wav, gain_db=spec.gain_db), None)
 
         outcomes = renderers.parallel_map(render_track, tracks)
         stems = [outcome[1] for outcome in outcomes if outcome[0] == "ok"]

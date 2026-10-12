@@ -38,6 +38,12 @@ VST effect chains, and `list_plugins` — built for both Windows and Linux serve
   caveats; the Docker image mounts `/vst`; `bake_instruments` lists a vst track's plugin as
   companion metadata.
 
+### Fixed
+
+- Stem renders are written to a scratch file and copied into the output folder only when the
+  stem is finished, so a stem never appears as a 0-byte file in listings or download links
+  while a slow engine (a big sample library, say) is still working.
+
 ## [0.22.1] - 2026-10-12
 
 From the hip-hop demo: sfizz stems are padded to the song's own length, and the docs say where
