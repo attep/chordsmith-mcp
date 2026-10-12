@@ -109,9 +109,15 @@ say so.
   reject FluidSynth-only options (preset/bank/program/sends).
 - **VST plugins**: `set_track_instrument` takes `engine: "vst"` + `plugin` (+ `plugin_preset`
   from `list_plugins` with `detail`) for `.vst3` instruments, and `effects` chains `.vst3`
-  effects over any track's rendered stem (latency compensated). Needs the VST host — on
-  Windows the released `vst_host.exe`, in Docker the Linux plugins under `/vst`. vst tracks
-  render only with `render_audio(stems: true)`.
+  effects over any track's rendered stem (latency compensated). `plugin_params` values are
+  numbers or choice **names** (e.g. `{"A Osc 1 Type": "Classic"}`): many VST3 choice parameters
+  report no discrete steps, and `list_plugins` `parameter_values` scans those and lists the
+  names — a wrong name fails the render with the options. Needs the VST host — on Windows the
+  released `vst_host.exe`, in Docker the Linux plugins under `/vst`. vst tracks render only
+  with `render_audio(stems: true)`. Amp plugins are effects: sampled guitar (sfizz) + amp in
+  `effects`; TONEX stays silent headless (empty tone slot, no way to pick a tone) and AmpliTube
+  CS demo gear adds white-noise bursts — prefer MixBox or a built-in `chain` (saturation) for
+  a driven tone.
 - **Long renders**: DiffSinger is slow on CPU (tens of seconds per minute) and runs in background
   jobs chunked at rests; long FluidSynth songs should use `render_audio_job`.
 - **Long mixes**: `mix_song_with_vocals` can outrun a client's tool timeout on stems sessions —

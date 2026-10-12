@@ -12,6 +12,30 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.2] - 2026-10-12
+
+VST parameters by name: choice parameters that VST3 exposes as continuous values are settable now.
+
+### Added
+
+- `plugin_params` and a VST effect's `params` accept **value names** beside numbers, e.g.
+  `{"A Osc 1 Type": "Classic"}` — the host resolves a name against the plugin (its own
+  text-to-value mapping, then a scan of its states) and **fails the render with the available
+  names** when nothing matches, instead of silently skipping the setting.
+- `list_plugins` gains `name_contains` to filter the plugin scan (case-insensitive).
+- The host's `--param-values` scans continuous parameters and lists the distinct texts they
+  produce, so choice parameters with no discrete steps (all of Surge XT's, for example) yield a
+  usable value list; toggles list their two states.
+- A "Wave" choice parameter on the ToneSynth test plugin exercises the text-to-value path in the
+  host smoke tests, and `scripts/run-windows-server.ps1` starts the native Windows server with
+  the local VST3/SFZ paths.
+
+### Documentation
+
+- `docs/vst.md`: the guitar-through-an-amp recipe records what was verified live — TONEX renders
+  silence headless (the standalone's tone is **not** inherited by the plugin), AmpliTube CS demo
+  gear mixes in white-noise bursts, and a built-in chain always gives a driven-DI tone.
+
 ## [0.24.0] - 2026-10-12
 
 Audible lows and long mixes: layered tracks, built-in instrument chains, and background mix jobs.

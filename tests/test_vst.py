@@ -108,6 +108,10 @@ async def test_list_plugins_scans_and_describes(store, monkeypatch):
     ).structuredContent
     assert any(entry["name"] == "Gain" for entry in with_params["parameters"])
 
+    filtered = (await _call("list_plugins", {"name_contains": "tone"})).structuredContent
+    assert {entry["name"] for entry in filtered["plugins"]} == {"ToneSynth"}
+    assert all("ToneSynth" in entry["path"] for entry in filtered["plugins"])
+
     gain = (await _call("list_plugins", {"detail": str(GAIN)})).structuredContent["detail"]
     assert gain["types"][0]["is_instrument"] is False
     assert gain["types"][0]["latency_samples"] == 64
@@ -256,6 +260,51 @@ async def test_vst_plugin_params_change_the_render(store):
     # the test synth's Gain defaults to 0.8; 0.2 is about -12 dB
     expected = plain_peak + 20 * math.log10(0.2 / 0.8)
     assert quiet_peak == pytest.approx(expected, abs=1.5)
+
+
+async def test_vst_plugin_params_by_name(store):
+    song = await _make_song(store)
+
+    async def render_with(params, output):
+        spec = {"engine": "vst", "plugin": str(TONE)}
+        if params is not None:
+            spec["plugin_params"] = params
+        set_spec = await _call("set_track_instrument", {"filename": song, "tracks": {"Melody": spec}})
+        assert not set_spec.isError, set_spec.content[0].text
+        rendered = await _call(
+            "render_audio",
+            {"filename": song, "stems": True, "output_filename": output, "overwrite": True},
+        )
+        assert not rendered.isError, rendered.content[0].text
+        stem = next(s for s in rendered.structuredContent["stems"] if s["track"] == "Melody")
+        return base64.b64decode(stem["data_base64"])
+
+    sine = await render_with(None, "wave_sine")
+    saw = await render_with({"Wave": "Saw"}, "wave_saw")
+    assert saw != sine, "setting Wave by name did not change the render"
+
+    indexed = await render_with({"1": "Saw"}, "wave_indexed")
+    assert indexed == saw, "the index key and the name key should reach the same value"
+
+    bad = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {
+                "Melody": {
+                    "engine": "vst",
+                    "plugin": str(TONE),
+                    "plugin_params": {"Wave": "Triangle"},
+                }
+            },
+        },
+    )
+    assert not bad.isError  # names are validated on set; values resolve in the host at render time
+    failed = await _call(
+        "render_audio", {"filename": song, "stems": True, "output_filename": "wave_bad", "overwrite": True}
+    )
+    assert failed.isError and "no value matches" in failed.content[0].text, failed.content[0].text
+    assert "Sine" in failed.content[0].text  # the error lists the available value names
 
 
 async def test_bake_instruments_with_vst(store):

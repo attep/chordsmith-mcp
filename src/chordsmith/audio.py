@@ -344,11 +344,20 @@ def vst_param_values(host: str, plugin: str, index: int, limit: int = 200) -> di
     )
 
 
+def _set_arguments(sets: list[tuple[int, float | str]] | None) -> list[str]:
+    """--set arguments: numbers as plain values, strings as value names the host resolves."""
+    args: list[str] = []
+    for index, value in sets or []:
+        text = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+        args += ["--set", f"{index}={text}"]
+    return args
+
+
 def render_vst(
     host: str,
     plugin: str,
     preset: str | None,
-    sets: list[tuple[int, float]] | None,
+    sets: list[tuple[int, float | str]] | None,
     midi_path: Path,
     target: Path,
     tail: float = 2.0,
@@ -367,14 +376,13 @@ def render_vst(
     ]
     if preset:
         args += ["--preset", preset]
-    for index, value in sets or []:
-        args += ["--set", f"{index}={value:g}"]
+    args += _set_arguments(sets)
     return _run_vst_host(host, args)
 
 
 def process_vst(
     host: str,
-    chain: list[tuple[str, str | None, list[tuple[int, float]]]],
+    chain: list[tuple[str, str | None, list[tuple[int, float | str]]]],
     source: Path,
     target: Path,
 ) -> dict:
@@ -384,7 +392,6 @@ def process_vst(
         args += ["--plugin", plugin]
         if preset:
             args += ["--preset", preset]
-        for index, value in sets:
-            args += ["--set", f"{index}={value:g}"]
+        args += _set_arguments(sets)
     args += ["--in", str(source), "--out", str(target)]
     return _run_vst_host(host, args)

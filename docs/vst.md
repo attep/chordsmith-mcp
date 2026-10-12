@@ -31,10 +31,21 @@ IK Multimedia plugins (MODO DRUM, MODO BASS, SampleTank, Syntronik, MixBox, T-Ra
 authorized once in IK Product Manager; after that they load headless in the host. Plugins with
 VST3 programs (many synths) are picked with `plugin_preset`; the IK synths expose their patch
 selectors as **parameters** instead — use `list_plugins` with `parameter_search` (try
-`"patch"`, `"program"` or `"instrument"`) and `parameter_values` to find the patch index, then
-pass it in `plugin_params` (e.g. `{"Part 1 Patch": 123}`). MODO DRUM/MODO BASS load their
-default kit/model; MixBox's default chain passes audio cleanly, which makes it a safe first
-effect to try.
+`"patch"`, `"program"` or `"instrument"`) and `parameter_values` to find the values, then pass
+one in `plugin_params`, by name or index (e.g. `{"Part 1 Patch": "Full Grand"}` or
+`{"Part 1 Patch": 123}`). MODO DRUM/MODO BASS load their default kit/model; MixBox's default
+chain passes audio cleanly, which makes it a safe first effect to try.
+
+### Parameter values by name
+
+`plugin_params` (and an effect's `params`) values are either numbers — a **plain index** for
+discrete parameters, 0–1 for continuous ones — or **value names**, which the host resolves
+against the plugin itself: `{"A Osc 1 Type": "Classic"}`. Many VST3 plugins expose their choice
+parameters as continuous values with no discrete steps (`steps: 0`), so names are the reliable
+way in: `list_plugins` with `parameter_values: <index>` scans such a parameter and lists the
+distinct texts it produces (stepped and toggle parameters list theirs directly). A name that
+matches nothing **fails the render** with the available texts in the error, rather than
+silently rendering the wrong sound.
 
 The Linux Docker server does **not** load Windows plugins (Wine/yabridge is not supported): it
 uses Linux VST3s only (see below). The Docker image still includes `vst_host` and the test
@@ -78,6 +89,32 @@ Downloaded, extracted into `./vst` and verified on a live server with `list_plug
 
 Vital's free download is account-gated (`account.vital.audio`), so it is not scripted here;
 CHOW Tape Model had no release assets at the time of writing.
+
+## Guitar through an amp plugin (TONEX, AmpliTube, ...)
+
+Amp/cab plugins are **effects** — they process audio and cannot take MIDI. The pattern is a
+sampled guitar rendered from MIDI plus the amp as an insert on that track:
+
+1. A sampled guitar instrument: mount an SFZ library (e.g. the CC0 *Emilyguitar* —
+   `emily_basic.sfz`, playable A1–F6) and give the track
+   `{"engine": "sfizz", "sfz": "<lib>/emily_basic.sfz", "chain": {"eq": {"highpass_hz": 70}}}`.
+   Write power chords as dyads; palm mutes are short low-velocity notes, ringing chords long ones.
+2. The amp in the same track's `effects` chain, e.g.
+   `{"plugin": "C:\\Program Files\\Common Files\\VST3\\AmpliTube 5.vst3"}` — the host compensates
+   the plugin's reported latency, and the stem carries the amp sound.
+3. Render with `stems: true` on a **Windows** server: IK amp plugins are Windows-only, so the
+   Linux Docker server cannot run them (the sampled guitar itself works on both).
+
+**TONEX heads-up:** it loads and reports as an effect, but its VST3 exposes no programs and only
+placeholder parameters ("Knob 01"…), and its default plugin state has an empty tone slot — so
+headless it renders **silence** while its Bypass toggle passes the dry signal. Loading a tone in
+the TONEX **standalone** does *not* help: the plugin keeps its own state and there is no way to
+select a tone through its parameters, so it cannot be driven headless today (only through its
+GUI, which the host does not open yet). AmpliTube's demo gear (unlicensed models in AmpliTube CS)
+adds periodic white-noise bursts to the render; licensed gear is clean, and MixBox's default
+chain passes audio cleanly out of the box. For an amp-ish tone with no plugin at all, a built-in
+`chain` (`{"eq": {"highpass_hz": 80, "bells": [...]}, "saturation": {"enabled": true, ...}}`)
+gives a driven-DI sound that always works.
 
 ## Caveats
 

@@ -15,9 +15,16 @@
     binary and reads the wav it writes. Modes:
 
       vst_host --list --plugin X.vst3
-      vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--tail SECONDS] \
-               --midi in.mid --wav out.wav
-      vst_host --process [--plugin X.vst3 [--preset NAME|INDEX]]... --in in.wav --out out.wav
+      vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]
+      vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME] \
+               [--tail SECONDS] --midi in.mid --wav out.wav
+      vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME]]... \
+               --in in.wav --out out.wav
+
+    A --set value may be a number (a plain index for discrete parameters, 0-1 for continuous
+    ones) or a value name the plugin resolves itself ("Saw"). --param-values scans a continuous
+    parameter and lists the distinct texts it produces — VST3 plugins often expose their choice
+    parameters as continuous, so the scan is what yields a usable list for them.
 
     Every mode prints one JSON line on stdout ({"ok": true, ...} or {"ok": false, "error": ...}).
 */
@@ -27,6 +34,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -81,10 +89,12 @@ void printUsage() {
     std::cout << "usage:\n"
               << "  vst_host --list --plugin X.vst3\n"
               << "  vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]\n"
-              << "  vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE] "
+              << "  vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME] "
                  "[--tail SECONDS] --midi in.mid --wav out.wav\n"
-              << "  vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE]]... "
-                 "--in in.wav --out out.wav\n";
+              << "  vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME]]... "
+                 "--in in.wav --out out.wav\n"
+              << "  (--set values may be numbers or value names; --param-values scans continuous "
+                 "parameters for their distinct texts)\n";
 }
 
 bool parseOptions(int argc, char** argv, Options& options, juce::String& error) {
@@ -236,29 +246,100 @@ int plainValue(juce::AudioProcessorParameter& parameter) {
     return -1;
 }
 
-void applySets(juce::AudioPluginInstance& instance, const juce::String& sets) {
-    if (sets.isEmpty()) return;
+bool parseNumber(const juce::String& text, double& value) {
+    const auto trimmed = text.trim();
+    if (trimmed.isEmpty()) return false;
+    const char* start = trimmed.toRawUTF8();
+    char* end = nullptr;
+    value = std::strtod(start, &end);
+    if (end == start || end == nullptr || *end != '\0' || !std::isfinite(value)) return false;
+    return true;
+}
+
+bool sameText(const juce::String& a, const juce::String& b) {
+    return a.trim().equalsIgnoreCase(b.trim());
+}
+
+// The normalized value for a value name, or -1 when none matches. The plugin's own text->value
+// mapping is tried first, then a scan of its discrete states (or the value range, because VST3
+// plugins like Surge XT expose their choice parameters as continuous values, steps = 0).
+float textValue(juce::AudioProcessorParameter& parameter, const juce::String& text) {
+    const float direct = parameter.getValueForText(text);
+    if (std::isfinite(direct) && direct >= 0.0f && direct <= 1.0f
+        && sameText(parameter.getText(direct, 120), text))
+        return direct;
+    const int steps = stepCount(parameter);
+    if (steps > 0) {
+        const int count = steps > 1 ? steps : 2;
+        for (int i = 0; i < count; ++i) {
+            const float value =
+                steps > 1 ? static_cast<float>(i) / static_cast<float>(steps - 1) : (i == 0 ? 0.0f : 1.0f);
+            if (sameText(parameter.getText(value, 120), text)) return value;
+        }
+    } else {
+        constexpr int kScanSamples = 1024;
+        for (int i = 0; i <= kScanSamples; ++i) {
+            const float value = static_cast<float>(i) / static_cast<float>(kScanSamples);
+            if (sameText(parameter.getText(value, 120), text)) return value;
+        }
+    }
+    return -1.0f;
+}
+
+juce::String availableTexts(juce::AudioProcessorParameter& parameter) {
+    const int steps = stepCount(parameter);
+    const int count = steps > 1 ? steps : (steps == 1 ? 2 : 33);
+    juce::StringArray texts;
+    for (int i = 0; i < count && texts.size() < 16; ++i) {
+        const float value = steps > 1     ? static_cast<float>(i) / static_cast<float>(steps - 1)
+                            : steps == 1  ? (i == 0 ? 0.0f : 1.0f)
+                                          : static_cast<float>(i) / static_cast<float>(count - 1);
+        const auto text = parameter.getText(value, 120).trim();
+        if (text.isNotEmpty() && !texts.contains(text)) texts.add(text);
+    }
+    return texts.isEmpty() ? juce::String() : " Available: " + texts.joinIntoString(", ");
+}
+
+// Returns an error for a value name no state of the parameter produces; warnings for indices
+// and numbers stay on stderr so a typo in a *name* never renders a silent no-op.
+juce::String applySets(juce::AudioPluginInstance& instance, const juce::String& sets) {
+    if (sets.isEmpty()) return {};
     auto& parameters = instance.getParameters();
     for (const auto& entry : juce::StringArray::fromTokens(sets, ";", "")) {
         if (entry.isEmpty()) continue;
-        const int index = entry.upToFirstOccurrenceOf("=", false, false).getIntValue();
-        const double plain = entry.fromFirstOccurrenceOf("=", false, false).getDoubleValue();
+        const auto key = entry.upToFirstOccurrenceOf("=", false, false).trim();
+        const auto raw = entry.fromFirstOccurrenceOf("=", false, false);
+        const int index = key.getIntValue();
+        if (key.isEmpty() || !key.containsOnly("0123456789")) {
+            std::cerr << "warning: '" << key << "' is not a parameter index" << std::endl;
+            continue;
+        }
         if (index < 0 || index >= parameters.size()) {
             std::cerr << "warning: parameter " << index << " is out of range (0-"
                       << parameters.size() - 1 << ")" << std::endl;
             continue;
         }
         auto* parameter = parameters[index];
+        double number = 0.0;
+        if (!parseNumber(raw, number)) {
+            const float value = textValue(*parameter, raw);
+            if (value < 0.0f)
+                return "parameter " + key + " ('" + parameter->getName(120) + "'): no value matches '"
+                       + raw.trim() + "'." + availableTexts(*parameter);
+            parameter->setValue(value);
+            continue;
+        }
         const int steps = stepCount(*parameter);
         float normalized = 0.0f;
         if (steps > 1)
-            normalized = static_cast<float>(juce::jlimit(0.0, 1.0, plain / (steps - 1)));
+            normalized = static_cast<float>(juce::jlimit(0.0, 1.0, number / (steps - 1)));
         else if (steps == 1)
-            normalized = plain > 0.5 ? 1.0f : 0.0f;
+            normalized = number > 0.5 ? 1.0f : 0.0f;
         else
-            normalized = static_cast<float>(juce::jlimit(0.0, 1.0, plain));
+            normalized = static_cast<float>(juce::jlimit(0.0, 1.0, number));
         parameter->setValue(normalized);
     }
+    return {};
 }
 
 struct TimedMessage {
@@ -406,18 +487,58 @@ int runParams(const Options& options) {
         const int limit = juce::jmax(1, options.parameterLimit);
         juce::String values;
         int count = 0;
+        bool scanned = false;
+        bool truncated = false;
         if (steps > 1) {
             for (int value = 0; value < steps && count < limit; ++value, ++count) {
                 if (count > 0) values += ",";
                 values += "{\"plain\":" + juce::String(value) + ",\"text\":" +
                           jsonString(parameter->getText((float) value / (float) (steps - 1), 120)) + "}";
             }
+            truncated = count < steps;
+        } else if (steps == 1) {
+            for (int value = 0; value < 2 && count < limit; ++value, ++count) {
+                if (count > 0) values += ",";
+                values += "{\"plain\":" + juce::String(value) + ",\"text\":" +
+                          jsonString(parameter->getText(value == 0 ? 0.0f : 1.0f, 120)) + "}";
+            }
+            truncated = count < 2;
+        } else {
+            // VST3 plugins often expose choice parameters as continuous values, so scan the range
+            // and compress equal neighbouring texts into runs — a short run list is a selector.
+            scanned = true;
+            struct Run {
+                int first = 0;
+                int last = 0;
+                juce::String text;
+            };
+            std::vector<Run> runs;
+            constexpr int kScanSamples = 1024;
+            for (int i = 0; i <= kScanSamples; ++i) {
+                const auto text = parameter->getText((float) i / (float) kScanSamples, 120).trim();
+                if (!runs.empty() && runs.back().text.equalsIgnoreCase(text))
+                    runs.back().last = i;
+                else
+                    runs.push_back({i, i, text});
+            }
+            truncated = static_cast<int>(runs.size()) > limit;
+            if (runs.size() > 1 && !truncated) {
+                for (size_t r = 0; r < runs.size(); ++r) {
+                    if (r > 0) values += ",";
+                    const float midpoint =
+                        (static_cast<float>(runs[r].first) + static_cast<float>(runs[r].last)) / 2.0f
+                        / static_cast<float>(kScanSamples);
+                    values += "{\"plain\":" + juce::String(static_cast<int>(r)) + ",\"text\":" +
+                              jsonString(runs[r].text) + ",\"value\":" + juce::String(midpoint, 6) + "}";
+                }
+            }
         }
         std::cout << "{\"ok\":true,\"mode\":\"values\",\"plugin\":" << jsonString(types[0]->name)
                   << ",\"index\":" << options.parameterValues
                   << ",\"name\":" << jsonString(parameter->getName(120))
                   << ",\"steps\":" << steps
-                  << ",\"truncated\":" << (count < steps ? "true" : "false")
+                  << ",\"scanned\":" << (scanned ? "true" : "false")
+                  << ",\"truncated\":" << (truncated ? "true" : "false")
                   << ",\"values\":[" << values << "]}" << std::endl;
         return 0;
     }
@@ -456,7 +577,8 @@ int runRender(const Options& options) {
     configureBuses(*instance, true);
     instance->prepareToPlay(kSampleRate, kBlockSize);
     if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
-    applySets(*instance, options.sets[0]);
+    if (const auto setsError = applySets(*instance, options.sets[0]); setsError.isNotEmpty())
+        return fail(setsError);
 
     std::vector<TimedMessage> events;
     double end = 0.0;
@@ -519,7 +641,8 @@ int runProcess(const Options& options) {
         configureBuses(*instance, false);
         instance->prepareToPlay(kSampleRate, kBlockSize);
         if (!applyPreset(*instance, options.presets[i], error)) return fail(error);
-        applySets(*instance, options.sets[i]);
+        if (const auto setsError = applySets(*instance, options.sets[i]); setsError.isNotEmpty())
+            return fail(setsError);
         latency += instance->getLatencySamples();
         chain.push_back(std::move(instance));
     }

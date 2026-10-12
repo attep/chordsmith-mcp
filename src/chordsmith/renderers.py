@@ -219,10 +219,11 @@ class EffectPlugin(BaseModel):
     preset: str | None = Field(
         None, description="Program name or index inside the plugin; omit for its default state."
     )
-    params: dict[str, float] | None = Field(
+    params: dict[str, float | str] | None = Field(
         None,
         description="Parameter values applied after the preset, keyed by parameter name (or "
-        "index), e.g. {'Mix': 0.4}; list names with list_plugins parameter_search.",
+        "index) — a number (e.g. {'Mix': 0.4}), or a value name for a choice parameter (e.g. "
+        "{'Mode': 'Bright'}, see list_plugins parameter_values).",
     )
 
 
@@ -255,12 +256,14 @@ class InstrumentSpec(BaseModel):
         description="vst: program name or index inside the plugin (see list_plugins detail); "
         "omit for the plugin's default state.",
     )
-    plugin_params: dict[str, float] | None = Field(
+    plugin_params: dict[str, float | str] | None = Field(
         None,
         description="vst: parameter values applied after the preset, keyed by parameter name "
-        "(or index), e.g. {'Gain': 0.5}; list names with list_plugins parameter_search. This is "
-        "how plugins without VST3 programs (IK's SampleTank, Syntronik) pick a patch: find the "
-        "patch parameter, list its values and set the index.",
+        "(or index) — a number (e.g. {'Gain': 0.5}) or a value name for a choice parameter "
+        "(e.g. {'Osc 1 Type': 'Classic'}); list names with list_plugins parameter_search and "
+        "values with parameter_values. This is how plugins without VST3 programs (IK's "
+        "SampleTank, Syntronik) pick a patch: find the patch parameter, list its values and set "
+        "one by name.",
     )
     bank: int | None = Field(
         None,
@@ -1020,8 +1023,24 @@ def _parameter_indices(host: str, plugin: str) -> dict[str, int]:
     return names
 
 
-def _resolve_sets(plugin: str, params: dict[str, float] | None) -> list[tuple[int, float]]:
-    """Turn a spec's parameter map into the (index, value) pairs the host takes."""
+def _parameter_value(value: float | str) -> float | str:
+    """A parameter value as the host takes it: a float, or a choice name the host resolves."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise RenderError("Parameter values cannot be an empty string.")
+        if ";" in text:
+            raise RenderError(f"Parameter value '{value}' cannot contain ';'.")
+        return text
+    return float(value)
+
+
+def _resolve_sets(plugin: str, params: dict[str, float | str] | None) -> list[tuple[int, float | str]]:
+    """Turn a spec's parameter map into the (index, value) pairs the host takes.
+
+    A string value is a choice name the host resolves against the plugin (VST3 plugins often
+    expose their choice parameters as continuous values, so names are the sane way in).
+    """
     if not params:
         return []
     host = audio.find_vst_host()
@@ -1030,10 +1049,10 @@ def _resolve_sets(plugin: str, params: dict[str, float] | None) -> list[tuple[in
             "VST parameters need the VST host; set CHORDSMITH_VST_HOST or put vst_host on PATH."
         )
     names = _parameter_indices(host, plugin)
-    sets: list[tuple[int, float]] = []
+    sets: list[tuple[int, float | str]] = []
     for key, value in params.items():
         if key.isdigit():
-            sets.append((int(key), float(value)))
+            sets.append((int(key), _parameter_value(value)))
             continue
         index = names.get(key)
         if index is None:
@@ -1043,7 +1062,7 @@ def _resolve_sets(plugin: str, params: dict[str, float] | None) -> list[tuple[in
                 f"'{Path(plugin).name}' has no parameter named '{key}'.{hint} "
                 "(list them with list_plugins parameter_search.)"
             )
-        sets.append((index, float(value)))
+        sets.append((index, _parameter_value(value)))
     return sets
 
 
@@ -1410,6 +1429,13 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "vendor, category, programs, parameters, latency. Loads the plugin in the VST host."
             ),
         ] = None,
+        name_contains: Annotated[
+            str | None,
+            Field(
+                description="Only list plugins whose file name contains this text "
+                "(case-insensitive), e.g. 'modo' or 'surge'."
+            ),
+        ] = None,
         parameters: Annotated[
             bool,
             Field(
@@ -1428,8 +1454,8 @@ def register(mcp: FastMCP, store_provider) -> None:
             int | None,
             Field(
                 description="With detail: dump the value strings of this parameter index (up to "
-                "200) — for discrete selectors like patch lists; the plain values are what "
-                "plugin_params takes."
+                "200) — for discrete selectors like patch lists; the value names are what "
+                "plugin_params takes, or the plain values where no names exist."
             ),
         ] = None,
     ) -> results.PluginsResult:
@@ -1442,12 +1468,16 @@ def register(mcp: FastMCP, store_provider) -> None:
         separate process, so a crashing plugin cannot take the server down.
         """
         directory = os.environ.get("CHORDSMITH_VST_DIR")
-        plugins: list[dict[str, str]] = []
+        scanned: list[dict[str, str]] = []
         if directory and Path(directory).is_dir():
-            plugins = [
+            scanned = [
                 {"name": path.stem, "path": str(path)}
                 for path in sorted(Path(directory).rglob("*.vst3"))[:MAX_VST_PLUGINS]
             ]
+        plugins = scanned
+        if name_contains:
+            needle = name_contains.lower()
+            plugins = [entry for entry in scanned if needle in entry["name"].lower()]
         host = audio.find_vst_host()
         payload = None
         parameter_list = None
@@ -1459,7 +1489,7 @@ def register(mcp: FastMCP, store_provider) -> None:
                 )
             target = detail
             if not Path(target).exists():
-                match = next((entry for entry in plugins if entry["name"] == detail), None)
+                match = next((entry for entry in scanned if entry["name"] == detail), None)
                 if match is None:
                     raise RenderError(f"Plugin '{detail}' is not a path or a scanned name.")
                 target = match["path"]

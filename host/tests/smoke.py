@@ -5,7 +5,8 @@ Builds the host and the tiny test plugins first, then:
     python host/tests/smoke.py <build-dir>
 
 Locates vst_host and the ToneSynth/GainFx bundles under the build directory, generates a
-one-note MIDI file and a short wav, and exercises --list, --render and --process.
+one-note MIDI file and a short wav, and exercises --list, --params (including setting a
+parameter by its value name), --render and --process.
 """
 
 from __future__ import annotations
@@ -64,6 +65,12 @@ def wav_stats(path: Path) -> tuple[float, int]:
         raw = handle.readframes(frames)
     samples = struct.unpack(f"<{len(raw) // 2}h", raw)
     return frames / rate, max(abs(value) for value in samples)
+
+
+def wav_samples(path: Path) -> tuple[int, ...]:
+    with wave.open(str(path), "rb") as handle:
+        raw = handle.readframes(handle.getnframes())
+    return struct.unpack(f"<{len(raw) // 2}h", raw)
 
 
 def run(host: Path, args: list[str]) -> dict:
@@ -129,6 +136,28 @@ def main() -> None:
         quiet_peak = wav_stats(quiet)[1]
         assert quiet_peak < peak * 0.2, (quiet_peak, peak)  # 0.1 vs the 0.8 default
         print(f"params:  Gain index {gain_index}, set to 0.1 -> peak {quiet_peak}")
+
+        wave_index = next(p["index"] for p in params["parameters"] if p["name"] == "Wave")
+        wave_values = run(host, ["--params", "--plugin", str(synth), "--param-values", str(wave_index)])
+        assert [entry["text"] for entry in wave_values["values"]] == ["Sine", "Saw"], wave_values
+        saw = scratch_path / "saw.wav"
+        run(host, ["--render", "--plugin", str(synth), "--set", f"{wave_index}=Saw",
+                   "--midi", str(midi), "--wav", str(saw), "--tail", "1.0"])
+        sine_frames = wav_samples(rendered)
+        saw_frames = wav_samples(saw)
+        assert len(sine_frames) == len(saw_frames) and any(
+            abs(a - b) > 1000 for a, b in zip(sine_frames, saw_frames, strict=True)
+        ), "Wave=Saw did not change the render"
+        rejected = subprocess.run(
+            [str(host), "--render", "--plugin", str(synth), "--set", f"{wave_index}=Triangle",
+             "--midi", str(midi), "--wav", str(saw), "--tail", "1.0"],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert rejected.returncode != 0 and "no value matches" in (rejected.stdout + rejected.stderr), (
+            rejected.stdout,
+            rejected.stderr,
+        )
+        print(f"params:  Wave index {wave_index}, set by name -> sawtooth; unknown name rejected")
 
         result = run(host, ["--process", "--plugin", str(gain),
                             "--in", str(source), "--out", str(processed)])

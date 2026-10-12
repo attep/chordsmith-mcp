@@ -2,7 +2,8 @@
     ToneSynth — the tiny test instrument for the ChordSmith VST host tests.
     GPL-3.0-or-later (see ../LICENSE). Not for production use.
 
-    A polyphonic sine/saw with a short attack and release, two programs ("Sine", "Saw") and
+    A polyphonic sine/saw with a short attack and release, two programs ("Sine", "Saw"), a
+    "Wave" choice parameter (setting it by name exercises the host's text -> value path) and
     no editor, so the host can be exercised end to end without third-party plugins.
 */
 
@@ -20,6 +21,8 @@ public:
         : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)) {
         gain = new juce::AudioParameterFloat("gain", "Gain", 0.0f, 1.0f, 0.8f);
         addParameter(gain);  // the processor takes ownership
+        wave = new juce::AudioParameterChoice("wave", "Wave", juce::StringArray{"Sine", "Saw"}, 0);
+        addParameter(wave);  // the processor takes ownership
     }
 
     const juce::String getName() const override { return "ToneSynth"; }
@@ -57,6 +60,7 @@ public:
         const float attackStep = static_cast<float>(1.0 / (0.005 * sampleRate));
         const float releaseStep = static_cast<float>(1.0 / (0.08 * sampleRate));
         const int frames = buffer.getNumSamples();
+        const bool sawtooth = wave->getIndex() == 1;
         for (int frame = 0; frame < frames; ++frame) {
             float sample = 0.0f;
             for (auto& voice : voices) {
@@ -67,7 +71,7 @@ public:
                 const double frequency = 440.0 * std::pow(2.0, (voice.note - 69) / 12.0);
                 voice.phase += frequency / sampleRate;
                 if (voice.phase >= 1.0) voice.phase -= 1.0;
-                const auto waveform = program == 1
+                const auto waveform = sawtooth
                     ? static_cast<float>(2.0 * (voice.phase - std::floor(voice.phase + 0.5)))
                     : static_cast<float>(std::sin(voice.phase * juce::MathConstants<double>::twoPi));
                 sample += waveform * voice.level * voice.velocity * 0.25f;
@@ -83,7 +87,10 @@ public:
 
     int getNumPrograms() override { return 2; }
     int getCurrentProgram() override { return program; }
-    void setCurrentProgram(int index) override { program = juce::jlimit(0, 1, index); }
+    void setCurrentProgram(int index) override {
+        program = juce::jlimit(0, 1, index);
+        *wave = program;  // keep the Wave parameter in step with the program
+    }
     const juce::String getProgramName(int index) override { return index == 1 ? "Saw" : "Sine"; }
     void changeProgramName(int, const juce::String&) override {}
 
@@ -100,7 +107,8 @@ private:
     };
 
     std::vector<Voice> voices;
-    juce::AudioParameterFloat* gain = nullptr;  // owned by the processor (addParameter)
+    juce::AudioParameterFloat* gain = nullptr;    // owned by the processor (addParameter)
+    juce::AudioParameterChoice* wave = nullptr;   // owned by the processor (addParameter)
     double sampleRate = 44100.0;
     int program = 0;
 };
