@@ -471,7 +471,10 @@ FluidSynth options and are rejected; section overrides may set `gain_db` only. s
 engine reverb/chorus (use the [mix tools'](singing.md#mixing-and-export) returns for shared
 effects), and sfizz tracks render only with `render_audio` `stems: true` (or
 [`mix_song_with_vocals`](singing.md#mixing-and-export) for the backing). `effective` labels them
-`source: "sfz"` with a null bank/program.
+`source: "sfz"` with a null bank/program. **Sustain comes from the instrument**: a sample with
+no loop plays once per note and then falls silent — loop points and `ampeg_release` in the
+`.sfz` decide how notes hold. Stems are trimmed and padded to the song's own length, like
+FluidSynth stems.
 
 To use your own `.sf2` files, put them where the server can read them and pass that path as
 `preset`: drop them into the output folder (visible to the server as `/data/…` in the Docker

@@ -7,6 +7,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
+(jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
+export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
+(CONTRIBUTING, SECURITY, pre-commit, mypy).
+
+## [0.22.1] - 2026-10-12
+
+From the hip-hop demo: sfizz stems are padded to the song's own length, and the docs say where
+sustain comes from in an `.sfz`.
+
+### Fixed
+
+- sfizz stems are trimmed and then padded to the MIDI file's length, so every stem lasts as long
+  as the song — `sfizz_render` stops at the last MIDI event, so a melody track that ends early
+  used to leave a short stem.
+
+### Changed
+
+- `docs/tools.md` explains that sustain comes from the `.sfz` instrument itself (loop points,
+  `ampeg_release`): a sample with no loop plays once per note and then falls silent.
+
+## [0.22.0] - 2026-10-12
+
+Swing/humanize on `add_track` and a second render engine (sfizz) for sampled instruments.
+
 ### Added
 
 - `add_track` gains `swing` and `humanize`: notes on offbeat steps can be delayed by a fraction
@@ -21,11 +46,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gain_db` overrides, are labelled `source: "sfz"` in `effective` (null bank/program), ship
   their `.sfz` path in `bake_instruments` metadata, and single-pass renders refuse files that
   use them (stems render each track's own engine).
-
-Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
-(jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
-export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
-(CONTRIBUTING, SECURITY, pre-commit, mypy).
 
 ## [0.21.1] - 2026-10-12
 

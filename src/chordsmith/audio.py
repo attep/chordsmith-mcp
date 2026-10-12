@@ -73,6 +73,22 @@ def trim_wav(path: Path, seconds: float) -> None:
         target.writeframes(data)
 
 
+def pad_wav(path: Path, seconds: float) -> None:
+    """Append silence so the wav lasts exactly ``seconds``; a no-op when it is already longer."""
+    with wave.open(str(path), "rb") as source:
+        channels, width, rate = source.getnchannels(), source.getsampwidth(), source.getframerate()
+        frames = source.getnframes()
+        data = source.readframes(frames)
+    wanted = int(seconds * rate)
+    if frames >= wanted:
+        return
+    with wave.open(str(path), "wb") as target:
+        target.setnchannels(channels)
+        target.setsampwidth(width)
+        target.setframerate(rate)
+        target.writeframes(data + b"\x00" * ((wanted - frames) * width * channels))
+
+
 def wav_peak_db(path: Path) -> float:
     """Peak level (dBFS) of a 16-bit wav file."""
     import array
@@ -272,4 +288,9 @@ def render_sfizz(sfz: str, midi_path: Path, target: Path) -> None:
     )
     if not target.is_file():
         raise AudioError("sfizz_render produced no audio.")
-    trim_wav(target, midi_duration(midi_path))
+    # sfizz_render stops at the last MIDI event (it does not know the song's length), so a track
+    # whose notes end early would leave a short stem. Trim any overshoot and pad the rest, so
+    # every stem has the same length as the song.
+    duration = midi_duration(midi_path)
+    trim_wav(target, duration)
+    pad_wav(target, duration)

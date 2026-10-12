@@ -8,6 +8,8 @@ tiny sine sample and a one-line region — so no third-party samples are needed.
 from __future__ import annotations
 
 import array
+import base64
+import io
 import math
 import wave
 from pathlib import Path
@@ -34,11 +36,17 @@ async def _call(name, args):
 
 
 def _write_sfz(tmp_path: Path) -> str:
-    """A one-region SFZ instrument over a generated stereo sine (no licences involved)."""
+    """A sustained one-region SFZ over a generated stereo sine (no licences involved).
+
+    The sample loops over an exact 200-sample period (220.5 Hz at 44.1 kHz), so notes hold
+    until note_off and release — a realistic instrument. A one-shot sample with no loop would
+    play once and fall silent mid-note.
+    """
     rate = 44100
+    period = 200
     frames = array.array("h")
     for index in range(rate // 4):
-        value = int(16000 * math.sin(2 * math.pi * 220.0 * index / rate))
+        value = int(16000 * math.sin(2 * math.pi * index / period))
         frames.append(value)
         frames.append(value)
     with wave.open(str(tmp_path / "tone.wav"), "wb") as handle:
@@ -47,8 +55,30 @@ def _write_sfz(tmp_path: Path) -> str:
         handle.setframerate(rate)
         handle.writeframes(frames.tobytes())
     sfz = tmp_path / "tone.sfz"
-    sfz.write_text("<region> sample=tone.wav pitch_keycenter=60 lokey=0 hikey=127\n", encoding="utf-8")
+    sfz.write_text(
+        "<region> sample=tone.wav pitch_keycenter=60 lokey=0 hikey=127 "
+        "loop_mode=loop_continuous loop_start=0 loop_end=11000 ampeg_release=0.2\n",
+        encoding="utf-8",
+    )
     return str(sfz)
+
+
+def _wav_duration(data: bytes) -> float:
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        return handle.getnframes() / handle.getframerate()
+
+
+def _rms_db(data: bytes, start_s: float, end_s: float) -> float:
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        rate = handle.getframerate()
+        handle.setpos(int(start_s * rate))
+        raw = handle.readframes(max(1, int((end_s - start_s) * rate)))
+    samples = array.array("h")
+    samples.frombytes(raw)
+    if not samples:
+        return -120.0
+    rms = math.sqrt(sum(value * value for value in samples) / len(samples)) / 32768.0
+    return 20 * math.log10(max(rms, 1e-9))
 
 
 async def _make_song(store):
@@ -91,6 +121,12 @@ async def test_sfizz_stems_render_mixed_engines(store, tmp_path):
     assert content["peak_db"] is not None and content["peak_db"] <= -0.9
     assert content["duration_seconds"] > 1.0
     assert content["failed"] is None
+    melody = next(stem for stem in content["stems"] if stem["track"] == "Melody")
+    data = base64.b64decode(melody["data_base64"])
+    # The melody's notes end at half the song; the stem is padded to the song's own length.
+    assert _wav_duration(data) == pytest.approx(content["duration_seconds"], abs=0.1)
+    # The looped sample sustains through the first note (a one-shot sample would be silent here).
+    assert _rms_db(data, 0.30, 0.45) > -60
 
 
 async def test_sfizz_single_pass_is_refused(store, tmp_path):
