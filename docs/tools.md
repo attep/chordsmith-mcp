@@ -568,8 +568,9 @@ returns the parameter list — index, name, steps, current text — the keys `pl
 example) so a value can be picked by name; for parameters with no discrete steps — many VST3
 choice parameters — the host scans the range and lists the distinct texts it finds. Plugins are
 user-supplied and never bundled; the host is a separate process, so a crashing plugin cannot take
-the server down. See [VST plugins](vst.md) for setup on Windows and Docker, and free plugin
-suggestions.
+the server down. With a VST bridge configured the scan, the renders and the state captures come
+from the bridge's machine too (see [VST plugins](vst.md)); otherwise see that page for setup on
+Windows and Docker, and free plugin suggestions.
 
 ## open_plugin_state_editor
 

@@ -67,6 +67,32 @@ then render headlessly:
 The editor needs a desktop session, so the Linux Docker server refuses it; capture on the
 Windows/native server and the state file renders anywhere.
 
+### One endpoint, two machines (remote VST bridge)
+
+A server that has no Windows plugins can still use them: run the bridge worker on the Windows
+machine and point the server at it.
+
+1. On Windows (the machine with the plugins):
+   `python scripts/vst_bridge.py --token <secret>` — it runs `vst_host` jobs on request (port
+   18002 by default; `--host-exe`/`--port`/`--bind` to change). Every request needs the token,
+   so treat the secret like a password, and let the port through the firewall for Docker.
+2. On the server (e.g. the Docker container), set:
+   - `CHORDSMITH_VST_BRIDGE_URL` = `http://host.docker.internal:18002`
+   - `CHORDSMITH_VST_BRIDGE_TOKEN` = the same secret
+   - `CHORDSMITH_VST_BRIDGE_VST_DIR` = `C:\Program Files\Common Files\VST3` (what
+     `list_plugins` scans)
+   - `CHORDSMITH_VST_BRIDGE_SHARED_FROM` / `CHORDSMITH_VST_BRIDGE_SHARED_TO` = the folder both
+     machines see, e.g. `/data` and `D:\ChordSmith\data` — editor captures land there so the
+     server can read them
+3. `list_plugins` now lists the bridge's plugins, vst/sfizz renders route their VST work to the
+   bridge, and `open_plugin_state_editor` opens the window **on the bridge's desktop** with the
+   saved state appearing in the shared folder.
+
+The bridge executes whatever `vst_host` job the server sends — anyone with the token can too.
+GM/FluidSynth and the vocals stay on the server that runs them, and the plugin paths are machine
+specific: specs that name Windows plugins only render through a bridge (or on the Windows
+server).
+
 The Linux Docker server does **not** load Windows plugins (Wine/yabridge is not supported): it
 uses Linux VST3s only (see below). The Docker image still includes `vst_host` and the test
 plugins, so the VST tooling can be tried there with Linux plugins.

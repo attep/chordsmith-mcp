@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -37,8 +38,86 @@ def find_sfizz_render() -> str | None:
     return os.environ.get("CHORDSMITH_SFIZZ_RENDER") or shutil.which("sfizz_render")
 
 
+def bridge_url() -> str | None:
+    """The remote VST bridge's base URL (CHORDSMITH_VST_BRIDGE_URL), when one is configured.
+
+    With a bridge, every VST operation — plugin scans, renders, state loads/saves and editor
+    windows — runs on the machine that hosts the bridge (see scripts/vst_bridge.py), so a
+    server without Windows plugins can still use them.
+    """
+    url = os.environ.get("CHORDSMITH_VST_BRIDGE_URL", "").strip().rstrip("/")
+    return url or None
+
+
 def find_vst_host() -> str | None:
+    """The VST host to use: the bridge URL when configured, else the local vst_host binary."""
+    bridge = bridge_url()
+    if bridge:
+        return bridge
     return os.environ.get("CHORDSMITH_VST_HOST") or shutil.which("vst_host")
+
+
+def _bridge_headers() -> dict[str, str]:
+    token = os.environ.get("CHORDSMITH_VST_BRIDGE_TOKEN", "")
+    return {"X-Chordsmith-Token": token} if token else {}
+
+
+def _bridge_post(path: str, payload: dict) -> dict:
+    import httpx
+
+    url = bridge_url()
+    if url is None:
+        raise AudioError("No VST bridge is configured (CHORDSMITH_VST_BRIDGE_URL).")
+    try:
+        response = httpx.post(
+            f"{url}{path}", json=payload, headers=_bridge_headers(), timeout=VST_TIMEOUT_SECONDS
+        )
+    except httpx.HTTPError as exc:
+        raise AudioError(f"The VST bridge at {url} is unreachable: {exc}") from exc
+    if response.status_code != 200:
+        raise AudioError(
+            f"The VST bridge at {url} answered HTTP {response.status_code}: {response.text[:200]}"
+        )
+    return response.json()
+
+
+def bridge_plugin_scan(directory: str | None = None) -> list[dict[str, str]]:
+    """The .vst3 plugins the bridge's machine can see (CHORDSMITH_VST_BRIDGE_VST_DIR)."""
+    import httpx
+
+    url = bridge_url()
+    if url is None:
+        return []
+    target = directory or os.environ.get("CHORDSMITH_VST_BRIDGE_VST_DIR", "")
+    try:
+        response = httpx.get(f"{url}/scan", params={"dir": target}, headers=_bridge_headers(), timeout=120)
+    except httpx.HTTPError as exc:
+        raise AudioError(f"The VST bridge at {url} is unreachable: {exc}") from exc
+    if response.status_code != 200:
+        raise AudioError(f"The VST bridge at {url} answered HTTP {response.status_code} for a plugin scan.")
+    return response.json().get("plugins") or []
+
+
+def bridge_paths_exist(paths: list[str]) -> dict[str, bool]:
+    """Which of these paths exist on the bridge's machine."""
+    if bridge_url() is None or not paths:
+        return {}
+    return _bridge_post("/exists", {"paths": paths}).get("exists") or {}
+
+
+def bridge_shared_path(path: str | Path) -> str:
+    """Map a server-side path into the bridge's view of the shared output folder.
+
+    Editor saves cannot be uploaded after the fact (the window closes minutes later), so their
+    path must be one both machines see — CHORDSMITH_VST_BRIDGE_SHARED_FROM/_TO describe it.
+    """
+    from_env = os.environ.get("CHORDSMITH_VST_BRIDGE_SHARED_FROM", "").rstrip("/")
+    to_env = os.environ.get("CHORDSMITH_VST_BRIDGE_SHARED_TO", "").rstrip("\\/")
+    text = str(path)
+    if from_env and to_env and text.startswith(from_env):
+        rest = text[len(from_env) :].replace("/", "\\").lstrip("\\")
+        return f"{to_env}\\{rest}" if rest else to_env
+    return text
 
 
 def find_soundfont() -> str | None:
@@ -302,14 +381,48 @@ def render_sfizz(sfz: str, midi_path: Path, target: Path) -> None:
     pad_wav(target, duration)
 
 
+BRIDGE_INPUT_FLAGS = ("--midi", "--in", "--state")
+BRIDGE_OUTPUT_FLAGS = ("--wav", "--out", "--save-state", "--dump-state")
+
+
+def _run_vst_bridge(url: str, args: list[str]) -> subprocess.CompletedProcess:
+    """Send a job to the bridge, uploading input files and writing output files back."""
+    payload: dict = {"args": [str(item) for item in args]}
+    files: dict[str, str] = {}
+    for index in range(1, len(args)):
+        if args[index - 1] in BRIDGE_INPUT_FLAGS:
+            path = Path(args[index])
+            if path.is_file():
+                files[str(path)] = base64.b64encode(path.read_bytes()).decode()
+    needs_files = bool(files) or any(args[index - 1] in BRIDGE_OUTPUT_FLAGS for index in range(1, len(args)))
+    if needs_files:
+        payload["files"] = files
+    response = _bridge_post("/job" if needs_files else "/run", payload)
+    for original, blob in (response.get("outputs") or {}).items():
+        target = Path(original)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(base64.b64decode(blob))
+    return subprocess.CompletedProcess(
+        args=[url, *args],
+        returncode=int(response.get("exit") or 0),
+        stdout=response.get("stdout") or "",
+        stderr=response.get("stderr") or "",
+    )
+
+
 def _run_vst_host(host: str, args: list[str]) -> dict:
-    """Run the VST host CLI and parse its JSON line; AudioError with its message on failure."""
+    """Run the VST host CLI (locally or through the bridge) and parse its JSON line."""
     import json
 
-    try:
-        result = subprocess.run([host, *args], capture_output=True, text=True, timeout=VST_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AudioError(f"Could not run the VST host: {exc}") from exc
+    if host.startswith("http"):
+        result = _run_vst_bridge(host, args)
+    else:
+        try:
+            result = subprocess.run(
+                [host, *args], capture_output=True, text=True, timeout=VST_TIMEOUT_SECONDS
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AudioError(f"Could not run the VST host: {exc}") from exc
     payload: dict | None = None
     for line in reversed((result.stdout or "").splitlines()):
         line = line.strip()
@@ -419,7 +532,21 @@ def dump_vst_state(
 
 
 def start_vst_editor(host: str, plugin: str, target: Path, state: str | None = None) -> None:
-    """Launch the plugin's editor detached; closing its window writes the state to ``target``."""
+    """Launch the plugin's editor; on a bridge the window opens on the bridge's desktop.
+
+    The state target must be on the shared folder when bridged: it is written minutes later,
+    after the window closes, straight into the path the host was given.
+    """
+    if host.startswith("http"):
+        args = ["--editor", "--plugin", plugin, "--save-state", bridge_shared_path(target)]
+        if state:
+            args += ["--state", bridge_shared_path(state)]
+        response = _bridge_post("/editor", {"args": args})
+        if not response.get("ok"):
+            raise AudioError(
+                f"The VST bridge could not open the editor: {response.get('error', 'unknown error')}"
+            )
+        return
     args = [host, "--editor", "--plugin", plugin, "--save-state", str(target)]
     if state:
         args += ["--state", state]

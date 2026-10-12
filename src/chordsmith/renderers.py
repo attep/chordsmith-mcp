@@ -14,7 +14,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal, Protocol
 
 import mido
@@ -502,7 +502,7 @@ class VstRenderer:
             raise RenderError(
                 "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
             )
-        if spec.plugin is None or not Path(spec.plugin).exists():
+        if spec.plugin is None or not _plugin_exists(spec.plugin):
             raise RenderError(f"VST plugin '{spec.plugin}' does not exist.")
         try:
             audio.render_vst(
@@ -534,7 +534,7 @@ def apply_stem_effects(stem: Path, effects: list[EffectPlugin] | None) -> None:
         raise RenderError("This track has VST effects, but the VST host is not installed.")
     chain: list[tuple[str, str | None, list[tuple[int, float | str]], str | None]] = []
     for effect in effects:
-        if not Path(effect.plugin).exists():
+        if not _plugin_exists(effect.plugin):
             raise RenderError(f"VST plugin '{effect.plugin}' does not exist.")
         chain.append(
             (effect.plugin, effect.preset, _resolve_sets(effect.plugin, effect.params), effect.state)
@@ -907,7 +907,7 @@ def effective_instruments(
             }
             continue
         if spec is not None and spec.engine == "vst":
-            if spec.plugin is None or not Path(spec.plugin).exists():
+            if spec.plugin is None or not _plugin_exists(spec.plugin):
                 warnings.append(f"VST plugin '{spec.plugin}' does not exist")
             result[name] = {
                 "channel": channel0 + 1,
@@ -1022,12 +1022,40 @@ def _vst_label(spec: InstrumentSpec) -> str | None:
     """The label a vst spec resolves to: the plugin's file name plus its preset when set."""
     if spec.plugin is None:
         return None
-    label = Path(spec.plugin).name
+    label = _basename(spec.plugin)
     return f"{label} - {spec.plugin_preset}" if spec.plugin_preset else label
 
 
+def _plugin_exists(path: str) -> bool:
+    """Whether a plugin path exists — on the bridge's machine when one is configured."""
+    if audio.bridge_url():
+        try:
+            return bool(audio.bridge_paths_exist([path]).get(path))
+        except audio.AudioError:
+            return False
+    return Path(path).exists()
+
+
+def _basename(path: str) -> str:
+    """The file name of a path that may be a Windows path on a Linux server."""
+    return PureWindowsPath(path).name if len(path) > 1 and path[1] == ":" else Path(path).name
+
+
+def _resolve_plugin(plugin: str) -> str | None:
+    """A plugin path or a scanned name -> its path; None when neither matches."""
+    if _plugin_exists(plugin):
+        return plugin
+    directory = os.environ.get("CHORDSMITH_VST_DIR")
+    if audio.bridge_url():
+        directory = os.environ.get("CHORDSMITH_VST_BRIDGE_VST_DIR") or directory
+    match = next((entry for entry in _scan_vst_plugins(directory) if entry["name"] == plugin), None)
+    return match["path"] if match else None
+
+
 def _scan_vst_plugins(directory: str | None) -> list[dict[str, str]]:
-    """The .vst3 plugins under a directory; a Windows bundle is listed, not the file inside it."""
+    """The .vst3 plugins under a directory; on a bridge, the plugins its machine can see."""
+    if audio.bridge_url():
+        return audio.bridge_plugin_scan()
     if not directory or not Path(directory).is_dir():
         return []
     kept: list[Path] = []
@@ -1092,7 +1120,7 @@ def _resolve_sets(plugin: str, params: dict[str, float | str] | None) -> list[tu
             close = next((name for name in names if key.lower() in name.lower()), None)
             hint = f" Did you mean '{close}'?" if close else ""
             raise RenderError(
-                f"'{Path(plugin).name}' has no parameter named '{key}'.{hint} "
+                f"'{_basename(plugin)}' has no parameter named '{key}'.{hint} "
                 "(list them with list_plugins parameter_search.)"
             )
         sets.append((index, _parameter_value(value)))
@@ -1103,7 +1131,7 @@ def _validate_vst(spec: InstrumentSpec) -> None:
     """Check a vst spec: a readable .vst3 instrument that loads, and no other engine's options."""
     if spec.plugin is None:
         raise RenderError("engine='vst' needs 'plugin': the path to a .vst3 plugin.")
-    if not Path(spec.plugin).exists():
+    if not _plugin_exists(spec.plugin):
         raise RenderError(f"VST plugin '{spec.plugin}' does not exist.")
     for option, value in (
         ("preset", spec.preset),
@@ -1134,7 +1162,7 @@ def _validate_vst(spec: InstrumentSpec) -> None:
         raise RenderError(f"No VST3 types found in '{spec.plugin}'.")
     if not types[0].get("is_instrument"):
         raise RenderError(
-            f"'{Path(spec.plugin).name}' is an effect; engine='vst' takes an instrument "
+            f"'{_basename(spec.plugin)}' is an effect; engine='vst' takes an instrument "
             "(effects go in 'effects')."
         )
     if spec.plugin_preset is not None:
@@ -1146,7 +1174,7 @@ def _validate_vst(spec: InstrumentSpec) -> None:
         if spec.plugin_preset not in programs and not spec.plugin_preset.isdigit():
             listed = ", ".join(programs[:12]) + ("..." if len(programs) > 12 else "")
             raise RenderError(
-                f"No program '{spec.plugin_preset}' in '{Path(spec.plugin).name}'. Programs: {listed}"
+                f"No program '{spec.plugin_preset}' in '{_basename(spec.plugin)}'. Programs: {listed}"
             )
     if spec.plugin_state is not None and not Path(spec.plugin_state).is_file():
         raise RenderError(
@@ -1164,7 +1192,7 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
     if host is None:
         raise RenderError("This spec has VST effects, but the VST host is not installed.")
     for index, effect in enumerate(effects, start=1):
-        if not Path(effect.plugin).exists():
+        if not _plugin_exists(effect.plugin):
             raise RenderError(f"Effect {index}: VST plugin '{effect.plugin}' does not exist.")
         try:
             info = audio.vst_plugin_info(host, effect.plugin)
@@ -1173,7 +1201,7 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
         types = info.get("types") or []
         if types and types[0].get("is_instrument"):
             raise RenderError(
-                f"Effect {index}: '{Path(effect.plugin).name}' is an instrument; 'effects' takes "
+                f"Effect {index}: '{_basename(effect.plugin)}' is an instrument; 'effects' takes "
                 "effect plugins."
             )
         if effect.state is not None and not Path(effect.state).is_file():
@@ -1188,7 +1216,7 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
             if effect.preset not in programs and not effect.preset.isdigit():
                 listed = ", ".join(programs[:12]) + ("..." if len(programs) > 12 else "")
                 raise RenderError(
-                    f"Effect {index}: no program '{effect.preset}' in '{Path(effect.plugin).name}'. "
+                    f"Effect {index}: no program '{effect.preset}' in '{_basename(effect.plugin)}'. "
                     f"Programs: {listed}"
                 )
         _resolve_sets(effect.plugin, effect.params)  # parameter names must exist
@@ -1520,6 +1548,8 @@ def register(mcp: FastMCP, store_provider) -> None:
         separate process, so a crashing plugin cannot take the server down.
         """
         directory = os.environ.get("CHORDSMITH_VST_DIR")
+        if audio.bridge_url():
+            directory = os.environ.get("CHORDSMITH_VST_BRIDGE_VST_DIR") or directory
         scanned = _scan_vst_plugins(directory)
         plugins = scanned
         if name_contains:
@@ -1534,12 +1564,10 @@ def register(mcp: FastMCP, store_provider) -> None:
                 raise RenderError(
                     "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
                 )
-            target = detail
-            if not Path(target).exists():
-                match = next((entry for entry in scanned if entry["name"] == detail), None)
-                if match is None:
-                    raise RenderError(f"Plugin '{detail}' is not a path or a scanned name.")
-                target = match["path"]
+            resolved = _resolve_plugin(detail)
+            if resolved is None:
+                raise RenderError(f"Plugin '{detail}' is not a path or a scanned name.")
+            target = resolved
             payload = audio.vst_plugin_info(host, target)
             if parameters or parameter_search is not None:
                 info = audio.vst_plugin_params(host, target)
@@ -1580,9 +1608,10 @@ def register(mcp: FastMCP, store_provider) -> None:
         plugin state there. Reference that path from set_track_instrument's 'plugin_state' (a vst
         instrument) or an effect's 'state' — every render then loads the captured sound headless,
         which is the only way in for GUI-only plugins (TONEX tones, Guitar Rig rigs, SampleTank/
-        Syntronik patches). Needs a desktop session, so it refuses on the headless Linux Docker
-        server. The same capture from a shell is: vst_host --editor --plugin X --save-state out
-        (with --state to load an existing capture, and --dump-state for a GUI-free snapshot).
+        Syntronik patches). Needs a desktop session: native/desktop servers show the window
+        directly, and with a VST bridge configured it opens on the bridge's desktop. The same
+        capture from a shell is: vst_host --editor --plugin X --save-state out (with --state to
+        load an existing capture, and --dump-state for a GUI-free snapshot).
         """
         host = audio.find_vst_host()
         if host is None:
@@ -1590,27 +1619,20 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
             )
         if (
-            sys.platform not in ("win32", "darwin")
+            not audio.bridge_url()
+            and sys.platform not in ("win32", "darwin")
             and not os.environ.get("DISPLAY")
             and not os.environ.get("WAYLAND_DISPLAY")
         ):
             raise RenderError(
                 "The plugin editor needs a desktop session and this server has none; run the "
-                "server natively on a desktop machine (see docs/vst.md) to capture plugin states."
+                "server natively on a desktop machine, or configure the VST bridge "
+                "(scripts/vst_bridge.py) and the window opens on the bridge's desktop instead."
             )
-        target = plugin
-        if not Path(target).exists():
-            match = next(
-                (
-                    entry
-                    for entry in _scan_vst_plugins(os.environ.get("CHORDSMITH_VST_DIR"))
-                    if entry["name"] == plugin
-                ),
-                None,
-            )
-            if match is None:
-                raise RenderError(f"Plugin '{plugin}' is not a path or a scanned name.")
-            target = match["path"]
+        resolved = _resolve_plugin(plugin)
+        if resolved is None:
+            raise RenderError(f"Plugin '{plugin}' is not a path or a scanned name.")
+        target = resolved
         try:
             audio.vst_plugin_info(host, target)  # fail early when the plugin cannot load at all
         except audio.AudioError as exc:
@@ -1618,7 +1640,9 @@ def register(mcp: FastMCP, store_provider) -> None:
         store: FileStore = store_provider()
         states_dir = store.root / "states"
         states_dir.mkdir(parents=True, exist_ok=True)
-        filename = store.safe_name((state_name or Path(target).stem).removesuffix(".state"), ".state")
+        filename = store.safe_name(
+            (state_name or Path(_basename(target)).stem).removesuffix(".state"), ".state"
+        )
         state_path = states_dir / filename
         try:
             audio.start_vst_editor(host, target, state_path)

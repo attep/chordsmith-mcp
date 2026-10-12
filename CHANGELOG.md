@@ -12,6 +12,27 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.4] - 2026-10-13
+
+One endpoint for everything: the remote VST bridge.
+
+### Added
+
+- `scripts/vst_bridge.py` — a small token-protected worker that runs `vst_host` jobs (plugin
+  scans, renders, state loads/saves, editor windows) for a server on another machine.
+- **Remote VST bridge support**: with `CHORDSMITH_VST_BRIDGE_URL` (plus `_TOKEN`, `_VST_DIR`,
+  `_SHARED_FROM`/`_SHARED_TO`), a server without Windows plugins lists and renders them anyway —
+  `list_plugins`, vst/sfizz renders and `open_plugin_state_editor` route to the bridge, upload
+  job inputs and write outputs back, while GM/FluidSynth and the vocals stay local. One MCP
+  endpoint can therefore serve MODO DRUM, TONEX, Guitar Rig and T-RackS from a Linux box.
+  Verified live: the public Docker server rendered the metal demo's MODO DRUM and MODO BASS 2
+  stems through the Windows bridge.
+
+### Changed
+
+- Windows-style plugin paths get clean file names in labels and error messages when handled on
+  a Linux server.
+
 ## [0.24.3] - 2026-10-12
 
 Plugin state capture: GUI-only VST3s become usable in headless renders.
