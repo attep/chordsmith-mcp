@@ -1083,7 +1083,7 @@ def render_audio(
     """
     source = store.existing_path(filename)
     if not stems:
-        _reject_sfizz_without_stems(source)
+        _reject_engine_tracks_without_stems(source)
     effects = renderers.effect_options(reverb, chorus)
     effects_echo = {
         "reverb": reverb.model_dump() if reverb is not None else None,
@@ -1117,13 +1117,13 @@ def render_audio(
     )
 
 
-def _reject_sfizz_without_stems(source: Path) -> None:
-    """A single FluidSynth pass cannot play sfizz tracks; stems render each track's own engine."""
+def _reject_engine_tracks_without_stems(source: Path) -> None:
+    """A single FluidSynth pass cannot play sfizz or vst tracks; stems render each own engine."""
     specs = renderers.load_specs(source)
-    sfizz = sorted(name for name, spec in specs.items() if spec.engine == "sfizz")
-    if sfizz:
+    engines = sorted(name for name, spec in specs.items() if spec.engine in ("sfizz", "vst"))
+    if engines:
         raise ValueError(
-            f"This file uses sfizz instruments ({', '.join(sfizz)}); render with stems=true so "
+            f"This file uses per-track engines ({', '.join(engines)}); render with stems=true so "
             "each track is rendered by its own engine."
         )
 
@@ -1175,7 +1175,7 @@ def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
     }
     only_tracks = args.get("tracks")
     if not (args.get("stems") or only_tracks):
-        _reject_sfizz_without_stems(source)
+        _reject_engine_tracks_without_stems(source)
     if args.get("stems") or only_tracks:
         result = _render_stems(
             source,
@@ -1261,6 +1261,7 @@ def _render_stems(
                     windows = renderers.section_gain_windows(spec, section_timeline)
                     if windows:
                         renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
+                    renderers.apply_stem_effects(stem_wav, spec.effects)
                 except renderers.RenderError as exc:
                     message = f"Track '{name}': {exc}"
                     if not continue_on_error:

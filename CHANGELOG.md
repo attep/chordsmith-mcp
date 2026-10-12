@@ -12,6 +12,28 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.23.0] - 2026-10-12
+
+The VST engine: a third renderer (a separate GPL process) for `.vst3` instruments, per-track
+VST effect chains, and `list_plugins` — built for both Windows and Linux servers.
+
+### Added
+
+- **A third render engine: VST** (`set_track_instrument` `engine: "vst"` + `plugin`): `.vst3`
+  instruments render as stems at 44.1 kHz through a separate-process host (`host/`,
+  GPL-3.0-or-later, JUCE; never linked into the server). Presets are the plugin's VST3
+  programs (`plugin_preset`); the host is built for Linux (in the Docker image) and Windows
+  (release artifacts from CI) and is found via `CHORDSMITH_VST_HOST` or `PATH`. VST3 only;
+  plugins are user-supplied and never bundled; vst tracks need `stems: true` renders and are
+  labelled `source: "vst"` in `effective`.
+- **Per-track VST effect chains** (`effects` on any spec): effect plugins run over the rendered
+  stem, in order, with the plugins' reported latency compensated, so stems stay aligned.
+- **`list_plugins`**: the `.vst3` plugins under `CHORDSMITH_VST_DIR` (Docker: `/vst`), with
+  `detail` loading one plugin for vendor, category, programs, parameters and latency.
+- `docs/vst.md`: Windows (IK suite) and Docker (Linux VST3) setup, free plugin suggestions and
+  caveats; the Docker image mounts `/vst`; `bake_instruments` lists a vst track's plugin as
+  companion metadata.
+
 ## [0.22.1] - 2026-10-12
 
 From the hip-hop demo: sfizz stems are padded to the song's own length, and the docs say where

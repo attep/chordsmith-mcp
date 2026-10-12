@@ -20,16 +20,17 @@ from chordsmith import server
 
 pytestmark = pytest.mark.anyio
 
-DESCRIPTION_BUDGET_BYTES = 19 * 1024
+DESCRIPTION_BUDGET_BYTES = 20 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
 # effects, import, sections), 108 KB (v0.16.0: background render jobs), 116 KB (v0.17.0: wet
 # mix + effect sends), 128 KB (v0.18.0: job listings, get_file, import_audio), 136 KB
 # (v0.19.0: create_empty_file, remove_track, automation, tuplets), 148 KB (v0.20.0: vocal
 # chains, bus, returns, master; the description budget moved 17 -> 19 KB in the same patch),
-# 152 KB (v0.21.0: voicebank soft controls, air layer, de-esser/saturation enablement) and
-# 160 KB (v0.22.0: swing/humanize on add_track, the sfizz engine, SFZ libraries).
-# The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 160 * 1024
+# 152 KB (v0.21.0: voicebank soft controls, air layer, de-esser/saturation enablement),
+# 160 KB (v0.22.0: swing/humanize on add_track, the sfizz engine, SFZ libraries) and 164 KB
+# (v0.23.0: the VST engine, per-track effect chains, list_plugins; descriptions moved
+# 19 -> 20 KB in the same patch). The surface grows with capabilities; keep new schemas lean.
+PAYLOAD_CEILING_BYTES = 164 * 1024
 
 
 @pytest.fixture
@@ -43,7 +44,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 31
+    assert len(tools) == 32
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

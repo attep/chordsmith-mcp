@@ -31,6 +31,7 @@ SPECS_SUFFIX = ".instruments.json"
 FFMPEG_TIMEOUT_SECONDS = 300
 STEM_WORKERS = max(2, min(6, os.cpu_count() or 4))
 MAX_SFZ_LIBRARIES = 200
+MAX_VST_PLUGINS = 500
 
 GM_PROGRAMS = [
     "Acoustic Grand Piano",
@@ -211,13 +212,23 @@ class SectionInstrument(BaseModel):
     )
 
 
+class EffectPlugin(BaseModel):
+    """One VST3 effect in a track's insert chain (applied to the rendered stem)."""
+
+    plugin: str = Field(description="Path to a .vst3 effect plugin (see list_plugins).")
+    preset: str | None = Field(
+        None, description="Program name or index inside the plugin; omit for its default state."
+    )
+
+
 class InstrumentSpec(BaseModel):
     """How one track should be rendered, e.g. a different soundfont for the bass."""
 
-    engine: Literal["fluidsynth", "sfizz"] = Field(
+    engine: Literal["fluidsynth", "sfizz", "vst"] = Field(
         "fluidsynth",
-        description="Which renderer to use: 'fluidsynth' (General MIDI via a .sf2 soundfont) or "
-        "'sfizz' (a sampled .sfz instrument; needs render_audio with stems=true).",
+        description="Which renderer to use: 'fluidsynth' (General MIDI via a .sf2 soundfont), "
+        "'sfizz' (a sampled .sfz instrument) or 'vst' (a .vst3 plugin). sfizz and vst need "
+        "render_audio with stems=true.",
     )
     preset: str | None = Field(
         None,
@@ -228,6 +239,16 @@ class InstrumentSpec(BaseModel):
         None,
         description="sfizz: path to a .sfz instrument file on this server (with its samples); "
         "required when engine='sfizz'.",
+    )
+    plugin: str | None = Field(
+        None,
+        description="vst: path to a .vst3 instrument plugin on this server (see list_plugins); "
+        "required when engine='vst'.",
+    )
+    plugin_preset: str | None = Field(
+        None,
+        description="vst: program name or index inside the plugin (see list_plugins detail); "
+        "omit for the plugin's default state.",
     )
     bank: int | None = Field(
         None,
@@ -264,6 +285,12 @@ class InstrumentSpec(BaseModel):
         le=127,
         description="CC93 chorus send for this track (0-127; 0 = fully dry). Omit to keep the "
         "file's own send (GM default 0).",
+    )
+    effects: list[EffectPlugin] | None = Field(
+        None,
+        description="VST3 effects applied to this track's rendered stem, in order, e.g. "
+        "[{'plugin': '/vst/Comp.vst3'}, {'plugin': '/vst/Tape.vst3', 'preset': 'Warm'}]; "
+        "works for any engine and needs the VST host.",
     )
     gain_db: float = Field(
         0.0,
@@ -415,9 +442,72 @@ class SfizzRenderer:
             raise RenderError("The engine produced a silent stem; check the track's notes and instrument.")
 
 
+class VstRenderer:
+    """Offline VST3 rendering through the separate vst_host process (GPL; see host/).
+
+    Instruments play a MIDI file; a spec's ``effects`` chain is applied to the rendered stem by
+    :func:`apply_stem_effects`, whichever engine produced it.
+    """
+
+    name = "vst"
+    notes = "Runs as a separate process; renders a .vst3 plugin (instruments) at 44.1 kHz."
+
+    def available(self) -> bool:
+        return audio.find_vst_host() is not None
+
+    def render(
+        self,
+        midi: Path,
+        spec: InstrumentSpec,
+        out: Path,
+        effects: dict[str, float | int] | None = None,
+    ) -> None:
+        host = audio.find_vst_host()
+        if host is None:
+            raise RenderError(
+                "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
+            )
+        if spec.plugin is None or not Path(spec.plugin).exists():
+            raise RenderError(f"VST plugin '{spec.plugin}' does not exist.")
+        try:
+            audio.render_vst(host, spec.plugin, spec.plugin_preset, midi, out)
+        except audio.AudioError as exc:
+            raise RenderError(str(exc)) from None
+        duration = audio.midi_duration(midi)
+        audio.trim_wav(out, duration)
+        audio.pad_wav(out, duration)
+        if audio.wav_duration(out) <= 0.01:
+            raise RenderError("The engine produced no audio for this track.")
+        if not _has_audio(out):
+            raise RenderError("The engine produced a silent stem; check the track's notes and instrument.")
+
+
+def apply_stem_effects(stem: Path, effects: list[EffectPlugin] | None) -> None:
+    """Run a track's VST3 effect chain over its rendered stem (the host compensates latency)."""
+    if not effects:
+        return
+    host = audio.find_vst_host()
+    if host is None:
+        raise RenderError("This track has VST effects, but the VST host is not installed.")
+    chain: list[tuple[str, str | None]] = []
+    for effect in effects:
+        if not Path(effect.plugin).exists():
+            raise RenderError(f"VST plugin '{effect.plugin}' does not exist.")
+        chain.append((effect.plugin, effect.preset))
+    temp = stem.with_name(stem.stem + ".fx.wav")
+    try:
+        audio.process_vst(host, chain, stem, temp)
+        temp.replace(stem)
+    except audio.AudioError as exc:
+        raise RenderError(str(exc)) from None
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 RENDERERS: dict[str, Renderer] = {
     FluidSynthRenderer.name: FluidSynthRenderer(),
     SfizzRenderer.name: SfizzRenderer(),
+    VstRenderer.name: VstRenderer(),
 }
 
 
@@ -771,6 +861,19 @@ def effective_instruments(
                 "warning": "; ".join(warnings) if warnings else None,
             }
             continue
+        if spec is not None and spec.engine == "vst":
+            if spec.plugin is None or not Path(spec.plugin).exists():
+                warnings.append(f"VST plugin '{spec.plugin}' does not exist")
+            result[name] = {
+                "channel": channel0 + 1,
+                "bank": None,
+                "program": None,
+                "label": _vst_label(spec),
+                "source": "vst",
+                "soundfont": None,
+                "warning": "; ".join(warnings) if warnings else None,
+            }
+            continue
         target = spec.preset if spec is not None and spec.preset is not None else None
         if target is None:
             target = soundfont or audio.find_soundfont()
@@ -837,7 +940,13 @@ def _validate_sfizz(source: Path, spec: InstrumentSpec) -> None:
         raise RenderError("engine='sfizz' needs 'sfz': the path to a .sfz instrument file.")
     if not Path(spec.sfz).is_file():
         raise RenderError(f"SFZ instrument '{spec.sfz}' does not exist.")
-    for option, value in (("preset", spec.preset), ("bank", spec.bank), ("program", spec.program)):
+    for option, value in (
+        ("preset", spec.preset),
+        ("bank", spec.bank),
+        ("program", spec.program),
+        ("plugin", spec.plugin),
+        ("plugin_preset", spec.plugin_preset),
+    ):
         if value is not None:
             raise RenderError(f"'{option}' is a fluidsynth option; an SFZ instrument maps its own notes.")
     if spec.reverb_send is not None or spec.chorus_send is not None:
@@ -860,6 +969,95 @@ def _validate_sfizz(source: Path, spec: InstrumentSpec) -> None:
                 raise RenderError(
                     f"Section '{section_name}' changes program/bank/preset; an SFZ instrument maps "
                     "its own notes (a gain_db override is fine)."
+                )
+
+
+def _vst_label(spec: InstrumentSpec) -> str | None:
+    """The label a vst spec resolves to: the plugin's file name plus its preset when set."""
+    if spec.plugin is None:
+        return None
+    label = Path(spec.plugin).name
+    return f"{label} - {spec.plugin_preset}" if spec.plugin_preset else label
+
+
+def _validate_vst(spec: InstrumentSpec) -> None:
+    """Check a vst spec: a readable .vst3 instrument that loads, and no other engine's options."""
+    if spec.plugin is None:
+        raise RenderError("engine='vst' needs 'plugin': the path to a .vst3 plugin.")
+    if not Path(spec.plugin).exists():
+        raise RenderError(f"VST plugin '{spec.plugin}' does not exist.")
+    for option, value in (
+        ("preset", spec.preset),
+        ("sfz", spec.sfz),
+        ("bank", spec.bank),
+        ("program", spec.program),
+    ):
+        if value is not None:
+            raise RenderError(f"'{option}' is not a vst option; use 'plugin' and 'plugin_preset'.")
+    if spec.reverb_send is not None or spec.chorus_send is not None:
+        raise RenderError(
+            "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; a vst track has "
+            "none — use its own effects chain or the mix tools' returns."
+        )
+    if spec.sections:
+        raise RenderError("Section overrides are not supported for vst tracks yet.")
+    host = audio.find_vst_host()
+    if host is None:
+        raise RenderError("The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH.")
+    try:
+        info = audio.vst_plugin_info(host, spec.plugin)
+    except audio.AudioError as exc:
+        raise RenderError(str(exc)) from None
+    types = info.get("types") or []
+    if not types:
+        raise RenderError(f"No VST3 types found in '{spec.plugin}'.")
+    if not types[0].get("is_instrument"):
+        raise RenderError(
+            f"'{Path(spec.plugin).name}' is an effect; engine='vst' takes an instrument "
+            "(effects go in 'effects')."
+        )
+    if spec.plugin_preset is not None:
+        programs = [str(name) for name in types[0].get("programs") or []]
+        if not programs:
+            raise RenderError(
+                "This plugin exposes no programs; drop 'plugin_preset' (its default state is used)."
+            )
+        if spec.plugin_preset not in programs and not spec.plugin_preset.isdigit():
+            listed = ", ".join(programs[:12]) + ("..." if len(programs) > 12 else "")
+            raise RenderError(
+                f"No program '{spec.plugin_preset}' in '{Path(spec.plugin).name}'. Programs: {listed}"
+            )
+
+
+def _validate_effects(effects: list[EffectPlugin] | None) -> None:
+    """Check a track's effect chain: readable plugins that load, effects only, real programs."""
+    if not effects:
+        return
+    host = audio.find_vst_host()
+    if host is None:
+        raise RenderError("This spec has VST effects, but the VST host is not installed.")
+    for index, effect in enumerate(effects, start=1):
+        if not Path(effect.plugin).exists():
+            raise RenderError(f"Effect {index}: VST plugin '{effect.plugin}' does not exist.")
+        try:
+            info = audio.vst_plugin_info(host, effect.plugin)
+        except audio.AudioError as exc:
+            raise RenderError(f"Effect {index}: {exc}") from None
+        types = info.get("types") or []
+        if types and types[0].get("is_instrument"):
+            raise RenderError(
+                f"Effect {index}: '{Path(effect.plugin).name}' is an instrument; 'effects' takes "
+                "effect plugins."
+            )
+        if effect.preset is not None:
+            programs = [str(name) for name in types[0].get("programs") or []] if types else []
+            if not programs:
+                raise RenderError(f"Effect {index}: this plugin exposes no programs; drop its preset.")
+            if effect.preset not in programs and not effect.preset.isdigit():
+                listed = ", ".join(programs[:12]) + ("..." if len(programs) > 12 else "")
+                raise RenderError(
+                    f"Effect {index}: no program '{effect.preset}' in '{Path(effect.plugin).name}'. "
+                    f"Programs: {listed}"
                 )
 
 
@@ -1002,13 +1200,16 @@ def register(mcp: FastMCP, store_provider) -> None:
             get_renderer(spec.engine)  # validate engine availability now, not at render time
             if spec.engine == "sfizz":
                 _validate_sfizz(source, spec)
+            elif spec.engine == "vst":
+                _validate_vst(spec)
             else:
-                if spec.sfz is not None:
-                    raise RenderError("'sfz' is a sfizz option; set engine='sfizz' or drop it.")
+                if spec.sfz is not None or spec.plugin is not None or spec.plugin_preset is not None:
+                    raise RenderError("'sfz', 'plugin' and 'plugin_preset' are not fluidsynth options.")
                 if spec.preset is not None and not Path(spec.preset).is_file():
                     raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
                 preset_label(spec, channels.get(name, 0))  # validate bank/program against the sf2
                 _validate_sections(source, spec, channels.get(name, 0))
+            _validate_effects(spec.effects)
             specs[name] = spec
         if specs:
             save_specs(source, specs)
@@ -1018,6 +1219,9 @@ def register(mcp: FastMCP, store_provider) -> None:
         for name, spec in specs.items():
             if spec.engine == "sfizz":
                 resolved[name] = Path(spec.sfz).name if spec.sfz else None
+                continue
+            if spec.engine == "vst":
+                resolved[name] = _vst_label(spec)
                 continue
             try:
                 resolved[name] = preset_label(spec, channels.get(name, 0))
@@ -1086,11 +1290,19 @@ def register(mcp: FastMCP, store_provider) -> None:
                 {"name": path.stem, "path": str(path)}
                 for path in sorted(Path(sfz_dir).rglob("*.sfz"))[:MAX_SFZ_LIBRARIES]
             ]
+        vst_dir = os.environ.get("CHORDSMITH_VST_DIR")
+        vst_plugins = None
+        if vst_dir and Path(vst_dir).is_dir():
+            vst_plugins = [
+                {"name": path.stem, "path": str(path)}
+                for path in sorted(Path(vst_dir).rglob("*.vst3"))[:MAX_VST_PLUGINS]
+            ]
         result: dict = {
             "engines": engines,
             "soundfont": inventory,
             "programs": None if inventory else {"melodic": list(GM_PROGRAMS), "drums": dict(GM_DRUM_KITS)},
             "sfz_libraries": libraries,
+            "vst_plugins": vst_plugins,
             "file": None,
         }
         if filename is not None:
@@ -1104,6 +1316,9 @@ def register(mcp: FastMCP, store_provider) -> None:
                 if spec.engine == "sfizz":
                     resolved[name] = Path(spec.sfz).name if spec.sfz else None
                     continue
+                if spec.engine == "vst":
+                    resolved[name] = _vst_label(spec)
+                    continue
                 try:
                     resolved[name] = preset_label(spec, channels.get(name, 0))
                 except RenderError:
@@ -1116,6 +1331,52 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "effective": effective_instruments(midi, specs, soundfont),
             }
         return result
+
+    @mcp.tool(title="List VST plugins", annotations=_READ_ONLY)
+    def list_plugins(
+        detail: Annotated[
+            str | None,
+            Field(
+                description="Optional plugin path (or a name from the scan) to describe in full: "
+                "vendor, category, programs, parameters, latency. Loads the plugin in the VST host."
+            ),
+        ] = None,
+    ) -> results.PluginsResult:
+        """List the .vst3 plugins found in CHORDSMITH_VST_DIR (Docker: /vst); read-only.
+
+        Each entry has the plugin's file name and path — the values set_track_instrument takes as
+        'plugin'. With ``detail`` the VST host loads one plugin and returns its types: vendor,
+        category, whether it is an instrument, its programs (the values 'plugin_preset' takes),
+        parameter count and latency. Plugins are user-supplied and never bundled; the host is a
+        separate process, so a crashing plugin cannot take the server down.
+        """
+        directory = os.environ.get("CHORDSMITH_VST_DIR")
+        plugins: list[dict[str, str]] = []
+        if directory and Path(directory).is_dir():
+            plugins = [
+                {"name": path.stem, "path": str(path)}
+                for path in sorted(Path(directory).rglob("*.vst3"))[:MAX_VST_PLUGINS]
+            ]
+        host = audio.find_vst_host()
+        payload = None
+        if detail is not None:
+            if host is None:
+                raise RenderError(
+                    "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
+                )
+            target = detail
+            if not Path(target).exists():
+                match = next((entry for entry in plugins if entry["name"] == detail), None)
+                if match is None:
+                    raise RenderError(f"Plugin '{detail}' is not a path or a scanned name.")
+                target = match["path"]
+            payload = audio.vst_plugin_info(host, target)
+        return {
+            "host": host,
+            "directory": directory,
+            "plugins": plugins,
+            "detail": payload,
+        }
 
     @mcp.tool(title="Bake instruments into MIDI", annotations=_CREATES)
     def bake_instruments(

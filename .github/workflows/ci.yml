@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -30,3 +32,53 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]" pip-audit
       - run: pip-audit
+
+  # Builds the GPL VST host (host/) for both platforms and smoke-tests it with the tiny
+  # ToneSynth/GainFx test plugins. On tags the binaries are attached to the GitHub release.
+  vst-host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S host -B host/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TEST_PLUGINS=ON
+      - name: Build
+        run: cmake --build host/build --config Release --parallel 4
+      - name: Smoke test
+        run: python host/tests/smoke.py host/build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vst-host-${{ runner.os }}
+          path: |
+            host/build/vst_host_artefacts/Release/*
+            host/build/ToneSynth_artefacts/Release/VST3/**
+            host/build/GainFx_artefacts/Release/VST3/**
+
+  vst-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: vst-host
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vst-host-*
+          merge-multiple: false
+      - name: Package
+        run: |
+          tar czf vst-host-linux-x64.tar.gz -C vst-host-Linux .
+          zip -r vst-host-windows-x64.zip vst-host-Windows
+      - name: Wait for the release and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 40); do
+            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then break; fi
+            sleep 15
+          done
+          gh release upload "${GITHUB_REF_NAME}" \
+            vst-host-linux-x64.tar.gz vst-host-windows-x64.zip --clobber

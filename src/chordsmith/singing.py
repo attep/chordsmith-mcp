@@ -2991,6 +2991,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                             windows = renderers.section_gain_windows(spec, section_timeline)
                             if windows:
                                 renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
+                            renderers.apply_stem_effects(stem_wav, spec.effects)
                         except renderers.RenderError as exc:
                             raise SingingError(f"Track '{name}': {exc}") from None
                         return name, stem_wav, gain_db, spec

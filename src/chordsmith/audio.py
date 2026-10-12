@@ -16,6 +16,7 @@ DEFAULT_SOUNDFONT_PATHS = (
     "/usr/share/soundfonts/default.sf2",
 )
 RENDER_TIMEOUT_SECONDS = 300
+VST_TIMEOUT_SECONDS = 600
 EFFECTS_TAIL_SECONDS = 3.0  # with effects on, keep FluidSynth's natural tail past the last note
 
 
@@ -33,6 +34,10 @@ def find_ffmpeg() -> str | None:
 
 def find_sfizz_render() -> str | None:
     return os.environ.get("CHORDSMITH_SFIZZ_RENDER") or shutil.which("sfizz_render")
+
+
+def find_vst_host() -> str | None:
+    return os.environ.get("CHORDSMITH_VST_HOST") or shutil.which("vst_host")
 
 
 def find_soundfont() -> str | None:
@@ -294,3 +299,65 @@ def render_sfizz(sfz: str, midi_path: Path, target: Path) -> None:
     duration = midi_duration(midi_path)
     trim_wav(target, duration)
     pad_wav(target, duration)
+
+
+def _run_vst_host(host: str, args: list[str]) -> dict:
+    """Run the VST host CLI and parse its JSON line; AudioError with its message on failure."""
+    import json
+
+    try:
+        result = subprocess.run([host, *args], capture_output=True, text=True, timeout=VST_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AudioError(f"Could not run the VST host: {exc}") from exc
+    payload: dict | None = None
+    for line in reversed((result.stdout or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                payload = None
+            if payload is not None:
+                break
+    if payload is None:
+        detail = (result.stderr or result.stdout or "").strip()[:300]
+        raise AudioError(f"vst_host failed: {detail or 'no output'}")
+    if not payload.get("ok"):
+        raise AudioError(f"vst_host: {payload.get('error', 'unknown error')}")
+    return payload
+
+
+def vst_plugin_info(host: str, plugin: str) -> dict:
+    """Load a plugin in the host and return its types (vendor, programs, latency, ...)."""
+    return _run_vst_host(host, ["--list", "--plugin", plugin])
+
+
+def render_vst(
+    host: str, plugin: str, preset: str | None, midi_path: Path, target: Path, tail: float = 2.0
+) -> dict:
+    """Render a MIDI file through a VST3 instrument with the host (44.1 kHz, stereo)."""
+    args = [
+        "--render",
+        "--plugin",
+        plugin,
+        "--midi",
+        str(midi_path),
+        "--wav",
+        str(target),
+        "--tail",
+        f"{tail:g}",
+    ]
+    if preset:
+        args += ["--preset", preset]
+    return _run_vst_host(host, args)
+
+
+def process_vst(host: str, chain: list[tuple[str, str | None]], source: Path, target: Path) -> dict:
+    """Run a wav through effect plugins in order; the host compensates reported latency."""
+    args = ["--process"]
+    for plugin, preset in chain:
+        args += ["--plugin", plugin]
+        if preset:
+            args += ["--preset", preset]
+    args += ["--in", str(source), "--out", str(target)]
+    return _run_vst_host(host, args)

@@ -169,9 +169,10 @@ async def test_list_instruments_reports_engines_and_specs(store, engine_availabl
         {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "gain_db": -4.0}}},
     )
     engines_only = (await _call("list_instruments", {})).structuredContent
-    assert [engine["name"] for engine in engines_only["engines"]] == ["fluidsynth", "sfizz"]
-    # CHORDSMITH_SFZ_DIR is unset in tests (the image sets it to an empty /sfz)
+    assert [engine["name"] for engine in engines_only["engines"]] == ["fluidsynth", "sfizz", "vst"]
+    # CHORDSMITH_SFZ_DIR / CHORDSMITH_VST_DIR are unset in tests (the image sets them)
     assert engines_only["sfz_libraries"] in (None, [])
+    assert engines_only["vst_plugins"] in (None, [])
     assert engines_only["file"] is None
     if engines_only["soundfont"] is not None:
         # the real preset table of the installed SoundFont (bank/program are 0-based)

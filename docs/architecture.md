@@ -99,11 +99,12 @@ track, soft levels, clipping correction) → export (wav/mp3/vocal/midi via sign
 Adding an engine means implementing one render call and listing it in `list_singing_voices`.
 
 **Track rendering** (`renderers.py`) follows the same idea with a hard isolation rule: a
-`Renderer` is a **separate process** (the FluidSynth CLI, or the `sfizz_render` CLI for sampled
-`.sfz` instruments), never an imported library. That keeps crashing hosts from taking the server
-down, and it keeps differently licensed engines (GPL hosts such as pedalboard or sfizz) outside
-this MIT codebase — the server only ever spawns them and reads the wav they write. Per-track
-instrument specs (a `.sf2` or `.sfz` per track, a trim) live in a JSON sidecar next to the MIDI
+`Renderer` is a **separate process** (the FluidSynth CLI, the `sfizz_render` CLI for sampled
+`.sfz` instruments, or the `vst_host` binary for `.vst3` plugins), never an imported library.
+That keeps crashing hosts from taking the server down, and it keeps differently licensed
+engines (GPL hosts such as the VST host under `host/`) outside this MIT codebase — the server
+only ever spawns them and reads the wav they write. Per-track instrument specs (a `.sf2`, an
+`.sfz` or a `.vst3` per track, a trim, an effect chain) live in a JSON sidecar next to the MIDI
 file, and `render_audio` with `stems: true` renders each track with its own spec, then sums the
 stems.
 

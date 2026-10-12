@@ -256,10 +256,18 @@ class SectionOverride(TypedDict):
     gain_db: float | None
 
 
+class EffectEntry(TypedDict):
+    plugin: str
+    preset: str | None
+
+
 class InstrumentTrack(TypedDict):
     engine: str
     preset: str | None
     sfz: str | None
+    plugin: str | None
+    plugin_preset: str | None
+    effects: list[EffectEntry] | None
     bank: int | None
     program: int | None
     sections: dict[str, SectionOverride] | None
@@ -300,6 +308,11 @@ class SfzLibrary(TypedDict):
     path: str
 
 
+class PluginEntry(TypedDict):
+    name: str
+    path: str
+
+
 class InstrumentsFile(TypedDict):
     filename: str
     tracks: list[str]
@@ -313,7 +326,15 @@ class InstrumentsResult(TypedDict):
     soundfont: SoundfontInventory | None
     programs: ProgramCatalog | None
     sfz_libraries: list[SfzLibrary] | None
+    vst_plugins: list[PluginEntry] | None
     file: InstrumentsFile | None
+
+
+class PluginsResult(TypedDict):
+    host: str | None
+    directory: str | None
+    plugins: list[PluginEntry]
+    detail: dict | None
 
 
 class InstrumentMapResult(TypedDict):

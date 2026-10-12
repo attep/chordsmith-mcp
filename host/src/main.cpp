@@ -1,0 +1,441 @@
+/*
+    ChordSmith VST host — offline VST3 rendering as a separate process.
+
+    Copyright (C) 2026 the ChordSmith contributors.
+
+    This program is free software: you can redistribute it and/or modify it under the terms
+    of the GNU General Public License as published by the Free Software Foundation, either
+    version 3 of the License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful, but WITHOUT ANY
+    WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+    PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+    It is never linked into the MIT-licensed ChordSmith server; the server only spawns this
+    binary and reads the wav it writes. Modes:
+
+      vst_host --list --plugin X.vst3
+      vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--tail SECONDS] \
+               --midi in.mid --wav out.wav
+      vst_host --process [--plugin X.vst3 [--preset NAME|INDEX]]... --in in.wav --out out.wav
+
+    Every mode prints one JSON line on stdout ({"ok": true, ...} or {"ok": false, "error": ...}).
+*/
+
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <memory>
+#include <vector>
+
+namespace {
+
+constexpr double kSampleRate = 44100.0;
+constexpr int kBlockSize = 512;
+
+struct Options {
+    juce::String mode;
+    juce::StringArray plugins;
+    juce::StringArray presets;  // one per plugin (empty = the plugin's default state)
+    juce::String midi;
+    juce::String wav;
+    juce::String input;
+    juce::String output;
+    double tail = 2.0;
+    bool help = false;
+};
+
+juce::String jsonString(const juce::String& value) {
+    juce::String out("\"");
+    for (auto character : value) {
+        switch (character) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (character < 32)
+                    out += "?";
+                else
+                    out += juce::String::charToString(character);
+        }
+    }
+    return out + "\"";
+}
+
+int fail(const juce::String& message) {
+    std::cout << "{\"ok\":false,\"error\":" << jsonString(message) << "}" << std::endl;
+    std::cerr << message << std::endl;
+    return 2;
+}
+
+void printUsage() {
+    std::cout << "usage:\n"
+              << "  vst_host --list --plugin X.vst3\n"
+              << "  vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--tail SECONDS] "
+                 "--midi in.mid --wav out.wav\n"
+              << "  vst_host --process [--plugin X.vst3 [--preset NAME|INDEX]]... "
+                 "--in in.wav --out out.wav\n";
+}
+
+bool parseOptions(int argc, char** argv, Options& options, juce::String& error) {
+    juce::StringArray args;
+    for (int i = 1; i < argc; ++i) args.add(argv[i]);
+    for (int i = 0; i < args.size(); ++i) {
+        const auto arg = args[i];
+        auto value = [&](const juce::String& name) -> juce::String {
+            if (i + 1 >= args.size()) {
+                error = name + " needs a value";
+                return {};
+            }
+            return args[++i];
+        };
+        if (arg == "--help" || arg == "-h") {
+            options.help = true;
+        } else if (arg == "--list" || arg == "--render" || arg == "--process") {
+            options.mode = arg;
+        } else if (arg == "--plugin") {
+            options.plugins.add(value(arg));
+            options.presets.add("");
+        } else if (arg == "--preset") {
+            if (options.presets.isEmpty()) {
+                error = "--preset must follow a --plugin";
+                return false;
+            }
+            options.presets.set(options.presets.size() - 1, value(arg));
+        } else if (arg == "--midi") {
+            options.midi = value(arg);
+        } else if (arg == "--wav") {
+            options.wav = value(arg);
+        } else if (arg == "--in") {
+            options.input = value(arg);
+        } else if (arg == "--out") {
+            options.output = value(arg);
+        } else if (arg == "--tail") {
+            options.tail = value(arg).getDoubleValue();
+        } else {
+            error = "Unknown argument '" + arg + "'";
+            return false;
+        }
+        if (error.isNotEmpty()) return false;
+    }
+    return true;
+}
+
+juce::AudioPluginFormatManager& formatManager() {
+    static juce::AudioPluginFormatManager* manager = [] {
+        auto* created = new juce::AudioPluginFormatManager();
+        created->addDefaultFormats();
+        return created;
+    }();
+    return *manager;
+}
+
+juce::AudioPluginFormat* vst3Format() {
+    for (auto* format : formatManager().getFormats())
+        if (format->getName() == "VST3") return format;
+    return nullptr;
+}
+
+bool loadTypes(
+    const juce::String& path, juce::OwnedArray<juce::PluginDescription>& types, juce::String& error) {
+    auto* format = vst3Format();
+    if (format == nullptr) {
+        error = "VST3 support is not available in this build";
+        return false;
+    }
+    if (!juce::File(path).exists()) {
+        error = "Plugin '" + path + "' does not exist";
+        return false;
+    }
+    format->findAllTypesForFile(types, path);
+    if (types.isEmpty()) {
+        error = "No VST3 types found in '" + path + "'";
+        return false;
+    }
+    return true;
+}
+
+std::unique_ptr<juce::AudioPluginInstance> instantiate(
+    const juce::PluginDescription& description, juce::String& error) {
+    juce::String failure;
+    auto instance = formatManager().createPluginInstance(description, kSampleRate, kBlockSize, failure);
+    if (instance == nullptr)
+        error = failure.isNotEmpty() ? failure : "The plugin could not be instantiated";
+    return instance;
+}
+
+bool applyPreset(juce::AudioPluginInstance& instance, const juce::String& preset, juce::String& error) {
+    if (preset.isEmpty()) return true;
+    const int count = instance.getNumPrograms();
+    if (count <= 0) {
+        error = "This plugin exposes no programs; omit --preset for its default state";
+        return false;
+    }
+    int index = -1;
+    if (preset.containsOnly("0123456789")) {
+        index = preset.getIntValue();
+    } else {
+        for (int i = 0; i < count && index < 0; ++i)
+            if (instance.getProgramName(i).equalsIgnoreCase(preset)) index = i;
+        for (int i = 0; i < count && index < 0; ++i)
+            if (instance.getProgramName(i).containsIgnoreCase(preset)) index = i;
+    }
+    if (index < 0 || index >= count) {
+        juce::StringArray names;
+        for (int i = 0; i < juce::jmin(count, 20); ++i) names.add(instance.getProgramName(i));
+        error = "No program matches '" + preset + "'. Programs: " + names.joinIntoString(", ");
+        return false;
+    }
+    instance.setCurrentProgram(index);
+    return true;
+}
+
+struct TimedMessage {
+    double seconds;
+    juce::MidiMessage message;
+};
+
+bool loadMidi(const juce::String& path, std::vector<TimedMessage>& events, double& end, juce::String& error) {
+    juce::File file(path);
+    if (!file.existsAsFile()) {
+        error = "MIDI file '" + path + "' does not exist";
+        return false;
+    }
+    juce::FileInputStream stream(file);
+    if (!stream.openedOk()) {
+        error = "Could not open '" + path + "'";
+        return false;
+    }
+    juce::MidiFile midi;
+    if (!midi.readFrom(stream)) {
+        error = "'" + path + "' is not a readable MIDI file";
+        return false;
+    }
+    midi.convertTimestampTicksToSeconds();
+    for (int t = 0; t < midi.getNumTracks(); ++t) {
+        const auto* track = midi.getTrack(t);
+        if (track == nullptr) continue;
+        for (const auto* event : *track)
+            if (!event->message.isMetaEvent())
+                events.push_back({event->message.getTimeStamp(), event->message});
+    }
+    std::sort(events.begin(), events.end(),
+        [](const TimedMessage& a, const TimedMessage& b) { return a.seconds < b.seconds; });
+    end = events.empty() ? 0.0 : events.back().seconds;
+    return true;
+}
+
+bool readWav(const juce::File& file, juce::AudioBuffer<float>& buffer, juce::String& error) {
+    juce::AudioFormatManager manager;
+    manager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(manager.createReaderFor(file));
+    if (reader == nullptr) {
+        error = "Could not read '" + file.getFullPathName() + "' as audio";
+        return false;
+    }
+    if (std::abs(reader->sampleRate - kSampleRate) > 1.0) {
+        error = "Input audio must be 44.1 kHz";
+        return false;
+    }
+    const int channels = juce::jmax(1, static_cast<int>(reader->numChannels));
+    const int samples = static_cast<int>(reader->lengthInSamples);
+    juce::AudioBuffer<float> source(channels, juce::jmax(1, samples));
+    source.clear();
+    if (!reader->read(&source, 0, samples, 0, true, true)) {
+        error = "Reading '" + file.getFullPathName() + "' failed";
+        return false;
+    }
+    buffer.setSize(2, juce::jmax(1, samples));
+    buffer.clear();
+    buffer.copyFrom(0, 0, source, 0, 0, samples);
+    buffer.copyFrom(1, 0, source, channels > 1 ? 1 : 0, 0, samples);
+    return true;
+}
+
+bool writeWav(const juce::File& file, const juce::AudioBuffer<float>& buffer, juce::String& error) {
+    file.deleteFile();
+    auto stream = std::make_unique<juce::FileOutputStream>(file);
+    if (!stream->openedOk()) {
+        error = "Could not write '" + file.getFullPathName() + "'";
+        return false;
+    }
+    juce::WavAudioFormat format;
+    auto* writer = format.createWriterFor(stream.get(), kSampleRate, 2, 16, {}, 0);
+    if (writer == nullptr) {
+        error = "Could not create a wav writer";
+        return false;
+    }
+    stream.release();
+    std::unique_ptr<juce::AudioFormatWriter> holder(writer);
+    if (!holder->writeFromAudioSampleBuffer(buffer, 0, buffer.getNumSamples())) {
+        error = "Writing '" + file.getFullPathName() + "' failed";
+        return false;
+    }
+    return true;
+}
+
+int runList(const Options& options) {
+    if (options.plugins.isEmpty()) return fail("--list needs --plugin");
+    juce::String error;
+    juce::OwnedArray<juce::PluginDescription> types;
+    if (!loadTypes(options.plugins[0], types, error)) return fail(error);
+    juce::String json = "{\"ok\":true,\"mode\":\"list\",\"plugin\":" + jsonString(options.plugins[0]) + ",\"types\":[";
+    for (int t = 0; t < types.size(); ++t) {
+        if (t > 0) json += ",";
+        const auto& description = *types[t];
+        juce::String programs;
+        int programCount = 0;
+        int parameters = 0;
+        int latency = 0;
+        juce::String typeError;
+        auto instance = instantiate(description, typeError);
+        if (instance != nullptr) {
+            // Prepare so the wrapper reports real latency (VST3 refreshes it on setupProcessing).
+            instance->enableAllBuses();
+            instance->prepareToPlay(kSampleRate, kBlockSize);
+            programCount = instance->getNumPrograms();
+            parameters = instance->getParameters().size();
+            latency = instance->getLatencySamples();
+            for (int i = 0; i < juce::jmin(programCount, 200); ++i) {
+                if (i > 0) programs += ",";
+                programs += jsonString(instance->getProgramName(i));
+            }
+        }
+        json += "{\"name\":" + jsonString(description.name) +
+                ",\"vendor\":" + jsonString(description.manufacturerName) +
+                ",\"category\":" + jsonString(description.category) +
+                ",\"is_instrument\":" + (description.isInstrument ? "true" : "false") +
+                ",\"program_count\":" + juce::String(programCount) +
+                ",\"programs\":[" + programs + "]" +
+                ",\"parameters\":" + juce::String(parameters) +
+                ",\"latency_samples\":" + juce::String(latency) +
+                ",\"error\":" + (typeError.isEmpty() ? juce::String("null") : jsonString(typeError)) + "}";
+    }
+    json += "]}";
+    std::cout << json << std::endl;
+    return 0;
+}
+
+int runRender(const Options& options) {
+    if (options.plugins.isEmpty()) return fail("--render needs --plugin");
+    if (options.midi.isEmpty() || options.wav.isEmpty())
+        return fail("--render needs --midi and --wav");
+    juce::String error;
+    juce::OwnedArray<juce::PluginDescription> types;
+    if (!loadTypes(options.plugins[0], types, error)) return fail(error);
+    if (!types[0]->isInstrument)
+        return fail("'" + types[0]->name + "' is an effect, not an instrument; use --process for effects");
+    auto instance = instantiate(*types[0], error);
+    if (instance == nullptr) return fail(error);
+    if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
+
+    std::vector<TimedMessage> events;
+    double end = 0.0;
+    if (!loadMidi(options.midi, events, end, error)) return fail(error);
+
+    instance->setPlayConfigDetails(0, 2, kSampleRate, kBlockSize);
+    instance->prepareToPlay(kSampleRate, kBlockSize);
+
+    const juce::int64 totalFrames =
+        static_cast<juce::int64>(std::ceil((end + juce::jmax(0.0, options.tail)) * kSampleRate));
+    juce::AudioBuffer<float> buffer(2, kBlockSize);
+    juce::MidiBuffer midiBuffer;
+    juce::File outFile(options.wav);
+    outFile.deleteFile();
+    auto stream = std::make_unique<juce::FileOutputStream>(outFile);
+    if (!stream->openedOk()) return fail("Could not write '" + options.wav + "'");
+    juce::WavAudioFormat wavFormat;
+    auto* writer = wavFormat.createWriterFor(stream.get(), kSampleRate, 2, 16, {}, 0);
+    if (writer == nullptr) return fail("Could not create the wav writer");
+    stream.release();
+    std::unique_ptr<juce::AudioFormatWriter> holder(writer);
+
+    size_t next = 0;
+    for (juce::int64 start = 0; start < totalFrames; start += kBlockSize) {
+        midiBuffer.clear();
+        while (next < events.size() &&
+               events[next].seconds * kSampleRate < static_cast<double>(start + kBlockSize)) {
+            const int offset = juce::jlimit(0, kBlockSize - 1,
+                static_cast<int>(events[next].seconds * kSampleRate) - static_cast<int>(start));
+            midiBuffer.addEvent(events[next].message, offset);
+            ++next;
+        }
+        buffer.clear();
+        instance->processBlock(buffer, midiBuffer);
+        holder->writeFromAudioSampleBuffer(buffer, 0, kBlockSize);
+    }
+    const double seconds = static_cast<double>(totalFrames) / kSampleRate;
+    std::cout << "{\"ok\":true,\"mode\":\"render\",\"plugin\":" << jsonString(types[0]->name)
+              << ",\"frames\":" << totalFrames
+              << ",\"seconds\":" << juce::String(seconds, 3)
+              << ",\"latency_samples\":" << instance->getLatencySamples() << "}" << std::endl;
+    return 0;
+}
+
+int runProcess(const Options& options) {
+    if (options.plugins.isEmpty()) return fail("--process needs at least one --plugin");
+    if (options.input.isEmpty() || options.output.isEmpty())
+        return fail("--process needs --in and --out");
+    juce::String error;
+    juce::AudioBuffer<float> audio;
+    if (!readWav(juce::File(options.input), audio, error)) return fail(error);
+    const int samples = audio.getNumSamples();
+
+    std::vector<std::unique_ptr<juce::AudioPluginInstance>> chain;
+    int latency = 0;
+    for (int i = 0; i < options.plugins.size(); ++i) {
+        juce::OwnedArray<juce::PluginDescription> types;
+        if (!loadTypes(options.plugins[i], types, error)) return fail(error);
+        if (types[0]->isInstrument)
+            return fail("'" + types[0]->name + "' is an instrument; --process takes effects");
+        auto instance = instantiate(*types[0], error);
+        if (instance == nullptr) return fail(error);
+        if (!applyPreset(*instance, options.presets[i], error)) return fail(error);
+        instance->setPlayConfigDetails(2, 2, kSampleRate, kBlockSize);
+        instance->prepareToPlay(kSampleRate, kBlockSize);
+        latency += instance->getLatencySamples();
+        chain.push_back(std::move(instance));
+    }
+
+    juce::MidiBuffer midiBuffer;
+    for (int start = 0; start < samples; start += kBlockSize) {
+        const int blockFrames = juce::jmin(kBlockSize, samples - start);
+        juce::AudioBuffer<float> chunk(audio.getArrayOfWritePointers(), 2, start, blockFrames);
+        for (auto& effect : chain) effect->processBlock(chunk, midiBuffer);
+    }
+    // The chain delayed the audio by the sum of the plugins' reported latencies; shift it back
+    // so the processed stem stays aligned with every other stem (zeros pad the end).
+    if (latency > 0 && latency < samples) {
+        for (int channel = 0; channel < 2; ++channel) {
+            audio.copyFrom(channel, 0, audio, channel, latency, samples - latency);
+            audio.clear(channel, samples - latency, latency);
+        }
+    }
+    if (!writeWav(juce::File(options.output), audio, error)) return fail(error);
+    std::cout << "{\"ok\":true,\"mode\":\"process\",\"frames\":" << samples
+              << ",\"seconds\":" << juce::String(static_cast<double>(samples) / kSampleRate, 3)
+              << ",\"latency_samples\":" << latency << "}" << std::endl;
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    juce::ScopedJuceInitialiser_GUI initialise;
+    Options options;
+    juce::String error;
+    if (!parseOptions(argc, argv, options, error)) return fail(error);
+    if (options.help || options.mode.isEmpty()) {
+        printUsage();
+        return options.mode.isEmpty() && !options.help ? 2 : 0;
+    }
+    if (options.mode == "--list") return runList(options);
+    if (options.mode == "--render") return runRender(options);
+    if (options.mode == "--process") return runProcess(options);
+    return fail("Unknown mode '" + options.mode + "'");
+}

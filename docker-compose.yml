@@ -20,6 +20,7 @@ services:
       CHORDSMITH_OUTPUT_DIR: /data
       CHORDSMITH_STATE_DIR: /state
       CHORDSMITH_SFZ_DIR: /sfz
+      CHORDSMITH_VST_DIR: /vst
       CHORDSMITH_VOICEVOX_URL: "http://voicevox:50021"
       CHORDSMITH_DIFFSINGER_VOICE: "${CHORDSMITH_DIFFSINGER_VOICE:-/voicebank}"
     volumes:
@@ -29,6 +30,8 @@ services:
       - ./voicebank:/voicebank:ro
       # Your SFZ instruments for the sfizz engine (never committed; see docs/tools.md)
       - ./sfz:/sfz:ro
+      # Linux .vst3 plugins for the VST engine (never committed; see docs/vst.md)
+      - ./vst:/vst:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 30s

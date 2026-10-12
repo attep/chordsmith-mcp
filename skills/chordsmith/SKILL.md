@@ -107,6 +107,11 @@ say so.
   the server's SFZ folder; `list_instruments` lists them) for realistic multisampled drums/bass.
   sfizz tracks only render with `render_audio(stems: true)` (or `mix_song_with_vocals`), and
   reject FluidSynth-only options (preset/bank/program/sends).
+- **VST plugins**: `set_track_instrument` takes `engine: "vst"` + `plugin` (+ `plugin_preset`
+  from `list_plugins` with `detail`) for `.vst3` instruments, and `effects` chains `.vst3`
+  effects over any track's rendered stem (latency compensated). Needs the VST host — on
+  Windows the released `vst_host.exe`, in Docker the Linux plugins under `/vst`. vst tracks
+  render only with `render_audio(stems: true)`.
 - **Long renders**: DiffSinger is slow on CPU (tens of seconds per minute) and runs in background
   jobs chunked at rests; long FluidSynth songs should use `render_audio_job`.
 - **Voices**: VOICEVOX sings Japanese kana or a hum; its whisper styles are Japanese-only and

@@ -13,4 +13,6 @@ state/
 output/
 voicebank/
 sfz/
+vst/
+host/build/
 *.zip

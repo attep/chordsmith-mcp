@@ -172,7 +172,7 @@ async def test_set_track_instrument_sfizz_validation(store, tmp_path):
         "set_track_instrument",
         {"filename": song, "tracks": {"Melody": {"engine": "fluidsynth", "sfz": sfz}}},
     )
-    assert sfz_on_fluidsynth.isError and "sfizz option" in sfz_on_fluidsynth.content[0].text
+    assert sfz_on_fluidsynth.isError and "not fluidsynth options" in sfz_on_fluidsynth.content[0].text
 
 
 async def test_list_instruments_reports_sfizz_tracks(store, tmp_path):

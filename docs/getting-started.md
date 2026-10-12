@@ -201,6 +201,8 @@ ChordSmith reads these optional environment variables:
 | `CHORDSMITH_AUTH` | on for HTTP | `off` disables OAuth |
 | `CHORDSMITH_STATE_DIR` | `~/.chordsmith` | Where OAuth clients and tokens are stored (Docker: `/state`) |
 | `CHORDSMITH_SFZ_DIR` | unset | Folder whose `.sfz` instruments `list_instruments` lists (Docker: `/sfz`, mounted read-only) |
+| `CHORDSMITH_VST_DIR` | unset | Folder whose `.vst3` plugins `list_plugins` lists (Docker: `/vst`, mounted read-only) |
+| `CHORDSMITH_VST_HOST` | `vst_host` on PATH | The VST host binary, e.g. the released `vst_host.exe` on Windows (see [VST plugins](vst.md)) |
 
 The online-related variables are explained in [Run it online](remote.md#settings).
 

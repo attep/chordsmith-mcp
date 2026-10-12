@@ -428,15 +428,18 @@ Each spec has:
 
 | Field | Description |
 |---|---|
-| `engine` | `"fluidsynth"` (General MIDI via a `.sf2` soundfont) or `"sfizz"` (a sampled `.sfz` instrument; needs `stems: true` renders) |
+| `engine` | `"fluidsynth"` (General MIDI via a `.sf2` soundfont), `"sfizz"` (a sampled `.sfz` instrument) or `"vst"` (a `.vst3` plugin); sfizz and vst need `stems: true` renders |
 | `preset` | fluidsynth: path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
 | `sfz` | sfizz: path to a `.sfz` instrument file (with its samples) the server can read; required when `engine` is `"sfizz"` |
+| `plugin` | vst: path to a `.vst3` instrument plugin the server can read (see [list_plugins](#list_plugins)); required when `engine` is `"vst"` |
+| `plugin_preset` | vst: program name or index inside the plugin (from `list_plugins` `detail`); omit for its default state |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
 | `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet. A section `gain_db` replaces the track's gain for that section: it is applied **exactly** to the rendered stem (and baked as CC11, which cannot boost above 0 dB) |
 | `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 | `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
+| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm"}]`. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
 
@@ -476,6 +479,16 @@ no loop plays once per note and then falls silent — loop points and `ampeg_rel
 `.sfz` decide how notes hold. Stems are trimmed and padded to the song's own length, like
 FluidSynth stems.
 
+**vst tracks** (`engine: "vst"`) render a `.vst3` instrument offline through the separate VST
+host: the Docker image builds the Linux host, and Windows servers use the released
+`vst_host.exe` (see [VST plugins](vst.md)). Pass `plugin` — a path to a `.vst3` under
+`CHORDSMITH_VST_DIR` (`list_plugins` lists what is there) — and optionally `plugin_preset`, a
+program name or index from `list_plugins` with `detail`. vst tracks render only with `stems:
+true` (or [`mix_song_with_vocals`](singing.md#mixing-and-export) for the backing), reject
+FluidSynth options and section overrides, and cannot be baked into a MIDI (a `.mid` cannot
+carry a plugin). Effect plugins go in a spec's `effects` chain (see above), which applies to
+any track's stem.
+
 To use your own `.sf2` files, put them where the server can read them and pass that path as
 `preset`: drop them into the output folder (visible to the server as `/data/…` in the Docker
 image) or mount a folder into the container and use its container path, e.g. `/sf2/MyBass.sf2`.
@@ -489,10 +502,11 @@ No options, or a `filename` and/or a `soundfont` path. Read-only. Returns the re
 this server can run — their availability, the default soundfont and notes — the **actual
 preset table** of the loaded (or given) `.sf2`: every preset's name, bank and program, both
 0-based, so the numbers `set_track_instrument` takes are verifiable, not assumed (FluidR3 reports
-189 presets, its drum kits in bank 128 — e.g. `128-016 Power`), and `sfz_libraries`: the `.sfz`
+189 presets, its drum kits in bank 128 — e.g. `128-016 Power`), `sfz_libraries`: the `.sfz`
 files found under `CHORDSMITH_SFZ_DIR` (name + path) when it is set, null otherwise — the
-pickable list for sfizz specs. When no soundfont file is readable, a static GM reference list is
-returned instead. With a filename, also returns:
+pickable list for sfizz specs — and `vst_plugins`: the `.vst3` plugins found under
+`CHORDSMITH_VST_DIR`, the pickable list for vst specs. When no soundfont file is readable, a
+static GM reference list is returned instead. With a filename, also returns:
 
 - each track's **stored spec** and the preset label each spec resolves to (`resolved` — null
   when a spec sets no bank/program, or the `.sfz` file name for sfizz specs);
@@ -506,6 +520,17 @@ returned instead. With a filename, also returns:
 
 Engines run as **separate processes**, so a crashing or differently licensed engine can never
 take the server down.
+
+## list_plugins
+
+No options, or a `detail` value. Read-only. Lists the `.vst3` plugins found under
+`CHORDSMITH_VST_DIR` (Docker: `/vst`) as name + path — the values `set_track_instrument` takes
+as `plugin` — plus the resolved `host` binary. With `detail` (a path, or a name from the scan)
+the VST host loads that plugin and returns each of its types: vendor, category, whether it is
+an instrument, its `programs` (the values `plugin_preset` takes), parameter count and
+`latency_samples`. Plugins are user-supplied and never bundled; the host is a separate process,
+so a crashing plugin cannot take the server down. See [VST plugins](vst.md) for setup on
+Windows and Docker, and free plugin suggestions.
 
 ## list_chord_types
 
