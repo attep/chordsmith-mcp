@@ -947,3 +947,61 @@ async def test_stage0_backing_renders_stay_byte_identical(store):
         rendered = store.root / result.structuredContent["filename"]
         digest = hashlib.sha256(rendered.read_bytes()).hexdigest()
         assert digest == manifest["files"][reference]["sha256"]
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+async def test_track_chain_applies_without_a_plugin_host(store, monkeypatch):
+    """A spec's built-in chain (EQ/saturation/...) shapes the stem with no VST involved."""
+    import array
+    import math
+
+    song = await _make_band(store)
+
+    class _LowSineRenderer:
+        name = "fluidsynth"
+
+        def available(self):
+            return True
+
+        def render(self, midi, spec, out, effects=None):
+            samples = array.array("h")
+            for index in range(8820):  # 0.2 s of 100 Hz, so a >1 kHz highpass guts it
+                value = int(12000 * math.sin(2 * math.pi * 100 * index / 44100))
+                samples.append(value)
+                samples.append(value)
+            with wave.open(str(out), "wb") as handle:
+                handle.setnchannels(2)
+                handle.setsampwidth(2)
+                handle.setframerate(44100)
+                handle.writeframes(samples.tobytes())
+
+    monkeypatch.setitem(renderers.RENDERERS, "fluidsynth", _LowSineRenderer())
+    monkeypatch.setattr(
+        renderers, "combine_stems", lambda stems, target: _write_tiny_wav(target, amplitude=900)
+    )
+
+    plain = (
+        await _call("render_audio", {"filename": song, "stems": True, "output_filename": "plain"})
+    ).structuredContent
+    plain_peak = next(stem for stem in plain["stems"] if stem["track"] == "Bass")["peak_db"]
+
+    set_spec = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {
+                "Bass": {
+                    "engine": "fluidsynth",
+                    "chain": {"eq": {"highpass_hz": 1000}, "saturation": {"enabled": True, "drive_db": 12}},
+                }
+            },
+        },
+    )
+    assert not set_spec.isError, set_spec.content[0].text
+    assert set_spec.structuredContent["tracks"]["Bass"]["chain"]["saturation"]["drive_db"] == 12
+
+    chained = (
+        await _call("render_audio", {"filename": song, "stems": True, "output_filename": "chained"})
+    ).structuredContent
+    chained_peak = next(stem for stem in chained["stems"] if stem["track"] == "Bass")["peak_db"]
+    assert chained_peak < plain_peak - 10  # the 100 Hz tone is filtered away

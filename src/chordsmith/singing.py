@@ -1591,6 +1591,28 @@ def _compressor_filter(comp: VocalCompressor) -> str:
     )
 
 
+def chain_filters(chain: VocalChain | None, include_compressor: bool = True) -> list[str]:
+    """FFmpeg filters for a processing chain: EQ, de-esser, saturation, compressor.
+
+    The same stages serve vocals and per-track instrument chains, in this order.
+    """
+    if chain is None:
+        return []
+    parts: list[str] = []
+    if chain.eq is not None:
+        parts.extend(_eq_filters(chain.eq))
+    if chain.deesser is not None and chain.deesser.enabled:
+        deesser = chain.deesser
+        parts.append(f"deesser=i={deesser.intensity:g}:f={deesser.frequency:g}:m={deesser.makeup:g}")
+    if chain.saturation is not None and chain.saturation.enabled:
+        drive = chain.saturation.drive_db
+        # pre-gain into the tanh curve, then compensated: peaks stay put, harmonics are added
+        parts.append(f"volume={drive:g}dB,asoftclip=type=tanh,volume=-{drive:g}dB")
+    if include_compressor and chain.compressor is not None and chain.compressor.enabled:
+        parts.append(_compressor_filter(chain.compressor))
+    return parts
+
+
 def _voice_chain_filters(voice: ProcessedVoice, include_compressor: bool = True) -> list[str]:
     """A voice's filters from raw input to its processed stereo output (no sends)."""
     parts = ["aformat=channel_layouts=mono"]
@@ -1602,20 +1624,27 @@ def _voice_chain_filters(voice: ProcessedVoice, include_compressor: bool = True)
     parts.append(f"pan=stereo|c0={left:.4f}*c0|c1={right:.4f}*c0")
     if voice.gain_db:
         parts.append(f"volume={voice.gain_db:g}dB")
-    chain = voice.chain
-    if chain is not None:
-        if chain.eq is not None:
-            parts.extend(_eq_filters(chain.eq))
-        if chain.deesser is not None and chain.deesser.enabled:
-            deesser = chain.deesser
-            parts.append(f"deesser=i={deesser.intensity:g}:f={deesser.frequency:g}:m={deesser.makeup:g}")
-        if chain.saturation is not None and chain.saturation.enabled:
-            drive = chain.saturation.drive_db
-            # pre-gain into the tanh curve, then compensated: peaks stay put, harmonics are added
-            parts.append(f"volume={drive:g}dB,asoftclip=type=tanh,volume=-{drive:g}dB")
-        if include_compressor and chain.compressor is not None and chain.compressor.enabled:
-            parts.append(_compressor_filter(chain.compressor))
+    parts.extend(chain_filters(voice.chain, include_compressor=include_compressor))
     return parts
+
+
+def apply_stem_chain(stem: Path, chain: VocalChain | None) -> None:
+    """Run a spec's built-in chain over its rendered stem, in place (via a temp file).
+
+    Instrument EQ/saturation/compression without a plugin host; any engine's stem can take it,
+    before VST effect chains.
+    """
+    filters = chain_filters(chain)
+    if not filters:
+        return
+    target = stem.with_name(stem.stem + ".chain.wav")
+    try:
+        _ffmpeg(["-y", "-loglevel", "error", "-i", str(stem), "-af", ",".join(filters), str(target)])
+        target.replace(stem)
+    except SingingError as exc:
+        raise renderers.RenderError(str(exc)) from None
+    finally:
+        target.unlink(missing_ok=True)
 
 
 def _render_voice(
@@ -2369,6 +2398,278 @@ def _mix_stems(stems: list[Path], levels_db: list[float], target: Path) -> None:
 # ------------------------------------------------------------------ MCP tools
 
 
+def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None = None) -> dict:
+    """The pipeline behind mix_song_with_vocals and its background job.
+
+    ``args`` holds the tool's validated values (the same keys as the tool parameters);
+    ``progress`` is called as ``(name, state, error=None)`` for each backing track and for the
+    final ``mix`` phase — the background job reports it.
+    """
+    source = args["source"]
+    vocal = args.get("vocal")
+    vocals = args.get("vocals")
+    guide_track = args.get("guide_track")
+    vocal_level_db = args.get("vocal_level_db", 6.0)
+    backing_volume = args.get("backing_volume", 1.0)
+    backing_levels = args.get("backing_levels")
+    vocal_reverb = args.get("vocal_reverb", False)
+    vocal_chain = args.get("vocal_chain")
+    vocal_sends = args.get("vocal_sends")
+    vocal_bus = args.get("vocal_bus")
+    returns = args.get("returns")
+    master = args.get("master")
+    save_chain = args.get("save_chain", False)
+    reverb = args.get("reverb")
+    chorus = args.get("chorus")
+    normalize_peak_db = args.get("normalize_peak_db", -1.0)
+    compress = args.get("compress", False)
+    ducking = args.get("ducking", False)
+    duck_db = args.get("duck_db", 4.0)
+    output_filename = args.get("output_filename")
+    overwrite = args.get("overwrite", False)
+    store = _get_store()
+    assert store is not None
+    source_path = store.existing_path(source)
+    if vocals and vocal:
+        raise SingingError("Give either vocal or vocals, not both.")
+    if not vocals and not vocal:
+        raise SingingError("Give a vocal file (or job id), or a list of vocals with their start_seconds.")
+    segment_list: list[dict] | None = None
+    resolved_segments: list[tuple[Path, float]] = []
+    if vocals:
+        segment_list = [segment.model_dump() for segment in vocals]
+        resolved_segments = [
+            (_resolve_vocal_path(segment.file, store), segment.start_seconds) for segment in vocals
+        ]
+        vocal_path = None  # built from the segments inside the claim block below
+    else:
+        vocal_path = _resolve_vocal_path(vocal, store)
+    sidecar_path = source_path.with_name(source_path.stem + VOCAL_CHAIN_SUFFIX)
+    chain_source = "parameters"
+    if (
+        all(value is None for value in (vocal_chain, vocal_sends, vocal_bus, returns, master))
+        and sidecar_path.is_file()
+    ):
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        vocal_chain = VocalChain.model_validate(data["vocal_chain"]) if data.get("vocal_chain") else None
+        vocal_sends = VocalSends.model_validate(data["vocal_sends"]) if data.get("vocal_sends") else None
+        vocal_bus = VocalBus.model_validate(data["vocal_bus"]) if data.get("vocal_bus") else None
+        returns = Returns.model_validate(data["returns"]) if data.get("returns") else None
+        master = MasterSettings.model_validate(data["master"]) if data.get("master") else None
+        chain_source = "sidecar"
+    if vocals and (vocal_chain is not None or vocal_sends is not None):
+        raise SingingError(
+            "vocal_chain/vocal_sends apply to a single vocal; with vocals, put them on each segment."
+        )
+    voice_list: list[ProcessedVoice] | None = None
+    process_voices = (
+        vocal_chain is not None
+        or vocal_sends is not None
+        or vocal_bus is not None
+        or returns is not None
+        or master is not None
+        or (
+            vocals is not None
+            and any(
+                segment.chain is not None
+                or segment.sends is not None
+                or segment.gain_db
+                or segment.pan
+                or segment.reverb_mix is not None
+                for segment in vocals
+            )
+        )
+    )
+    if process_voices:
+        if vocals:
+            voice_list = [
+                ProcessedVoice(
+                    path=path,
+                    start_seconds=segment.start_seconds,
+                    name=segment.name or f"voice {position + 1}",
+                    gain_db=segment.gain_db,
+                    pan=segment.pan,
+                    chain=segment.chain,
+                    sends=segment.sends,
+                    reverb_mix=segment.reverb_mix,
+                )
+                for position, ((path, _), segment) in enumerate(zip(resolved_segments, vocals, strict=True))
+            ]
+        else:
+            voice_list = [ProcessedVoice(path=vocal_path, name="voice", chain=vocal_chain, sends=vocal_sends)]
+    midi = mido.MidiFile(source_path)
+    track_index = find_track(midi, guide_track)
+    names = _track_names(midi)
+    note_tracks = [
+        index
+        for index, track in enumerate(midi.tracks)
+        if index != track_index and any(msg.type == "note_on" and msg.velocity > 0 for msg in track)
+    ]
+    if backing_levels is not None:
+        if midi.type == 0:
+            raise SingingError("Per-stem levels need a type-1 file with separate tracks.")
+        unknown = sorted(set(backing_levels) - {names[index] for index in note_tracks})
+        if unknown:
+            available = ", ".join(names[index] for index in note_tracks) or "(none)"
+            raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
+    specs = renderers.load_specs(source_path)
+    if specs:
+        # muted tracks stay out of the backing entirely
+        note_tracks = [
+            index for index in note_tracks if not (specs.get(names[index]) and specs[names[index]].mute)
+        ]
+    use_stems = backing_levels is not None or bool(specs)
+    resolved_sections = sections.read_sections(source_path)
+    section_timeline = sections.timeline_seconds(resolved_sections)
+    starting_bpm = resolved_sections[0].bpm if resolved_sections else None
+    effects = renderers.effect_options(reverb, chorus)
+    effects_echo = {
+        "reverb": reverb.model_dump() if reverb is not None else None,
+        "chorus": chorus.model_dump() if chorus is not None else None,
+    }
+    with (
+        # The backing is an internal intermediate: always claim a unique name, even when the
+        # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
+        # the same backing file.
+        store.claimed_path(None, f"{source_path.stem}_backing", extension=".wav") as backing_wav,
+        store.claimed_path(None, f"{source_path.stem}_vocals", extension=".wav") as vocals_wav,
+        store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
+    ):
+        if voice_list is None and resolved_segments:
+            # several vocal pieces (takes, or a vocal rendered in chunks): place each at its
+            # start time and sum them into one vocal track
+            _combine_vocals(resolved_segments, vocals_wav)
+            vocal_path = vocals_wav
+        else:
+            vocals_wav.unlink(missing_ok=True)
+        instruments: dict[str, dict] | None = None
+        if not use_stems:
+            if progress is not None:
+                progress("backing", "running")
+            with store.claimed_path(None, f"{source_path.stem}_backing", extension=".mid") as backing_midi:
+                remove_track(source_path, backing_midi, track_index)
+                audio.render(backing_midi, backing_wav, "wav", effects=effects)
+            if progress is not None:
+                progress("backing", "done")
+        else:
+            with tempfile.TemporaryDirectory() as scratch:
+
+                def render_backing_track(index: int) -> tuple[str, Path, float, renderers.InstrumentSpec]:
+                    name = names[index]
+                    if progress is not None:
+                        progress(name, "running")
+                    spec = specs.get(name) or renderers.InstrumentSpec()
+                    gain_db = (
+                        backing_levels.get(name, spec.gain_db) if backing_levels is not None else spec.gain_db
+                    )
+                    stem_midi = Path(scratch) / f"stem_{index}.mid"
+                    stem_wav = Path(scratch) / f"stem_{index}.wav"
+                    extract_track(source_path, stem_midi, index)
+                    renderer = renderers.get_renderer(spec.engine)
+                    try:
+                        renderer.render(stem_midi, spec, stem_wav, effects)
+                        windows = renderers.section_gain_windows(spec, section_timeline)
+                        if windows:
+                            renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
+                        apply_stem_chain(stem_wav, spec.chain)
+                        renderers.apply_stem_effects(stem_wav, spec.effects)
+                    except renderers.RenderError as exc:
+                        if progress is not None:
+                            progress(name, "failed", f"Track '{name}': {exc}")
+                        raise SingingError(f"Track '{name}': {exc}") from None
+                    if progress is not None:
+                        progress(name, "done")
+                    return name, stem_wav, gain_db, spec
+
+                rendered = renderers.parallel_map(render_backing_track, note_tracks)
+                _mix_stems(
+                    [stem_wav for _, stem_wav, _, _ in rendered],
+                    [gain_db for _, _, gain_db, _ in rendered],
+                    backing_wav,
+                )
+                instruments = {
+                    name: {**spec.model_dump(), "gain_db": gain_db} for name, _, gain_db, spec in rendered
+                }
+        if progress is not None:
+            progress("mix", "running")
+        info = mix_tracks(
+            backing_wav,
+            vocal_path,
+            target,
+            vocal_level_db=vocal_level_db,
+            backing_volume=backing_volume,
+            vocal_reverb=vocal_reverb,
+            normalize_peak_db=normalize_peak_db,
+            compress=compress,
+            ducking=ducking,
+            duck_db=duck_db,
+            voices=voice_list,
+            vocal_bus=vocal_bus,
+            returns=returns,
+            master=master,
+            starting_bpm=starting_bpm,
+        )
+        if save_chain:
+            payload: dict[str, Any] = {}
+            if vocal_chain is not None:
+                payload["vocal_chain"] = vocal_chain.model_dump(exclude_none=True)
+            if vocal_sends is not None:
+                payload["vocal_sends"] = vocal_sends.model_dump(exclude_none=True)
+            if vocal_bus is not None:
+                payload["vocal_bus"] = vocal_bus.model_dump(exclude_none=True)
+            if returns is not None:
+                payload["returns"] = returns.model_dump(exclude_none=True)
+            if master is not None:
+                payload["master"] = master.model_dump(exclude_none=True)
+            sidecar_path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    gain_reduction = info.pop("gain_reduction_db", {})
+    loudness = info.pop("loudness", None)
+    limiter_reduction = info.pop("limiter_reduction_db", None)
+    resolved_delay_ms = info.pop("resolved_delay_ms", None)
+    warnings = info.pop("warnings", [])
+    processing = None
+    if process_voices:
+        processing = {
+            "chain_source": chain_source,
+            "vocal_chain": vocal_chain.model_dump(exclude_none=True) if vocal_chain is not None else None,
+            "vocal_sends": vocal_sends.model_dump(exclude_none=True) if vocal_sends is not None else None,
+            "vocal_bus": vocal_bus.model_dump(exclude_none=True) if vocal_bus is not None else None,
+            "returns": returns.model_dump(exclude_none=True) if returns is not None else None,
+            "master": master.model_dump(exclude_none=True) if master is not None else None,
+            "gain_reduction_db": gain_reduction,
+            "loudness": loudness,
+            "limiter_reduction_db": limiter_reduction,
+            "resolved_delay_ms": resolved_delay_ms,
+        }
+    if progress is not None:
+        progress("mix", "done")
+    return {
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"midi://{target.name}",
+        "mime_type": "audio/wav",
+        "source": source_path.name,
+        "vocal": vocal_path.name if vocal_path is not None else f"{len(resolved_segments)} vocal segments",
+        "backing": backing_wav.name,
+        "levels": {
+            "vocal_level_db": vocal_level_db,
+            "backing_volume": backing_volume,
+            "normalize_peak_db": normalize_peak_db,
+            "duck_db": duck_db if ducking else None,
+        },
+        "backing_levels": backing_levels,
+        "instruments": instruments,
+        "effects": effects_echo,
+        "vocal_segments": segment_list,
+        "compress": compress,
+        "ducking": ducking,
+        "guide_removed": _track_names(midi)[track_index],
+        "processing": processing,
+        "warnings": warnings,
+        **info,
+    }
+
+
 def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
     """Register the singing tools on the ChordSmith server."""
     global _get_store
@@ -2845,242 +3146,32 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         effective chain can be saved as a ``<source>.vocal_chain.json`` sidecar (save_chain) and
         loads automatically on later mixes when no chain option is passed.
         """
-        store = _get_store()
-        assert store is not None
-        source_path = store.existing_path(source)
-        if vocals and vocal:
-            raise SingingError("Give either vocal or vocals, not both.")
-        if not vocals and not vocal:
-            raise SingingError("Give a vocal file (or job id), or a list of vocals with their start_seconds.")
-        segment_list: list[dict] | None = None
-        resolved_segments: list[tuple[Path, float]] = []
-        if vocals:
-            segment_list = [segment.model_dump() for segment in vocals]
-            resolved_segments = [
-                (_resolve_vocal_path(segment.file, store), segment.start_seconds) for segment in vocals
-            ]
-            vocal_path = None  # built from the segments inside the claim block below
-        else:
-            vocal_path = _resolve_vocal_path(vocal, store)
-        sidecar_path = source_path.with_name(source_path.stem + VOCAL_CHAIN_SUFFIX)
-        chain_source = "parameters"
-        if (
-            all(value is None for value in (vocal_chain, vocal_sends, vocal_bus, returns, master))
-            and sidecar_path.is_file()
-        ):
-            data = json.loads(sidecar_path.read_text(encoding="utf-8"))
-            vocal_chain = VocalChain.model_validate(data["vocal_chain"]) if data.get("vocal_chain") else None
-            vocal_sends = VocalSends.model_validate(data["vocal_sends"]) if data.get("vocal_sends") else None
-            vocal_bus = VocalBus.model_validate(data["vocal_bus"]) if data.get("vocal_bus") else None
-            returns = Returns.model_validate(data["returns"]) if data.get("returns") else None
-            master = MasterSettings.model_validate(data["master"]) if data.get("master") else None
-            chain_source = "sidecar"
-        if vocals and (vocal_chain is not None or vocal_sends is not None):
-            raise SingingError(
-                "vocal_chain/vocal_sends apply to a single vocal; with vocals, put them on each segment."
-            )
-        voice_list: list[ProcessedVoice] | None = None
-        process_voices = (
-            vocal_chain is not None
-            or vocal_sends is not None
-            or vocal_bus is not None
-            or returns is not None
-            or master is not None
-            or (
-                vocals is not None
-                and any(
-                    segment.chain is not None
-                    or segment.sends is not None
-                    or segment.gain_db
-                    or segment.pan
-                    or segment.reverb_mix is not None
-                    for segment in vocals
-                )
-            )
-        )
-        if process_voices:
-            if vocals:
-                voice_list = [
-                    ProcessedVoice(
-                        path=path,
-                        start_seconds=segment.start_seconds,
-                        name=segment.name or f"voice {position + 1}",
-                        gain_db=segment.gain_db,
-                        pan=segment.pan,
-                        chain=segment.chain,
-                        sends=segment.sends,
-                        reverb_mix=segment.reverb_mix,
-                    )
-                    for position, ((path, _), segment) in enumerate(
-                        zip(resolved_segments, vocals, strict=True)
-                    )
-                ]
-            else:
-                voice_list = [
-                    ProcessedVoice(path=vocal_path, name="voice", chain=vocal_chain, sends=vocal_sends)
-                ]
-        midi = mido.MidiFile(source_path)
-        track_index = find_track(midi, guide_track)
-        names = _track_names(midi)
-        note_tracks = [
-            index
-            for index, track in enumerate(midi.tracks)
-            if index != track_index and any(msg.type == "note_on" and msg.velocity > 0 for msg in track)
-        ]
-        if backing_levels is not None:
-            if midi.type == 0:
-                raise SingingError("Per-stem levels need a type-1 file with separate tracks.")
-            unknown = sorted(set(backing_levels) - {names[index] for index in note_tracks})
-            if unknown:
-                available = ", ".join(names[index] for index in note_tracks) or "(none)"
-                raise SingingError(f"Unknown backing track(s) {', '.join(unknown)}. Tracks: {available}.")
-        specs = renderers.load_specs(source_path)
-        if specs:
-            # muted tracks stay out of the backing entirely
-            note_tracks = [
-                index for index in note_tracks if not (specs.get(names[index]) and specs[names[index]].mute)
-            ]
-        use_stems = backing_levels is not None or bool(specs)
-        resolved_sections = sections.read_sections(source_path)
-        section_timeline = sections.timeline_seconds(resolved_sections)
-        starting_bpm = resolved_sections[0].bpm if resolved_sections else None
-        effects = renderers.effect_options(reverb, chorus)
-        effects_echo = {
-            "reverb": reverb.model_dump() if reverb is not None else None,
-            "chorus": chorus.model_dump() if chorus is not None else None,
-        }
-        with (
-            # The backing is an internal intermediate: always claim a unique name, even when the
-            # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
-            # the same backing file.
-            store.claimed_path(None, f"{source_path.stem}_backing", extension=".wav") as backing_wav,
-            store.claimed_path(None, f"{source_path.stem}_vocals", extension=".wav") as vocals_wav,
-            store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
-        ):
-            if voice_list is None and resolved_segments:
-                # several vocal pieces (takes, or a vocal rendered in chunks): place each at its
-                # start time and sum them into one vocal track
-                _combine_vocals(resolved_segments, vocals_wav)
-                vocal_path = vocals_wav
-            else:
-                vocals_wav.unlink(missing_ok=True)
-            instruments: dict[str, dict] | None = None
-            if not use_stems:
-                with store.claimed_path(
-                    None, f"{source_path.stem}_backing", extension=".mid"
-                ) as backing_midi:
-                    remove_track(source_path, backing_midi, track_index)
-                    audio.render(backing_midi, backing_wav, "wav", effects=effects)
-            else:
-                with tempfile.TemporaryDirectory() as scratch:
-
-                    def render_backing_track(index: int) -> tuple[str, Path, float, renderers.InstrumentSpec]:
-                        name = names[index]
-                        spec = specs.get(name) or renderers.InstrumentSpec()
-                        gain_db = (
-                            backing_levels.get(name, spec.gain_db)
-                            if backing_levels is not None
-                            else spec.gain_db
-                        )
-                        stem_midi = Path(scratch) / f"stem_{index}.mid"
-                        stem_wav = Path(scratch) / f"stem_{index}.wav"
-                        extract_track(source_path, stem_midi, index)
-                        renderer = renderers.get_renderer(spec.engine)
-                        try:
-                            renderer.render(stem_midi, spec, stem_wav, effects)
-                            windows = renderers.section_gain_windows(spec, section_timeline)
-                            if windows:
-                                renderers.apply_section_gains(stem_wav, windows, spec.gain_db)
-                            renderers.apply_stem_effects(stem_wav, spec.effects)
-                        except renderers.RenderError as exc:
-                            raise SingingError(f"Track '{name}': {exc}") from None
-                        return name, stem_wav, gain_db, spec
-
-                    rendered = renderers.parallel_map(render_backing_track, note_tracks)
-                    _mix_stems(
-                        [stem_wav for _, stem_wav, _, _ in rendered],
-                        [gain_db for _, _, gain_db, _ in rendered],
-                        backing_wav,
-                    )
-                    instruments = {
-                        name: {**spec.model_dump(), "gain_db": gain_db} for name, _, gain_db, spec in rendered
-                    }
-            info = mix_tracks(
-                backing_wav,
-                vocal_path,
-                target,
-                vocal_level_db=vocal_level_db,
-                backing_volume=backing_volume,
-                vocal_reverb=vocal_reverb,
-                normalize_peak_db=normalize_peak_db,
-                compress=compress,
-                ducking=ducking,
-                duck_db=duck_db,
-                voices=voice_list,
-                vocal_bus=vocal_bus,
-                returns=returns,
-                master=master,
-                starting_bpm=starting_bpm,
-            )
-            if save_chain:
-                payload: dict[str, Any] = {}
-                if vocal_chain is not None:
-                    payload["vocal_chain"] = vocal_chain.model_dump(exclude_none=True)
-                if vocal_sends is not None:
-                    payload["vocal_sends"] = vocal_sends.model_dump(exclude_none=True)
-                if vocal_bus is not None:
-                    payload["vocal_bus"] = vocal_bus.model_dump(exclude_none=True)
-                if returns is not None:
-                    payload["returns"] = returns.model_dump(exclude_none=True)
-                if master is not None:
-                    payload["master"] = master.model_dump(exclude_none=True)
-                sidecar_path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-        gain_reduction = info.pop("gain_reduction_db", {})
-        loudness = info.pop("loudness", None)
-        limiter_reduction = info.pop("limiter_reduction_db", None)
-        resolved_delay_ms = info.pop("resolved_delay_ms", None)
-        warnings = info.pop("warnings", [])
-        processing = None
-        if process_voices:
-            processing = {
-                "chain_source": chain_source,
-                "vocal_chain": vocal_chain.model_dump(exclude_none=True) if vocal_chain is not None else None,
-                "vocal_sends": vocal_sends.model_dump(exclude_none=True) if vocal_sends is not None else None,
-                "vocal_bus": vocal_bus.model_dump(exclude_none=True) if vocal_bus is not None else None,
-                "returns": returns.model_dump(exclude_none=True) if returns is not None else None,
-                "master": master.model_dump(exclude_none=True) if master is not None else None,
-                "gain_reduction_db": gain_reduction,
-                "loudness": loudness,
-                "limiter_reduction_db": limiter_reduction,
-                "resolved_delay_ms": resolved_delay_ms,
-            }
-        return {
-            "filename": target.name,
-            "path": str(target),
-            "uri": f"midi://{target.name}",
-            "mime_type": "audio/wav",
-            "source": source_path.name,
-            "vocal": vocal_path.name
-            if vocal_path is not None
-            else f"{len(resolved_segments)} vocal segments",
-            "backing": backing_wav.name,
-            "levels": {
+        return run_mix(
+            {
+                "source": source,
+                "vocal": vocal,
+                "vocals": vocals,
+                "guide_track": guide_track,
                 "vocal_level_db": vocal_level_db,
                 "backing_volume": backing_volume,
+                "backing_levels": backing_levels,
+                "vocal_reverb": vocal_reverb,
+                "vocal_chain": vocal_chain,
+                "vocal_sends": vocal_sends,
+                "vocal_bus": vocal_bus,
+                "returns": returns,
+                "master": master,
+                "save_chain": save_chain,
+                "reverb": reverb,
+                "chorus": chorus,
                 "normalize_peak_db": normalize_peak_db,
-                "duck_db": duck_db if ducking else None,
-            },
-            "backing_levels": backing_levels,
-            "instruments": instruments,
-            "effects": effects_echo,
-            "vocal_segments": segment_list,
-            "compress": compress,
-            "ducking": ducking,
-            "guide_removed": _track_names(midi)[track_index],
-            "processing": processing,
-            "warnings": warnings,
-            **info,
-        }
+                "compress": compress,
+                "ducking": ducking,
+                "duck_db": duck_db,
+                "output_filename": output_filename,
+                "overwrite": overwrite,
+            }
+        )
 
     @mcp.tool(title="Export vocal song", annotations=_CREATES)
     def export_vocal_song(

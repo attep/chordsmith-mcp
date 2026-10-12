@@ -18,6 +18,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [import_audio](#import_audio)
 - [render_audio](#render_audio)
 - [render_audio_job and get_render_job](#render_audio_job-and-get_render_job)
+- [mix_song_with_vocals_job and get_mix_job](#mix_song_with_vocals_job-and-get_mix_job)
 - [list_chord_types](#list_chord_types)
 - [transpose_midi](#transpose_midi)
 - [analyze_midi](#analyze_midi)
@@ -191,6 +192,8 @@ promoted to type 1.
 | `loop` | `{"length_beats": 4, "times": 36}`: the notes are positions inside the pattern window and repeat back to back, so a drum or bass groove is written once. The notes must fit inside `length_beats`; up to 20 000 notes after tiling |
 | `swing` | `0.33`: notes on offbeat steps of the grid (odd multiples of `step_beats`) move later by this fraction of a step — 0 straight, 0.33 triplet feel, 0.5 dotted feel |
 | `humanize` | `{"timing_ms": 12, "velocity_range": 10, "seed": 7}`: seeded timing/velocity variation (the chord tools' `rhythm.humanize`) applied **after** `loop` tiling, so repeated loops differ while the same seed reproduces the same bytes |
+| `copy_from` | Copy an existing track's notes into the new one — a layer in one call, e.g. `"copy_from": "Sub Weight", "transpose_semitones": 12` for an octave-up sub. Give `notes`/`patterns` or `copy_from`, not both; `loop` does not apply |
+| `transpose_semitones` | With `copy_from`: shift the copied notes by ±24 semitones |
 | `output_filename` | Default: `<name>_<track_name>.mid` |
 | `overwrite` | Replace an existing output file |
 
@@ -207,6 +210,22 @@ with `patterns` is three short strings:
    {"pitch": 42, "steps": "x-x-x-x-|x-x-x-x-", "velocity": 70}
  ]}
 ```
+
+### Layered subs that survive small speakers
+
+A 30–50 Hz sine is inaudible on most phones and earbuds, no matter its gain — deep bass needs
+company an octave up. With `copy_from` the layers take one call each:
+
+1. **Octave layer** — `add_track(filename, track_name="Sub Octave", copy_from="Sub Weight",
+   transpose_semitones=12, channel=4)` (on the file the previous call produced), then a
+   harmonically rich preset via `set_track_instrument` (`"program": 80` square or `81` saw, with
+   `gain_db` around −8). This carries the fundamental where phones can play it.
+2. **Grit layer** — the same call again (`track_name="Sub Grit"`, `transpose_semitones=12`,
+   `channel=5`, program 81/80) with a chain: `{"eq": {"highpass_hz": 120}, "saturation":
+   {"enabled": true, "drive_db": 9}, "compressor": {"enabled": true, "threshold_db": -18}}` —
+   saturation adds harmonics up to 300–800 Hz, the highpass keeps the layer thin.
+3. Trim both with `gain_db` and keep the original sine under them; the mix's balance
+   measurement ends up carrying the low end on any speaker.
 
 ## create_empty_file
 
@@ -411,6 +430,18 @@ Renders use a General MIDI soundfont: no samples, sub/reese bass design, filter 
 production FX. Treat them as an audition of the notes, not a finished master — open the `.mid` in
 a DAW for the real sound. MIDI automation (volume curves, CC sweeps) is not written either.
 
+## mix_song_with_vocals_job and get_mix_job
+
+Mixes re-render the backing, process every voice and master the result, and can take minutes on
+a stems session. `mix_song_with_vocals_job` takes **the same options as
+[mix_song_with_vocals](singing.md#mixing-and-export)** and returns `{job_id, status}` immediately;
+poll `get_mix_job(job_id)` (read-only) for `status`, `progress` (each backing track as it renders,
+then the `mix` phase — with error text on a failed track) and the full mix result when done.
+`list_mix_jobs` (read-only, newest first) finds a job whose reply was lost; records survive
+server restarts and a job interrupted by one comes back failed with the reason. Jobs live
+24 hours. Use the synchronous tool for short mixes and this one when a client's tool timeout is
+in play.
+
 ## set_track_instrument
 
 Stores per-track instrument specs for a MIDI file in a small JSON sidecar next to it
@@ -441,6 +472,7 @@ Each spec has:
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 | `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
 | `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}]`. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
+| `chain` | Built-in processing chain for the rendered stem — the same stages as the vocal chain (`eq` → `de-esser` → `saturation` → `compressor`), applied before VST effects. How instrument grit, filtering and glue work with no plugin host: e.g. `{"eq": {"highpass_hz": 120}, "saturation": {"enabled": true, "drive_db": 9}}` |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
 

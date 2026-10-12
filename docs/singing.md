@@ -54,6 +54,11 @@ backing. Two engines are supported:
    DAW-ready copy with the intended programs baked in, run
    [`bake_instruments`](tools.md#bake_instruments) on the source first.
 
+For mixes that may outrun a client's tool timeout (a stems session with chains can run for
+minutes), start `mix_song_with_vocals_job` with the same options and poll `get_mix_job` for
+per-track progress and the result — see
+[tools.md](tools.md#mix_song_with_vocals_job-and-get_mix_job).
+
 ## Quick start
 
 With Docker Compose, start the singing engine alongside ChordSmith:
@@ -88,6 +93,8 @@ Then, in your AI app:
 | `render_singing` | Mapping + voice → background job (job id) |
 | `get_singing_job` | Job status; when done, the vocal file, sample rate, length, offset |
 | `mix_song_with_vocals` | Backing without the guide + vocal → mix with levels and clipping check |
+| `mix_song_with_vocals_job` | Starts a mix as a background job (same options; progress + result via `get_mix_job`) |
+| `get_mix_job` / `list_mix_jobs` | Mix job status, per-track progress and the result; recent jobs |
 | `export_vocal_song` | Mix WAV + MP3, vocal alone, untouched MIDI (base64 or signed links; `bake_instruments` for a DAW-ready copy) |
 
 ## Voices and soft controls

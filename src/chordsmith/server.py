@@ -26,7 +26,17 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from chordsmith import __version__, audio, delivery, renderers, renderjobs, results, sections, singing
+from chordsmith import (
+    __version__,
+    audio,
+    delivery,
+    mixjobs,
+    renderers,
+    renderjobs,
+    results,
+    sections,
+    singing,
+)
 from chordsmith import sections as sections_module
 from chordsmith.analysis import analyze_file, describe_midi
 from chordsmith.auth import AuthConfig, enable_auth
@@ -743,6 +753,48 @@ def import_midi(
     }
 
 
+def _copy_track_notes(
+    source: Path, name: str, transpose: int, ticks_per_beat: int
+) -> list[tuple[int, float, float, int]]:
+    """The named track's notes as (pitch, start_beat, beats, velocity), transposed.
+
+    Notes are paired note_on to note_off; an unclosed note runs to the end of the track.
+    """
+    midi = mido.MidiFile(source)
+    names = renderers.track_names(midi)
+    matches = [index for index, track_name in enumerate(names) if track_name == name]
+    if not matches:
+        available = ", ".join(entry for entry in names if entry) or "(none)"
+        raise ValueError(f"No track named '{name}'. Tracks: {available}.")
+    if len(matches) > 1:
+        raise ValueError(f"Several tracks are named '{name}'; rename them first.")
+    pending: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    pairs: list[tuple[int, int, int, int]] = []  # pitch, start_tick, duration_ticks, velocity
+    tick = 0
+    for message in midi.tracks[matches[0]]:
+        tick += message.time
+        if message.type == "note_on" and message.velocity > 0:
+            pending.setdefault((message.channel, message.note), []).append((tick, message.velocity))
+        elif message.type == "note_off" or (message.type == "note_on" and message.velocity == 0):
+            queue = pending.get((message.channel, message.note))
+            if queue:
+                start, velocity = queue.pop(0)
+                pairs.append((message.note, start, max(1, tick - start), velocity))
+    for (_, note), queue in pending.items():
+        for start, velocity in queue:
+            pairs.append((note, start, max(1, tick - start), velocity))
+    notes: list[tuple[int, float, float, int]] = []
+    for pitch, start, duration, velocity in pairs:
+        shifted = pitch + transpose
+        if not 0 <= shifted <= 127:
+            raise ValueError(
+                f"Transposing '{name}' by {transpose:+d} semitones pushes a note outside 0-127; "
+                "use a smaller shift."
+            )
+        notes.append((shifted, start / ticks_per_beat, duration / ticks_per_beat, velocity))
+    return notes
+
+
 def _initial_bpm(source: Path) -> float:
     """The file's own tempo (its first set_tempo); 120 BPM when it has none."""
     for track in mido.MidiFile(source).tracks:
@@ -822,6 +874,18 @@ def add_track(
             "written once. Omit to place the notes as given."
         ),
     ] = None,
+    copy_from: Annotated[
+        str | None,
+        Field(
+            description="Copy the notes of this existing track into the new one — an octave-up "
+            "or grit layer in one call (pair with transpose_semitones). Give notes/patterns or "
+            "copy_from, not both."
+        ),
+    ] = None,
+    transpose_semitones: Annotated[
+        int,
+        Field(ge=-24, le=24, description="With copy_from: shift the copied notes by this many semitones."),
+    ] = 0,
     swing: Annotated[
         float,
         Field(
@@ -862,10 +926,17 @@ def add_track(
     with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
-        if not notes and not patterns:
+        if copy_from is not None:
+            if notes or patterns:
+                raise ValueError("Give notes/patterns or copy_from, not both.")
+            if loop is not None:
+                raise ValueError("copy_from copies the notes as placed; drop loop.")
+        elif not notes and not patterns:
             raise ValueError("Give notes, patterns, or both.")
         ticks_per_beat = mido.MidiFile(source).ticks_per_beat
         parsed: list[tuple[int, float, float, int]] = []
+        if copy_from is not None:
+            parsed = _copy_track_notes(source, copy_from, transpose_semitones, ticks_per_beat)
         for row in patterns or []:
             try:
                 row_pitch = parse_pitch(row.pitch)
@@ -971,6 +1042,8 @@ def add_track(
         "uri": f"midi://{target.name}",
         "track_name": track_name,
         "channel": channel,
+        "copied_from": copy_from,
+        "transpose_semitones": transpose_semitones if copy_from is not None else 0,
         "swing": swing,
         "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
         **info,
@@ -1266,6 +1339,7 @@ def _render_stems(
                 windows = renderers.section_gain_windows(spec, section_timeline)
                 if windows:
                     renderers.apply_section_gains(working, windows, spec.gain_db)
+                singing.apply_stem_chain(working, spec.chain)
                 renderers.apply_stem_effects(working, spec.effects)
                 with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
                     shutil.copyfile(working, stem_wav)
@@ -1452,6 +1526,7 @@ singing.register(mcp, lambda: store)
 renderers.register(mcp, lambda: store)
 sections.register(mcp, lambda: store)
 renderjobs.register(mcp, lambda: store, _run_audio_job)
+mixjobs.register(mcp, lambda: store, singing.run_mix)
 
 
 def main() -> None:

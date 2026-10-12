@@ -162,8 +162,9 @@ class VocalEq(BaseModel):
     highpass_hz: float | None = Field(
         None,
         ge=20.0,
-        le=500.0,
-        description="High-pass corner in Hz (e.g. 75 to remove rumble); null skips it.",
+        le=2000.0,
+        description="High-pass corner in Hz (e.g. 75 to remove rumble for a voice; up to 2000 "
+        "for thin effect layers like a grit layer's lower cut); null skips it.",
     )
     bells: list[EqBell] = Field(default_factory=list, max_length=6, description="Peaking bands, up to 6.")
     low_shelf: EqShelf | None = Field(None, description="Low shelf (e.g. cut mud under 300 Hz).")

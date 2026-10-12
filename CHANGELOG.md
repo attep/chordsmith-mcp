@@ -12,6 +12,31 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.0] - 2026-10-12
+
+Audible lows and long mixes: layered tracks, built-in instrument chains, and background mix jobs.
+
+### Added
+
+- **Track layering**: `add_track` gains `copy_from` + `transpose_semitones` — copy an existing
+  track's notes (durations paired, velocities kept) and shift them, e.g. an octave-up sub in
+  one call; swing/humanize still apply.
+- **Built-in instrument chains**: `set_track_instrument` specs gain `chain` — the vocal-chain
+  stages (EQ → de-esser → saturation → compressor) applied to any track's rendered stem, before
+  VST effects. Instrument grit/EQ/glue with no plugin host; the EQ high-pass now reaches
+  2000 Hz for effect layers.
+- **Background mix jobs**: `mix_song_with_vocals_job` + `get_mix_job` + `list_mix_jobs` — the
+  full mix pipeline on a worker thread with per-track progress (each backing track, then the
+  mix phase), restart-safe records in `mix_jobs.json`, 24-hour TTL. The synchronous
+  `mix_song_with_vocals` stays for short mixes.
+- `docs/tools.md` documents a layered-sub recipe (sine + octave layer + saturated grit layer)
+  that survives phone speakers.
+
+### Changed
+
+- Budgets raised deliberately: payload 164 → 232 KB, descriptions 20 → 22 KB — the mix job
+  tool duplicates the mix schema by design, matching the render job pattern.
+
 ## [0.23.0] - 2026-10-12
 
 The VST engine: a third renderer (a separate GPL process) for `.vst3` instruments, per-track

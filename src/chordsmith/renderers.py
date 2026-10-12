@@ -22,7 +22,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from chordsmith import audio, results
-from chordsmith.models import ChorusSettings, ReverbSettings
+from chordsmith.models import ChorusSettings, ReverbSettings, VocalChain
 from chordsmith.sections import SECTION_MARKER_PREFIX, read_sections
 from chordsmith.soundfont import SoundFontError, available_labels, find_preset, read_presets
 from chordsmith.storage import FileStore
@@ -303,6 +303,13 @@ class InstrumentSpec(BaseModel):
         description="VST3 effects applied to this track's rendered stem, in order, e.g. "
         "[{'plugin': '/vst/Comp.vst3'}, {'plugin': '/vst/Tape.vst3', 'preset': 'Warm'}]; "
         "works for any engine and needs the VST host.",
+    )
+    chain: VocalChain | None = Field(
+        None,
+        description="Built-in chain for this track's rendered stem — the same stages as the "
+        "vocal chain (EQ, de-esser, saturation, compressor), applied before VST effects. How "
+        "instrument grit, filtering and glue work without a plugin host (e.g. saturate a "
+        "copied sub layer for grit).",
     )
     gain_db: float = Field(
         0.0,

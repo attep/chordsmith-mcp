@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing_extensions import TypedDict
 
-from chordsmith.models import Humanize
+from chordsmith.models import Humanize, VocalChain
 
 
 class ChordSummary(TypedDict):
@@ -114,6 +114,8 @@ class AddTrackResult(TypedDict):
     uri: str
     track_name: str
     channel: int
+    copied_from: str | None
+    transpose_semitones: int
     swing: float
     humanize: Humanize | None
     notes_added: int
@@ -242,6 +244,30 @@ class RenderJobsResult(TypedDict):
     jobs: list[RenderJobEntry]
 
 
+class MixJobHandle(TypedDict):
+    job_id: str
+    status: str
+
+
+class MixJobResult(TypedDict):
+    job_id: str
+    status: str
+    progress: list[RenderJobTrack] | None
+    result: MixResult | None
+    error: str | None
+
+
+class MixJobEntry(TypedDict):
+    job_id: str
+    status: str
+    created_at: str
+    error: str | None
+
+
+class MixJobsResult(TypedDict):
+    jobs: list[MixJobEntry]
+
+
 class EngineEntry(TypedDict):
     name: str
     available: bool
@@ -270,6 +296,7 @@ class InstrumentTrack(TypedDict):
     plugin_preset: str | None
     plugin_params: dict[str, float] | None
     effects: list[EffectEntry] | None
+    chain: VocalChain | None
     bank: int | None
     program: int | None
     sections: dict[str, SectionOverride] | None

@@ -66,6 +66,19 @@ TDR Nova, Valhalla Supermassive, Kilohearts Essentials, Analog Obsession, MeldaP
 free bundle — all VST3, install them into the standard VST3 folder and they appear in
 `list_plugins`.
 
+### Verified installs (Linux / Docker)
+
+Downloaded, extracted into `./vst` and verified on a live server with `list_plugins`:
+
+| Plugin | Asset | Extract into `./vst` |
+|---|---|---|
+| Surge XT (+ Surge XT Effects) | `surge-xt-linux-1.3.4-pluginsonly.tar.gz` (GPL-3.0) | the `Surge XT.vst3` and `Surge XT Effects.vst3` bundles |
+| Odin 2 | `Odin2.4.1Linux.zip` (GPL-3.0) | the `Odin2.vst3` bundle |
+| Cardinal | `Cardinal-linux-x86_64-26.02.tar.gz` (GPL-3.0) | the `Cardinal.vst3` bundle |
+
+Vital's free download is account-gated (`account.vital.audio`), so it is not scripted here;
+CHOW Tape Model had no release assets at the time of writing.
+
 ## Caveats
 
 - **VST3 only.** The older VST2 `.dll`s are ignored (the format is discontinued and cannot be

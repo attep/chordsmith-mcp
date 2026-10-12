@@ -2202,3 +2202,28 @@ def test_diffsinger_seed_is_deterministic(tmp_path):
     digest_first = hashlib.sha256(first.read_bytes()).digest()
     assert digest_first == hashlib.sha256(second.read_bytes()).digest()  # same seed, same bytes
     assert digest_first != hashlib.sha256(third.read_bytes()).digest()  # different seed, different
+
+
+def test_chain_filters_order_and_flags():
+    from chordsmith.models import EqBell, VocalChain, VocalCompressor, VocalDeesser, VocalEq, VocalSaturation
+    from chordsmith.singing import chain_filters
+
+    assert chain_filters(None) == []
+    chain = VocalChain(
+        eq=VocalEq(highpass_hz=90, bells=[EqBell(hz=3000, gain_db=-2)]),
+        deesser=VocalDeesser(enabled=True),
+        saturation=VocalSaturation(enabled=True, drive_db=8),
+        compressor=VocalCompressor(enabled=True),
+    )
+    parts = chain_filters(chain)
+    text = ",".join(parts)
+    assert "highpass=f=90" in text
+    assert "equalizer=f=3000" in text
+    assert "deesser=" in text
+    assert "asoftclip=type=tanh" in text
+    assert "acompressor=" in text
+    assert (
+        text.index("highpass") < text.index("deesser") < text.index("asoftclip") < text.index("acompressor")
+    )
+    # the compressor can be left out (the vocal gain-reduction measurement does this)
+    assert chain_filters(chain, include_compressor=False) == parts[:-1]

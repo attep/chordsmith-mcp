@@ -114,6 +114,11 @@ say so.
   render only with `render_audio(stems: true)`.
 - **Long renders**: DiffSinger is slow on CPU (tens of seconds per minute) and runs in background
   jobs chunked at rests; long FluidSynth songs should use `render_audio_job`.
+- **Long mixes**: `mix_song_with_vocals` can outrun a client's tool timeout on stems sessions —
+  start `mix_song_with_vocals_job` and poll `get_mix_job` (same pattern as render jobs).
+- **Audible lows**: a 30–50 Hz sine disappears on phones. Layer it: `add_track(copy_from=...,
+  transpose_semitones=12)` for an octave-up layer, then again with a square/saw preset
+  (`instrument` 80/81) plus a spec `chain` (`saturation`) for grit — never ship a bare sub sine.
 - **Voices**: VOICEVOX sings Japanese kana or a hum; its whisper styles are Japanese-only and
   mostly air (they drift off pitch). English needs a DiffSinger voicebank the user provides.
   DiffSinger soft controls: `velocity`, `gender` (0 = the bank's own character), `expr`, `steps`,
