@@ -128,13 +128,15 @@ sampled guitar rendered from MIDI plus the amp as an insert on that track:
 **TONEX heads-up:** it loads and reports as an effect, but its VST3 exposes no programs and only
 placeholder parameters ("Knob 01"…), and its default plugin state has an empty tone slot — so
 headless it renders **silence** while its Bypass toggle passes the dry signal. Loading a tone in
-the TONEX **standalone** does *not* help: the plugin keeps its own state and there is no way to
-select a tone through its parameters, so it cannot be driven headless today (only through its
-GUI, which the host does not open yet). AmpliTube's demo gear (unlicensed models in AmpliTube CS)
-adds periodic white-noise bursts to the render; licensed gear is clean, and MixBox's default
-chain passes audio cleanly out of the box. For an amp-ish tone with no plugin at all, a built-in
-`chain` (`{"eq": {"highpass_hz": 80, "bells": [...]}, "saturation": {"enabled": true, ...}}`)
-gives a driven-DI sound that always works.
+the TONEX **standalone** does *not* help: the plugin keeps its own state. The fix is the state
+capture above: `open_plugin_state_editor` on TONEX, load a licensed tone in its UI, close the
+window, and reference the saved file as the effect's `state` — a 53 KB state renders the tone
+headlessly (verified: crest 20.1 → 15.9 dB on a test riff). Guitar Rig 7 behaves the same way
+(its standalone cannot prime the plugin; a captured rig state renders). AmpliTube's demo gear
+(unlicensed models in AmpliTube CS) adds periodic white-noise bursts to the render; licensed gear
+is clean, and MixBox's default chain passes audio cleanly out of the box. For an amp-ish tone
+with no plugin at all, a built-in `chain` (`{"eq": {"highpass_hz": 80, "bells": [...]},
+"saturation": {"enabled": true, ...}}`) gives a driven-DI sound that always works.
 
 ## Caveats
 

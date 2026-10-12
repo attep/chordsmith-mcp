@@ -118,9 +118,9 @@ say so.
   `effects`. **GUI-only plugins** (TONEX tones, Guitar Rig rigs, SampleTank/Syntronik patches)
   need a one-time **state capture**: `open_plugin_state_editor` opens their UI on a desktop
   server; loading the sound and closing the window saves a state file to pass as `plugin_state`
-  (instrument) or effect `state` — renders then load it headless. TONEX/Guitar Rig ignore their
-  standalone apps when hosted, and AmpliTube CS demo gear adds white-noise bursts — prefer
-  licensed T-RackS v6 modules or a built-in `chain` (saturation) otherwise.
+  (instrument) or effect `state` — renders then load it headless, and TONEX/Guitar Rig captures
+  are verified working (they ignore their standalone apps when hosted). AmpliTube CS demo gear
+  adds white-noise bursts — prefer licensed T-RackS v6 modules or a built-in `chain` otherwise.
 - **Long renders**: DiffSinger is slow on CPU (tens of seconds per minute) and runs in background
   jobs chunked at rests; long FluidSynth songs should use `render_audio_job`.
 - **Long mixes**: `mix_song_with_vocals` can outrun a client's tool timeout on stems sessions —
