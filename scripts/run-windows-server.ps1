@@ -20,6 +20,7 @@ param(
     [string]$ListenHost = "127.0.0.1",
     [ValidateSet("off", "password")][string]$Auth = "off",
     [string]$Password = "",
+    [string]$PublicUrl = "",
     [string]$OutputDir = "",
     [string]$StateDir = "",
     [string]$SfzDir = "",
@@ -63,6 +64,7 @@ if (Test-Path -LiteralPath $SfizzRender)  { $env:CHORDSMITH_SFIZZ_RENDER = $Sfiz
 if (Test-Path -LiteralPath $VstHost)      { $env:CHORDSMITH_VST_HOST = $VstHost }
 if (Test-Path -LiteralPath $VstDir)       { $env:CHORDSMITH_VST_DIR = $VstDir }
 if (Test-Path -LiteralPath $Ffmpeg)       { $env:CHORDSMITH_FFMPEG = $Ffmpeg }
+if ($PublicUrl) { $env:CHORDSMITH_PUBLIC_URL = $PublicUrl.TrimEnd("/") }
 if ($Auth -eq "off") {
     $env:CHORDSMITH_AUTH = "off"
 } else {
