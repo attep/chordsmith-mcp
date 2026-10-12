@@ -71,7 +71,12 @@ if ($Auth -eq "off") {
     $env:CHORDSMITH_AUTH_PASSWORD = $Password
 }
 
-$process = Start-Process -FilePath $command -ArgumentList $arguments -NoNewWindow -PassThru
+# Redirect the server's output to files: a child that inherits the launcher's console keeps its
+# stdout pipe open, which hangs scripts and CI runners that wait for EOF.
+$stdout = Join-Path $StateDir "chordsmith.out.log"
+$stderr = Join-Path $StateDir "chordsmith.err.log"
+$process = Start-Process -FilePath $command -ArgumentList $arguments -NoNewWindow -PassThru `
+    -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 $url = "http://$ListenHost`:$Port"
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
     Start-Sleep -Milliseconds 500

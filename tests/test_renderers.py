@@ -43,6 +43,20 @@ async def _call(name, args):
         return await client.call_tool(name, args)
 
 
+async def test_list_plugins_keeps_bundles_not_their_inner_files(monkeypatch, tmp_path):
+    # A Windows VST3 bundle is a directory with a same-named .vst3 inside it; the scan must list
+    # the plugin once (the bundle), not also the file inside it (the live IK folder showed both).
+    bundle = tmp_path / "Synth.vst3"
+    inner = bundle / "Contents" / "x86_64-win"
+    inner.mkdir(parents=True)
+    (inner / "Synth.vst3").write_bytes(b"x")
+    (tmp_path / "Flat.vst3").write_bytes(b"x")
+    monkeypatch.setenv("CHORDSMITH_VST_DIR", str(tmp_path))
+    listed = (await _call("list_plugins", {})).structuredContent
+    assert [entry["name"] for entry in listed["plugins"]] == ["Flat", "Synth"]
+    assert listed["plugins"][1]["path"] == str(bundle)
+
+
 def _ffmpeg_ready() -> bool:
     return audio.find_ffmpeg() is not None
 

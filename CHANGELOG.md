@@ -30,6 +30,11 @@ VST parameters by name: choice parameters that VST3 exposes as continuous values
   host smoke tests, and `scripts/run-windows-server.ps1` starts the native Windows server with
   the local VST3/SFZ paths.
 
+### Fixed
+
+- `list_plugins` no longer lists a Windows VST3 bundle and the `.vst3` file inside it as two
+  plugins.
+
 ### Documentation
 
 - `docs/vst.md`: the guitar-through-an-amp recipe records what was verified live — TONEX renders

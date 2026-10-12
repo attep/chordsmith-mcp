@@ -1470,10 +1470,16 @@ def register(mcp: FastMCP, store_provider) -> None:
         directory = os.environ.get("CHORDSMITH_VST_DIR")
         scanned: list[dict[str, str]] = []
         if directory and Path(directory).is_dir():
-            scanned = [
-                {"name": path.stem, "path": str(path)}
-                for path in sorted(Path(directory).rglob("*.vst3"))[:MAX_VST_PLUGINS]
-            ]
+            kept: list[Path] = []
+            for path in sorted(Path(directory).rglob("*.vst3")):
+                # A Windows VST3 bundle is a directory holding a same-named .vst3 file inside it
+                # (Contents\x86_64-win\X.vst3): keep the bundle, drop the file inside it.
+                if any(entry in path.parents for entry in kept):
+                    continue
+                kept.append(path)
+                if len(kept) >= MAX_VST_PLUGINS:
+                    break
+            scanned = [{"name": path.stem, "path": str(path)} for path in kept]
         plugins = scanned
         if name_contains:
             needle = name_contains.lower()
