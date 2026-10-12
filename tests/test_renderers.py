@@ -169,7 +169,9 @@ async def test_list_instruments_reports_engines_and_specs(store, engine_availabl
         {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "gain_db": -4.0}}},
     )
     engines_only = (await _call("list_instruments", {})).structuredContent
-    assert [engine["name"] for engine in engines_only["engines"]] == ["fluidsynth"]
+    assert [engine["name"] for engine in engines_only["engines"]] == ["fluidsynth", "sfizz"]
+    # CHORDSMITH_SFZ_DIR is unset in tests (the image sets it to an empty /sfz)
+    assert engines_only["sfz_libraries"] in (None, [])
     assert engines_only["file"] is None
     if engines_only["soundfont"] is not None:
         # the real preset table of the installed SoundFont (bank/program are 0-based)
@@ -186,6 +188,14 @@ async def test_list_instruments_reports_engines_and_specs(store, engine_availabl
     assert set(with_file["file"]["tracks"]) == {"Chords", "Bass", "Melody"}
     assert with_file["file"]["specs"]["Bass"]["gain_db"] == -4.0
     assert with_file["file"]["resolved"]["Bass"] is None  # nothing to resolve without a program
+
+
+async def test_list_instruments_lists_sfz_libraries(store, tmp_path, monkeypatch):
+    sfz = tmp_path / "kit.sfz"
+    sfz.write_text("<region> sample=tone.wav\n", encoding="utf-8")
+    monkeypatch.setenv("CHORDSMITH_SFZ_DIR", str(tmp_path))
+    listed = (await _call("list_instruments", {})).structuredContent
+    assert listed["sfz_libraries"] == [{"name": "kit", "path": str(sfz)}]
 
 
 async def test_set_track_instrument_validates_against_the_soundfont(store, engine_available, tmp_path):

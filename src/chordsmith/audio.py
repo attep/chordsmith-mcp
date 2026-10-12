@@ -31,6 +31,10 @@ def find_ffmpeg() -> str | None:
     return os.environ.get("CHORDSMITH_FFMPEG") or shutil.which("ffmpeg")
 
 
+def find_sfizz_render() -> str | None:
+    return os.environ.get("CHORDSMITH_SFIZZ_RENDER") or shutil.which("sfizz_render")
+
+
 def find_soundfont() -> str | None:
     env = os.environ.get("CHORDSMITH_SOUNDFONT")
     if env:
@@ -240,3 +244,32 @@ def render(
 def wav_duration(path: Path) -> float:
     with wave.open(str(path), "rb") as handle:
         return handle.getnframes() / handle.getframerate()
+
+
+def render_sfizz(sfz: str, midi_path: Path, target: Path) -> None:
+    """Render ``midi_path`` through an SFZ instrument with sfizz_render (44.1 kHz, like FluidSynth).
+
+    Keeps the dry FluidSynth convention: the wav is trimmed to the MIDI file's own length.
+    """
+    binary = find_sfizz_render()
+    if binary is None:
+        raise AudioError(
+            "sfizz_render is not installed. Install sfizz (the Docker image includes it) or set "
+            "CHORDSMITH_SFIZZ_RENDER to the executable."
+        )
+    _run(
+        [
+            binary,
+            "--sfz",
+            sfz,
+            "--midi",
+            str(midi_path),
+            "--wav",
+            str(target),
+            "--samplerate",
+            "44100",
+        ]
+    )
+    if not target.is_file():
+        raise AudioError("sfizz_render produced no audio.")
+    trim_wav(target, midi_duration(midi_path))

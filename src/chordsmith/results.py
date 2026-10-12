@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing_extensions import TypedDict
 
+from chordsmith.models import Humanize
+
 
 class ChordSummary(TypedDict):
     chord: str
@@ -112,6 +114,8 @@ class AddTrackResult(TypedDict):
     uri: str
     track_name: str
     channel: int
+    swing: float
+    humanize: Humanize | None
     notes_added: int
     automation_events: int
     total_tracks: int
@@ -255,6 +259,7 @@ class SectionOverride(TypedDict):
 class InstrumentTrack(TypedDict):
     engine: str
     preset: str | None
+    sfz: str | None
     bank: int | None
     program: int | None
     sections: dict[str, SectionOverride] | None
@@ -282,12 +287,17 @@ class SoundfontInventory(TypedDict):
 
 class EffectiveInstrument(TypedDict):
     channel: int
-    bank: int
-    program: int
+    bank: int | None
+    program: int | None
     label: str | None
     source: str
     soundfont: str | None
     warning: str | None
+
+
+class SfzLibrary(TypedDict):
+    name: str
+    path: str
 
 
 class InstrumentsFile(TypedDict):
@@ -302,6 +312,7 @@ class InstrumentsResult(TypedDict):
     engines: list[EngineEntry]
     soundfont: SoundfontInventory | None
     programs: ProgramCatalog | None
+    sfz_libraries: list[SfzLibrary] | None
     file: InstrumentsFile | None
 
 

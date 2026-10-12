@@ -99,6 +99,14 @@ say so.
   `guide_track` explicitly; the guide is left out of the backing, never doubled.
 - **Sections**: `bpm` is always quarter-note; per-section `gain_db`/instrument overrides are
   baked per section; held notes keep their preset across program changes.
+- **Played feel**: `add_track` takes `swing` (fraction of `step_beats` on offbeat steps; 0.33 =
+  triplet) and `humanize` (seeded `timing_ms`/`velocity_range`, the same object as the chord
+  tools' rhythm). Loops tile identically, so humanize after tiling is what makes repeats breathe;
+  a fixed seed stays byte-reproducible.
+- **Sampled instruments**: `set_track_instrument` takes `engine: "sfizz"` + `sfz` (a path under
+  the server's SFZ folder; `list_instruments` lists them) for realistic multisampled drums/bass.
+  sfizz tracks only render with `render_audio(stems: true)` (or `mix_song_with_vocals`), and
+  reject FluidSynth-only options (preset/bank/program/sends).
 - **Long renders**: DiffSinger is slow on CPU (tens of seconds per minute) and runs in background
   jobs chunked at rests; long FluidSynth songs should use `render_audio_job`.
 - **Voices**: VOICEVOX sings Japanese kana or a hum; its whisper styles are Japanese-only and

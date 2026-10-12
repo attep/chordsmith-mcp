@@ -30,6 +30,7 @@ from chordsmith.storage import FileStore
 SPECS_SUFFIX = ".instruments.json"
 FFMPEG_TIMEOUT_SECONDS = 300
 STEM_WORKERS = max(2, min(6, os.cpu_count() or 4))
+MAX_SFZ_LIBRARIES = 200
 
 GM_PROGRAMS = [
     "Acoustic Grand Piano",
@@ -213,13 +214,20 @@ class SectionInstrument(BaseModel):
 class InstrumentSpec(BaseModel):
     """How one track should be rendered, e.g. a different soundfont for the bass."""
 
-    engine: Literal["fluidsynth"] = Field(
-        "fluidsynth", description="Which renderer to use. Only 'fluidsynth' exists today."
+    engine: Literal["fluidsynth", "sfizz"] = Field(
+        "fluidsynth",
+        description="Which renderer to use: 'fluidsynth' (General MIDI via a .sf2 soundfont) or "
+        "'sfizz' (a sampled .sfz instrument; needs render_audio with stems=true).",
     )
     preset: str | None = Field(
         None,
         description="fluidsynth: path to a .sf2 soundfont for this track; omit to use the "
         "server's default soundfont.",
+    )
+    sfz: str | None = Field(
+        None,
+        description="sfizz: path to a .sfz instrument file on this server (with its samples); "
+        "required when engine='sfizz'.",
     )
     bank: int | None = Field(
         None,
@@ -350,6 +358,7 @@ class FluidSynthRenderer:
     """The built-in engine: one FluidSynth pass per track, rendered as its own process."""
 
     name = "fluidsynth"
+    notes = "Runs as a separate process; renders General MIDI with a .sf2 soundfont."
 
     def available(self) -> bool:
         return audio.find_fluidsynth() is not None and audio.find_soundfont() is not None
@@ -374,7 +383,42 @@ class FluidSynthRenderer:
             raise RenderError("The engine produced a silent stem; check the track's notes and instrument.")
 
 
-RENDERERS: dict[str, Renderer] = {FluidSynthRenderer.name: FluidSynthRenderer()}
+class SfizzRenderer:
+    """Sample-based SFZ instruments through the sfizz_render CLI, as its own process.
+
+    Engine reverb/chorus do not apply (they are FluidSynth settings); use the mix tools'
+    returns/master for shared effects.
+    """
+
+    name = "sfizz"
+    notes = "Runs as a separate process; renders a sampled .sfz instrument at 44.1 kHz."
+
+    def available(self) -> bool:
+        return audio.find_sfizz_render() is not None
+
+    def render(
+        self,
+        midi: Path,
+        spec: InstrumentSpec,
+        out: Path,
+        effects: dict[str, float | int] | None = None,
+    ) -> None:
+        if spec.sfz is None or not Path(spec.sfz).is_file():
+            raise RenderError(f"SFZ instrument '{spec.sfz}' does not exist.")
+        try:
+            audio.render_sfizz(spec.sfz, midi, out)
+        except audio.AudioError as exc:
+            raise RenderError(str(exc)) from None
+        if audio.wav_duration(out) <= 0.01:
+            raise RenderError("The engine produced no audio for this track.")
+        if not _has_audio(out):
+            raise RenderError("The engine produced a silent stem; check the track's notes and instrument.")
+
+
+RENDERERS: dict[str, Renderer] = {
+    FluidSynthRenderer.name: FluidSynthRenderer(),
+    SfizzRenderer.name: SfizzRenderer(),
+}
 
 
 def get_renderer(name: str) -> Renderer:
@@ -714,6 +758,19 @@ def effective_instruments(
                 warnings.append(
                     f"the channel changes program again at beat {beat:g}; reporting the starting value"
                 )
+        if spec is not None and spec.engine == "sfizz":
+            if spec.sfz is None or not Path(spec.sfz).is_file():
+                warnings.append(f"SFZ instrument '{spec.sfz}' does not exist")
+            result[name] = {
+                "channel": channel0 + 1,
+                "bank": None,
+                "program": None,
+                "label": Path(spec.sfz).name if spec.sfz else None,
+                "source": "sfz",
+                "soundfont": None,
+                "warning": "; ".join(warnings) if warnings else None,
+            }
+            continue
         target = spec.preset if spec is not None and spec.preset is not None else None
         if target is None:
             target = soundfont or audio.find_soundfont()
@@ -772,6 +829,38 @@ def _validate_sections(source: Path, spec: InstrumentSpec, channel: int) -> None
             program=override.program if override.program is not None else spec.program,
         )
         preset_label(merged, channel)
+
+
+def _validate_sfizz(source: Path, spec: InstrumentSpec) -> None:
+    """Check a sfizz spec: a readable .sfz, no FluidSynth-only options, section names exist."""
+    if spec.sfz is None:
+        raise RenderError("engine='sfizz' needs 'sfz': the path to a .sfz instrument file.")
+    if not Path(spec.sfz).is_file():
+        raise RenderError(f"SFZ instrument '{spec.sfz}' does not exist.")
+    for option, value in (("preset", spec.preset), ("bank", spec.bank), ("program", spec.program)):
+        if value is not None:
+            raise RenderError(f"'{option}' is a fluidsynth option; an SFZ instrument maps its own notes.")
+    if spec.reverb_send is not None or spec.chorus_send is not None:
+        raise RenderError(
+            "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; sfizz has none — "
+            "use the mix tools' returns for shared effects."
+        )
+    if spec.sections:
+        resolved = read_sections(source)
+        if not resolved:
+            raise RenderError(
+                "The file has no section map; call set_song_sections before adding section overrides."
+            )
+        available = [section.name for section in resolved]
+        unknown = sorted(set(spec.sections) - set(available))
+        if unknown:
+            raise RenderError(f"Unknown section(s) {', '.join(unknown)}. Sections: {', '.join(available)}.")
+        for section_name, override in spec.sections.items():
+            if override.program is not None or override.bank is not None or override.preset is not None:
+                raise RenderError(
+                    f"Section '{section_name}' changes program/bank/preset; an SFZ instrument maps "
+                    "its own notes (a gain_db override is fine)."
+                )
 
 
 def section_gain_windows(
@@ -911,10 +1000,15 @@ def register(mcp: FastMCP, store_provider) -> None:
                 specs.pop(name, None)
                 continue
             get_renderer(spec.engine)  # validate engine availability now, not at render time
-            if spec.preset is not None and not Path(spec.preset).is_file():
-                raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
-            preset_label(spec, channels.get(name, 0))  # validate bank/program against the sf2
-            _validate_sections(source, spec, channels.get(name, 0))
+            if spec.engine == "sfizz":
+                _validate_sfizz(source, spec)
+            else:
+                if spec.sfz is not None:
+                    raise RenderError("'sfz' is a sfizz option; set engine='sfizz' or drop it.")
+                if spec.preset is not None and not Path(spec.preset).is_file():
+                    raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
+                preset_label(spec, channels.get(name, 0))  # validate bank/program against the sf2
+                _validate_sections(source, spec, channels.get(name, 0))
             specs[name] = spec
         if specs:
             save_specs(source, specs)
@@ -922,6 +1016,9 @@ def register(mcp: FastMCP, store_provider) -> None:
             specs_path(source).unlink(missing_ok=True)
         resolved = {}
         for name, spec in specs.items():
+            if spec.engine == "sfizz":
+                resolved[name] = Path(spec.sfz).name if spec.sfz else None
+                continue
             try:
                 resolved[name] = preset_label(spec, channels.get(name, 0))
             except RenderError:
@@ -960,8 +1057,8 @@ def register(mcp: FastMCP, store_provider) -> None:
             {
                 "name": renderer.name,
                 "available": renderer.available(),
-                "default_soundfont": audio.find_soundfont(),
-                "notes": "Runs as a separate process; renders General MIDI with a .sf2 soundfont.",
+                "default_soundfont": audio.find_soundfont() if renderer.name == "fluidsynth" else None,
+                "notes": renderer.notes,
             }
             for renderer in sorted(RENDERERS.values(), key=lambda item: item.name)
         ]
@@ -982,10 +1079,18 @@ def register(mcp: FastMCP, store_provider) -> None:
                         for preset in presets
                     ],
                 }
+        sfz_dir = os.environ.get("CHORDSMITH_SFZ_DIR")
+        libraries = None
+        if sfz_dir and Path(sfz_dir).is_dir():
+            libraries = [
+                {"name": path.stem, "path": str(path)}
+                for path in sorted(Path(sfz_dir).rglob("*.sfz"))[:MAX_SFZ_LIBRARIES]
+            ]
         result: dict = {
             "engines": engines,
             "soundfont": inventory,
             "programs": None if inventory else {"melodic": list(GM_PROGRAMS), "drums": dict(GM_DRUM_KITS)},
+            "sfz_libraries": libraries,
             "file": None,
         }
         if filename is not None:
@@ -996,6 +1101,9 @@ def register(mcp: FastMCP, store_provider) -> None:
             specs = load_specs(source)
             resolved: dict[str, str | None] = {}
             for name, spec in specs.items():
+                if spec.engine == "sfizz":
+                    resolved[name] = Path(spec.sfz).name if spec.sfz else None
+                    continue
                 try:
                     resolved[name] = preset_label(spec, channels.get(name, 0))
                 except RenderError:

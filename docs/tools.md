@@ -189,6 +189,8 @@ promoted to type 1.
 | `instrument` | General MIDI program for the track (0 piano, 24 nylon guitar, …) |
 | `channel` | MIDI channel 1–16 (10 = drums) |
 | `loop` | `{"length_beats": 4, "times": 36}`: the notes are positions inside the pattern window and repeat back to back, so a drum or bass groove is written once. The notes must fit inside `length_beats`; up to 20 000 notes after tiling |
+| `swing` | `0.33`: notes on offbeat steps of the grid (odd multiples of `step_beats`) move later by this fraction of a step — 0 straight, 0.33 triplet feel, 0.5 dotted feel |
+| `humanize` | `{"timing_ms": 12, "velocity_range": 10, "seed": 7}`: seeded timing/velocity variation (the chord tools' `rhythm.humanize`) applied **after** `loop` tiling, so repeated loops differ while the same seed reproduces the same bytes |
 | `output_filename` | Default: `<name>_<track_name>.mid` |
 | `overwrite` | Replace an existing output file |
 
@@ -345,6 +347,9 @@ as a `vocal` or a `vocals` segment without guessing what it is.
 Renders a MIDI file to audio with FluidSynth, so a sketch can be heard without a music app. The
 Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, install
 `fluidsynth` and set `CHORDSMITH_SOUNDFONT` (and `CHORDSMITH_FLUIDSYNTH` if it is not on `PATH`).
+For sampled `.sfz` instruments (see [set_track_instrument](#set_track_instrument)), install
+sfizz — the Docker image builds it — and set `CHORDSMITH_SFIZZ_RENDER` if `sfizz_render` is not
+on `PATH`.
 
 | Option | Description |
 |---|---|
@@ -352,7 +357,7 @@ Docker image includes FluidSynth, a General MIDI soundfont and ffmpeg; locally, 
 | `format` | `"wav"` (default) or `"mp3"` (mp3 needs ffmpeg) |
 | `return_as` | Like [get_midi_file](#get_midi_file): `"base64"` or `"url"` |
 | `soundfont` | Path to a `.sf2` file; default: `CHORDSMITH_SOUNDFONT` or a standard system path |
-| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain) and combine the stems into the mix. Several renders run at once, but it is still slower than one pass; the result then also lists every stem (name, track, gain, sha256, peak). Stem entries use signed URLs whenever a public URL is configured (they are megabytes each), otherwise they follow `return_as`; the mix always follows `return_as` |
+| `stems` | `true`: render every track on its own (using [set_track_instrument](#set_track_instrument) specs — soundfont, GM program, gain, or a sfizz `.sfz` instrument) and combine the stems into the mix. **Files with sfizz tracks must use `stems: true`** — a single FluidSynth pass cannot play them. Several renders run at once, but it is still slower than one pass; the result then also lists every stem (name, track, gain, sha256, peak). Stem entries use signed URLs whenever a public URL is configured (they are megabytes each), otherwise they follow `return_as`; the mix always follows `return_as` |
 | `normalize_peak_db` | Gain the rendered mix so its peak hits this level in dBFS (set `-1.0` for a listening-ready file). Default `null` keeps FluidSynth's raw level; **stems stay raw either way**, so their balance sums back to the unnormalized mix |
 | `reverb` | FluidSynth's built-in reverb (off when omitted): `{"room_size": 0.5, "damping": 0.3, "width": 0.8, "level": 0.7}` — those are the engine's own defaults, ranges are the engine's accepted values (room 0–1.2, damping 0–1, width 0–100, level 0–1). `{}` turns it on with the engine defaults |
 | `chorus` | FluidSynth's built-in chorus (off when omitted): `{"voices": 3, "level": 0.6, "speed": 0.2, "depth": 4.25}` — again the engine's defaults and accepted ranges (voices 0–99, level 0–10, speed 0.1–5 Hz, depth 0–21 ms; this engine build has no waveform setting) |
@@ -410,9 +415,9 @@ a DAW for the real sound. MIDI automation (volume curves, CC sweeps) is not writ
 
 Stores per-track instrument specs for a MIDI file in a small JSON sidecar next to it
 (`<name>.instruments.json`); the MIDI itself is never modified. Use it to give a track its own
-soundfont, to pick a different General MIDI instrument (or drum kit), and to trim its level in
-the stem mix — then render with [`render_audio`](#render_audio) and `stems: true` and audition
-the stems.
+soundfont, to pick a different General MIDI instrument (or drum kit), to swap in a sampled `.sfz`
+instrument, and to trim its level in the stem mix — then render with
+[`render_audio`](#render_audio) and `stems: true` and audition the stems.
 
 | Option | Description |
 |---|---|
@@ -423,8 +428,9 @@ Each spec has:
 
 | Field | Description |
 |---|---|
-| `engine` | Which renderer to use; only `"fluidsynth"` today |
-| `preset` | Path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
+| `engine` | `"fluidsynth"` (General MIDI via a `.sf2` soundfont) or `"sfizz"` (a sampled `.sfz` instrument; needs `stems: true` renders) |
+| `preset` | fluidsynth: path to a `.sf2` soundfont for this track; omit for the server's default (FluidR3_GM) |
+| `sfz` | sfizz: path to a `.sfz` instrument file (with its samples) the server can read; required when `engine` is `"sfizz"` |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
 | `sections` | Per-section overrides keyed by section name (from [set_song_sections](#set_song_sections)), e.g. `{"Chorus": {"program": 81}}`. The change lands exactly at the section's start (bank select before the program change); sections not listed use the track's own program/bank, and notes already sounding keep their original preset. A section `preset` must be the **same .sf2** as the track's — per-section SoundFont switching is not supported yet. A section `gain_db` replaces the track's gain for that section: it is applied **exactly** to the rendered stem (and baked as CC11, which cannot boost above 0 dB) |
@@ -438,7 +444,7 @@ Example — a synth bass, a power drum kit, and the keys pulled back:
 {"filename": "song.mid", "tracks": {
   "Bass":   {"engine": "fluidsynth", "program": 38, "gain_db": -3},
   "Drums":  {"engine": "fluidsynth", "program": 16},
-  "Chords": {"engine": "fluidsynth", "gain_db": -6}
+  "Melody": {"engine": "sfizz", "sfz": "/sfz/keys.sfz", "gain_db": -2}
 }}
 ```
 
@@ -459,28 +465,41 @@ tracks: `{"sections": {"Intro": {"program": 24}, "Climax": {"program": 30}}}`. T
 the section boundaries with held notes untouched; per-section `.sf2` switching (different
 SoundFont files) is not supported yet and is rejected with a clear message.
 
+**sfizz tracks** (`engine: "sfizz"`) play a sampled `.sfz` instrument instead of General MIDI:
+pass `sfz` and leave `preset`/`bank`/`program`/`reverb_send`/`chorus_send` unset — those are
+FluidSynth options and are rejected; section overrides may set `gain_db` only. sfizz has no
+engine reverb/chorus (use the [mix tools'](singing.md#mixing-and-export) returns for shared
+effects), and sfizz tracks render only with `render_audio` `stems: true` (or
+[`mix_song_with_vocals`](singing.md#mixing-and-export) for the backing). `effective` labels them
+`source: "sfz"` with a null bank/program.
+
 To use your own `.sf2` files, put them where the server can read them and pass that path as
 `preset`: drop them into the output folder (visible to the server as `/data/…` in the Docker
 image) or mount a folder into the container and use its container path, e.g. `/sf2/MyBass.sf2`.
+`.sfz` instruments work the same way with `sfz`; the Docker image mounts a folder at `/sfz`
+(`CHORDSMITH_SFZ_DIR`) and [`list_instruments`](#list_instruments) lists the `.sfz` files found
+there, so the paths are easy to pick.
 
 ## list_instruments
 
 No options, or a `filename` and/or a `soundfont` path. Read-only. Returns the rendering engines
-this server can run — their availability, the default soundfont and notes — and the **actual
+this server can run — their availability, the default soundfont and notes — the **actual
 preset table** of the loaded (or given) `.sf2`: every preset's name, bank and program, both
 0-based, so the numbers `set_track_instrument` takes are verifiable, not assumed (FluidR3 reports
-189 presets, its drum kits in bank 128 — e.g. `128-016 Power`). When no soundfont file is
-readable, a static GM reference list is returned instead. With a filename, also returns:
+189 presets, its drum kits in bank 128 — e.g. `128-016 Power`), and `sfz_libraries`: the `.sfz`
+files found under `CHORDSMITH_SFZ_DIR` (name + path) when it is set, null otherwise — the
+pickable list for sfizz specs. When no soundfont file is readable, a static GM reference list is
+returned instead. With a filename, also returns:
 
 - each track's **stored spec** and the preset label each spec resolves to (`resolved` — null
-  when a spec sets no bank/program, by contract);
+  when a spec sets no bank/program, or the `.sfz` file name for sfizz specs);
 - an **`effective`** block: what every note track will actually play — a spec's program/bank
   first, then the file's own `program_change`/CC0 on that channel (scanned across all tracks),
   then the default (program 0; **bank 128 on channel 10**). Each entry carries the 1-based
-  `channel`, `bank`, `program`, the resolved `label`, a `source` (`spec`/`file`/`default`), the
-  `soundfont` it was looked up in, and a `warning` for shared channels, a later program change
-  on the channel, or a preset missing from the SoundFont. It shows what is *meant* to play, not
-  proof of how the audio sounds.
+  `channel`, `bank`, `program`, the resolved `label`, a `source` (`spec`/`file`/`default`/`sfz`),
+  the `soundfont` it was looked up in (null for sfizz), and a `warning` for shared channels, a
+  later program change on the channel, or a preset missing from the SoundFont. It shows what is
+  *meant* to play, not proof of how the audio sounds.
 
 Engines run as **separate processes**, so a crashing or differently licensed engine can never
 take the server down.

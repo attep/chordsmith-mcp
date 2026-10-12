@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `add_track` gains `swing` and `humanize`: notes on offbeat steps can be delayed by a fraction
+  of `step_beats` (0.33 = triplet feel), and the chord tools' seeded `humanize`
+  (timing/velocity) now applies to added tracks after `loop` tiling — repeated loops breathe
+  while a fixed seed stays byte-reproducible.
+- **A second render engine: sfizz** (`set_track_instrument` `engine: "sfizz"` + `sfz`): sampled
+  `.sfz` instruments render as stems at 44.1 kHz through the `sfizz_render` CLI (a separate
+  process, never imported; BSD-2-Clause). User-supplied `.sfz` libraries are never bundled — the
+  Docker image mounts `CHORDSMITH_SFZ_DIR` (`/sfz`) and `list_instruments` lists what is there.
+  sfizz tracks reject FluidSynth-only options (preset/bank/program/sends), allow section
+  `gain_db` overrides, are labelled `source: "sfz"` in `effective` (null bank/program), ship
+  their `.sfz` path in `bake_instruments` metadata, and single-pass renders refuse files that
+  use them (stems render each track's own engine).
+
 Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
 (jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene

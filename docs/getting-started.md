@@ -200,6 +200,7 @@ ChordSmith reads these optional environment variables:
 | `CHORDSMITH_AUTH_PASSWORD` | random, printed in logs | Password for the OAuth sign-in page (HTTP transports) |
 | `CHORDSMITH_AUTH` | on for HTTP | `off` disables OAuth |
 | `CHORDSMITH_STATE_DIR` | `~/.chordsmith` | Where OAuth clients and tokens are stored (Docker: `/state`) |
+| `CHORDSMITH_SFZ_DIR` | unset | Folder whose `.sfz` instruments `list_instruments` lists (Docker: `/sfz`, mounted read-only) |
 
 The online-related variables are explained in [Run it online](remote.md#settings).
 

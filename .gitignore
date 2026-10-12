@@ -12,4 +12,5 @@ data/
 state/
 output/
 voicebank/
+sfz/
 *.zip

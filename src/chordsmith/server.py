@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 import wave
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -29,7 +30,7 @@ from chordsmith import sections as sections_module
 from chordsmith.analysis import analyze_file, describe_midi
 from chordsmith.auth import AuthConfig, enable_auth
 from chordsmith.midi_writer import add_track as add_track_midi
-from chordsmith.midi_writer import transpose_file, write_empty, write_progression
+from chordsmith.midi_writer import humanize_notes, swing_notes, transpose_file, write_empty, write_progression
 from chordsmith.models import (
     Automation,
     ChordEvent,
@@ -741,6 +742,38 @@ def import_midi(
     }
 
 
+def _initial_bpm(source: Path) -> float:
+    """The file's own tempo (its first set_tempo); 120 BPM when it has none."""
+    for track in mido.MidiFile(source).tracks:
+        for message in track:
+            if message.type == "set_tempo":
+                return mido.tempo2bpm(message.tempo)
+    return 120.0
+
+
+def _bpm_lookup(source: Path, resolved: list[sections.ResolvedSection] | None) -> Callable[[float], float]:
+    """Tempo at a beat: the section map's bpm when present, else the file's own tempo.
+
+    Humanize converts its millisecond offsets to beats per note, so a section at another bpm
+    keeps the same feel in absolute time.
+    """
+    if resolved:
+        ordered = sorted(resolved, key=lambda section: section.start_beat)
+
+        def from_sections(beat: float) -> float:
+            bpm = 120.0
+            for section in ordered:
+                if section.start_beat <= beat + 1e-9:
+                    bpm = section.bpm
+                else:
+                    break
+            return bpm
+
+        return from_sections
+    bpm = _initial_bpm(source)
+    return lambda beat: bpm
+
+
 @mcp.tool(title="Add track", annotations=CREATES)
 def add_track(
     filename: Annotated[str, Field(description="Existing file to copy and extend.")],
@@ -788,6 +821,23 @@ def add_track(
             "written once. Omit to place the notes as given."
         ),
     ] = None,
+    swing: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=0.75,
+            description="Delay notes on offbeat steps of the grid (odd multiples of step_beats) "
+            "by this fraction of a step: 0 = straight, 0.33 = triplet feel, 0.5 = dotted feel.",
+        ),
+    ] = 0,
+    humanize: Annotated[
+        Humanize | None,
+        Field(
+            description="Small, seed-controlled timing/velocity variation (the same object as "
+            "the chord tools' rhythm.humanize). Applied after loop tiling, so repeats differ "
+            "while a fixed seed stays reproducible."
+        ),
+    ] = None,
     output_filename: FileName = None,
     overwrite: Overwrite = False,
 ) -> results.AddTrackResult:
@@ -803,7 +853,9 @@ def add_track(
     "in_beats": 2, "start_beat": 138, "slot": 0}); a note may run past its section's end.
     ``patterns`` write drum-style grids compactly — one row per voice, 'x' hits, 'X' accents —
     from beat 0. ``automation`` writes linear controller ramps (CC11 swells, CC7 fades). With
-    ``loop``, a short pattern (for example one bar of drums) is tiled across the song.
+    ``loop``, a short pattern (for example one bar of drums) is tiled across the song. With
+    ``swing``, notes on offbeat steps of the grid move later (0.33 = triplet feel); ``humanize``
+    adds seeded timing/velocity variation after the tiling, so repeated loops breathe.
     """
     source = store.existing_path(filename)
     with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
@@ -893,6 +945,11 @@ def add_track(
                 for repeat in range(loop.times)
                 for pitch, start, beats, velocity in parsed
             ]
+        parsed = swing_notes(parsed, swing, step_beats)
+        if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
+            if resolved_sections is None:
+                resolved_sections = sections.read_sections(source)
+            parsed = humanize_notes(parsed, humanize, _bpm_lookup(source, resolved_sections))
         ramps = [
             (item.cc, item.from_value, item.to_value, item.start_beat, item.end_beat)
             for item in automation or []
@@ -913,6 +970,8 @@ def add_track(
         "uri": f"midi://{target.name}",
         "track_name": track_name,
         "channel": channel,
+        "swing": swing,
+        "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
         **info,
     }
 
@@ -1012,8 +1071,9 @@ def render_audio(
     or a signed, expiring URL), plus the source name, the sample peak (wav), the gain applied by
     normalize_peak_db, whether the export clips, and the effective `effects` (reverb/chorus).
     MP3 needs ffmpeg; FluidSynth and a soundfont are required (both are in the Docker image).
-    With ``stems``, each track is rendered on its own (per-track soundfont/program/gain from
-    set_track_instrument) and the stems are combined into the mix; the result then also lists
+    With ``stems``, each track is rendered on its own (per-track soundfont/program/gain or
+    sfizz instrument from set_track_instrument) and the stems are combined into the mix; the
+    result then also lists
     every stem with its own peak. Stems are never normalized (their balance must stay intact);
     only the combined mix follows normalize_peak_db. Reverb/chorus are off by default (renders
     stay byte-identical); with them on the engine's tail past the last note is kept, and note
@@ -1022,6 +1082,8 @@ def render_audio(
     is missing and no file is left behind.
     """
     source = store.existing_path(filename)
+    if not stems:
+        _reject_sfizz_without_stems(source)
     effects = renderers.effect_options(reverb, chorus)
     effects_echo = {
         "reverb": reverb.model_dump() if reverb is not None else None,
@@ -1053,6 +1115,17 @@ def render_audio(
         effects,
         effects_echo,
     )
+
+
+def _reject_sfizz_without_stems(source: Path) -> None:
+    """A single FluidSynth pass cannot play sfizz tracks; stems render each track's own engine."""
+    specs = renderers.load_specs(source)
+    sfizz = sorted(name for name, spec in specs.items() if spec.engine == "sfizz")
+    if sfizz:
+        raise ValueError(
+            f"This file uses sfizz instruments ({', '.join(sfizz)}); render with stems=true so "
+            "each track is rendered by its own engine."
+        )
 
 
 def _render_single(
@@ -1101,6 +1174,8 @@ def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
         "chorus": args["chorus"].model_dump() if args.get("chorus") is not None else None,
     }
     only_tracks = args.get("tracks")
+    if not (args.get("stems") or only_tracks):
+        _reject_sfizz_without_stems(source)
     if args.get("stems") or only_tracks:
         result = _render_stems(
             source,

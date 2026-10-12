@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -193,6 +194,51 @@ def _humanize_events(
         if humanize.velocity_range:
             offset = rng.randint(-humanize.velocity_range, humanize.velocity_range)
             ev.velocity = min(127, max(1, ev.velocity + offset))
+
+
+def swing_notes(
+    notes: list[tuple[int, float, float, int]], swing: float, step_beats: float
+) -> list[tuple[int, float, float, int]]:
+    """Delay notes on offbeat steps of the grid by ``swing`` of a step.
+
+    Notes exactly on odd multiples of ``step_beats`` move later by ``swing * step_beats``:
+    0.33 is a triplet feel, 0.5 a dotted feel. Straight positions and free placements are
+    untouched.
+    """
+    if not swing:
+        return notes
+    shift = swing * step_beats
+    swung: list[tuple[int, float, float, int]] = []
+    for pitch, start, beats, velocity in notes:
+        steps = start / step_beats
+        if abs(steps - round(steps)) < 1e-6 and round(steps) % 2:
+            start += shift
+        swung.append((pitch, start, beats, velocity))
+    return swung
+
+
+def humanize_notes(
+    notes: list[tuple[int, float, float, int]],
+    humanize: Humanize,
+    bpm_at: Callable[[float], float],
+) -> list[tuple[int, float, float, int]]:
+    """Apply seeded timing/velocity variation; the same seed always gives the same notes.
+
+    Timing offsets are up to ``timing_ms`` milliseconds per note, converted to beats with the
+    tempo at that note (``bpm_at``) so a section at a different bpm keeps the same feel in
+    absolute time. Starts never move before beat 0; velocities stay within 1-127.
+    """
+    rng = random.Random(humanize.seed)
+    humanized: list[tuple[int, float, float, int]] = []
+    for pitch, start, beats, velocity in notes:
+        if humanize.timing_ms:
+            offset = rng.uniform(-1.0, 1.0) * humanize.timing_ms * bpm_at(start) / 60000.0
+            start = max(0.0, start + offset)
+        if humanize.velocity_range:
+            offset = rng.randint(-humanize.velocity_range, humanize.velocity_range)
+            velocity = min(127, max(1, velocity + offset))
+        humanized.append((pitch, start, beats, velocity))
+    return humanized
 
 
 def write_progression(
