@@ -213,15 +213,10 @@ bool applyPreset(juce::AudioPluginInstance& instance, const juce::String& preset
 }
 
 void configureBuses(juce::AudioPluginInstance& instance, bool instrument) {
-    // Turn every bus on, then prefer a plain stereo layout: plugins with several bus layouts
-    // (T-RackS, for one) can otherwise be left with a disabled input and output silence.
-    instance.enableAllBuses();
-    juce::AudioProcessor::BusesLayout layout;
-    if (!instrument) layout.inputBuses.add(juce::AudioChannelSet::stereo());
-    layout.outputBuses.add(juce::AudioChannelSet::stereo());
-    if (!instance.setBusesLayout(layout))
-        std::cerr << "warning: the plugin does not offer a plain stereo layout; using its default"
-                  << std::endl;
+    // The legacy convenience call is what works across the plugins we run (IK suite, our test
+    // plugins): instruments take no audio input, effects a stereo pair. Do not enable all buses
+    // first — that leaves several IK plugins with a mis-routed main output and no audio.
+    instance.setPlayConfigDetails(instrument ? 0 : 2, 2, kSampleRate, kBlockSize);
 }
 
 // JUCE reports a continuous parameter's step count as INT_MAX; the JSON and --set take the
