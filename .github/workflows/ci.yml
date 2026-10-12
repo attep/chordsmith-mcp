@@ -84,8 +84,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for i in $(seq 1 40); do
-            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then break; fi
+            if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then break; fi
             sleep 15
           done
           gh release upload "${GITHUB_REF_NAME}" \
-            vst-host-linux-x64.tar.gz vst-host-windows-x64.zip --clobber
+            vst-host-linux-x64.tar.gz vst-host-windows-x64.zip --clobber --repo "${GITHUB_REPOSITORY}"
