@@ -44,7 +44,7 @@ see each tool with:
   | Hint | Tools | Meaning |
   |---|---|---|
   | Read-only | `list_chord_types`, `analyze_midi`, `list_generated_files`, `get_midi_file`, `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`, `get_singing_job` | Nothing on disk changes (the singing steps only keep temporary state in memory) |
-  | Creates files | `create_chord_progression`, `create_progression_from_roman`, `add_track`, `transpose_midi`, `render_audio`, `render_singing`, `mix_song_with_vocals`, `export_vocal_song` | Writes new files; an existing file is never replaced unless you pass `overwrite: true` |
+  | Creates files | `create_chord_progression`, `create_progression_from_roman`, `add_track`, `transpose_midi`, `render_audio`, `render_singing`, `mix_song_with_vocals`, `export_vocal_song` | Writes new files; an existing file is never replaced unless you pass `overwrite: true`. A copy tool's `output_filename` must differ from its source |
   | Destructive | `delete_midi_file`, `rename_midi_file` | Changes files that already exist; some clients ask you to confirm first |
 
 - **A fully described input schema** — every option has a description and its default, so the
@@ -175,7 +175,8 @@ the moving notes.
 ## add_track
 
 Adds a note-level track (melody, bass, drums, …) to a **copy** of an existing MIDI file. The
-original is never modified. A type 0 file is promoted to type 1.
+original is never modified (so `output_filename` must differ from the source). A type 0 file is
+promoted to type 1.
 
 | Option | Description |
 |---|---|
@@ -271,7 +272,7 @@ Old single-tempo songs simply have no sections and keep working unchanged.
 Writes a **copy** of a MIDI file with the [set_track_instrument](#set_track_instrument) specs'
 bank/program events baked in as real MIDI events — including per-section overrides at their
 exact boundaries — so other players and DAWs hear the intended instruments without ChordSmith.
-The original is never modified.
+The original is never modified (`output_filename` must differ from the source).
 
 | Option | Description |
 |---|---|

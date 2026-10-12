@@ -472,9 +472,9 @@ def remove_track(
 ) -> results.RemoveTrackResult:
     """Write a copy of the file without one track; the original is kept.
 
-    Finds the track by name (names must be unique; rename first). Returns the copy's
-    name/path and remaining track count. The per-track instrument sidecar belongs to the
-    original; the copy starts without specs.
+    Finds the track by name (names must be unique; rename first). output_filename must differ
+    from the source. Returns the copy's name/path and remaining track count. The per-track
+    instrument sidecar belongs to the original; the copy starts without specs.
     """
     source = store.existing_path(filename)
     midi = mido.MidiFile(source)
@@ -526,8 +526,9 @@ def transpose_midi(
 ) -> results.TransposeResult:
     """Transpose a MIDI file by semitones, or from one key to another. Drums (channel 10) are untouched.
 
-    Creates a new file (the original is kept) and returns its name/path plus how many notes
-    moved. Give either 'semitones' or both 'from_key' and 'to_key'; with keys, the smallest move
+    Creates a new file (the original is kept; output_filename must differ from the source) and
+    returns its name/path plus how many notes moved. Give either 'semitones' or both 'from_key'
+    and 'to_key'; with keys, the smallest move
     (up to 6 semitones either way) is chosen. Chord-name markers are transposed too.
     """
     source = store.existing_path(filename)
@@ -792,7 +793,8 @@ def add_track(
 ) -> results.AddTrackResult:
     """Add a note-level track (melody, bass, drums, ...) to a copy of an existing MIDI file.
 
-    Creates a new file; the original is never modified. The copy keeps all existing tracks and
+    Creates a new file; the original is never modified (output_filename must differ from the
+    source, even with overwrite). The copy keeps all existing tracks and
     gets the new one on the chosen channel (a type 0 file is promoted to type 1). Returns the new
     file's name/path, how many notes/tracks it has and how many automation events were written.
     Pitches outside 0-127 and overlapping notes are fine; the track is as monophonic or

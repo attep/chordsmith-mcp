@@ -50,7 +50,9 @@ backing. Two engines are supported:
    [section map](tools.md#set_song_sections) is honored end to end: the score's note seconds
    integrate every tempo change, so lyrics stay in sync through tempo and meter shifts.
 5. `export_vocal_song` returns the mix as WAV and MP3, the vocal alone, and the untouched MIDI —
-   as base64 or as signed, expiring links (the same mechanism as `get_midi_file`).
+   as base64 or as signed, expiring links (the same mechanism as `get_midi_file`). For a
+   DAW-ready copy with the intended programs baked in, run
+   [`bake_instruments`](tools.md#bake_instruments) on the source first.
 
 ## Quick start
 
@@ -86,7 +88,7 @@ Then, in your AI app:
 | `render_singing` | Mapping + voice → background job (job id) |
 | `get_singing_job` | Job status; when done, the vocal file, sample rate, length, offset |
 | `mix_song_with_vocals` | Backing without the guide + vocal → mix with levels and clipping check |
-| `export_vocal_song` | Mix WAV + MP3, vocal alone, untouched MIDI (base64 or signed links) |
+| `export_vocal_song` | Mix WAV + MP3, vocal alone, untouched MIDI (base64 or signed links; `bake_instruments` for a DAW-ready copy) |
 
 ## Voices and soft controls
 

@@ -147,6 +147,20 @@ your file has several. See [docs/singing.md](docs/singing.md).
 7. [Architecture](docs/architecture.md): how the deterministic server and the LLM fit together
 8. [Development](docs/development.md): running tests and the project layout
 
+## Use it as an agent skill (Copilot, Claude)
+
+ChordSmith ships an [agent skill](https://agentskills.io/specification) — a `SKILL.md` that teaches
+Copilot (and any other skill-aware agent) the workflows, tool names and gotchas, so the assistant
+prepares a score, maps lyrics and renders in the right order without being told.
+
+- The skill lives in [`skills/chordsmith/SKILL.md`](skills/chordsmith/SKILL.md).
+- **In a project**: copy that folder into your repository's `.github/skills/` directory.
+- **Across projects**: copy it into `~/.copilot/skills/` (Copilot) or `~/.agents/skills/`.
+- **GitHub CLI**: `gh skill install attep/chordsmith-mcp chordsmith` installs it for you.
+
+The skill only guides the assistant — the actual work still runs through the MCP server
+configured above.
+
 ## How it works
 
 ```

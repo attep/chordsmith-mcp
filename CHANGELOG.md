@@ -12,6 +12,27 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.21.1] - 2026-10-12
+
+Agent skill and handoff guidance: the orchestra tryout's gap list turned into the skill, plus the
+rules agents kept rediscovering written into the tool descriptions and docs.
+
+### Added
+
+- An agent skill for Copilot and other skill-aware agents
+  ([`skills/chordsmith/SKILL.md`](skills/chordsmith/SKILL.md)): the two golden workflows
+  (instrumental and sung), the tool map, and the conventions that matter (levels, guide tracks,
+  sections, soft controls, licences). Installable with
+  `gh skill install attep/chordsmith-mcp chordsmith`.
+
+### Changed
+
+- The copy tools (`add_track`, `remove_track`, `transpose_midi`, `bake_instruments`) say in their
+  descriptions and docs that `output_filename` must differ from the source, even with
+  `overwrite: true`.
+- `export_vocal_song` points to `bake_instruments` for a DAW-ready MIDI (the export is the
+  untouched source); the skill's gotchas cover the 15 melodic channels of standard MIDI.
+
 ## [0.21.0] - 2026-10-12
 
 From the whisper tryout: voicebank-driven soft controls, an air layer for the vocal bus, and the

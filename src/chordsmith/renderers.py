@@ -1019,7 +1019,8 @@ def register(mcp: FastMCP, store_provider) -> None:
     ) -> results.BakeResult:
         """Write a copy of the file with the instrument specs' bank/program events baked in.
 
-        The original is never modified. Every track with a set_track_instrument spec gets its
+        The original is never modified; output_filename must differ from the source. Every track
+        with a set_track_instrument spec gets its
         resolved bank/program timeline as real MIDI events in the copy — including per-section
         overrides at their exact boundaries and the track's CC91/CC93 effect sends — so other
         players and DAWs hear the intended instruments without ChordSmith. A MIDI file cannot

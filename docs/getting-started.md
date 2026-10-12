@@ -168,6 +168,11 @@ and point the app to `http://127.0.0.1:8000/mcp`.
 To host ChordSmith on a server so you can reach it from anywhere (with HTTPS and an OAuth
 sign-in page), see [Run it online](remote.md).
 
+**Copilot skills**: Copilot can also load an agent skill that teaches it ChordSmith's workflow —
+install it with `gh skill install attep/chordsmith-mcp chordsmith`, or copy the
+[`skills/chordsmith/`](../skills/chordsmith/SKILL.md) folder into your project's
+`.github/skills/` directory (or `~/.copilot/skills/` to have it everywhere).
+
 ## Check that it works
 
 Ask your assistant:

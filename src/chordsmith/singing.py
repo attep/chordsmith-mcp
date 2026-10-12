@@ -3101,7 +3101,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
 
         Creates an MP3 of the mix. Each entry comes back like get_midi_file: base64 bytes, or a
         signed expiring link when return_as='url'. Every entry includes filename, size, sha256 and
-        mime_type, so a caller can verify what it received.
+        mime_type, so a caller can verify what it received. The MIDI entry is the untouched source;
+        call bake_instruments first when a DAW or other player should hear the intended programs
+        (a MIDI file cannot carry a SoundFont or samples).
         """
         store = _get_store()
         assert store is not None
