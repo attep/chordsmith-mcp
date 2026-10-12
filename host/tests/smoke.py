@@ -161,6 +161,16 @@ def main() -> None:
         )
         print(f"params:  Wave index {wave_index}, set by name -> sawtooth; unknown name rejected")
 
+        state = scratch_path / "synth.state"
+        dumped = run(host, ["--dump-state", str(state), "--plugin", str(synth),
+                            "--set", f"{wave_index}=Saw"])
+        assert state.is_file() and state.stat().st_size > 0 and dumped["bytes"] > 0, dumped
+        state_render = scratch_path / "state.wav"
+        run(host, ["--render", "--plugin", str(synth), "--state", str(state),
+                   "--midi", str(midi), "--wav", str(state_render), "--tail", "1.0"])
+        assert wav_samples(state_render) == wav_samples(saw), "--state did not reproduce the render"
+        print(f"state:   dumped {dumped['bytes']} bytes, reload reproduces the saw render")
+
         result = run(host, ["--process", "--plugin", str(gain),
                             "--in", str(source), "--out", str(processed)])
         out_duration, out_peak = wav_stats(processed)

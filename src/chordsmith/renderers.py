@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -219,10 +220,15 @@ class EffectPlugin(BaseModel):
     preset: str | None = Field(
         None, description="Program name or index inside the plugin; omit for its default state."
     )
+    state: str | None = Field(
+        None,
+        description="Path to a captured plugin state file (see open_plugin_state_editor), "
+        "applied before params — how an effect with nothing settable (TONEX) loads its tone.",
+    )
     params: dict[str, float | str] | None = Field(
         None,
-        description="Parameter values applied after the preset, keyed by parameter name (or "
-        "index) — a number (e.g. {'Mix': 0.4}), or a value name for a choice parameter (e.g. "
+        description="Parameter values applied after the preset and state, keyed by parameter name "
+        "(or index) — a number (e.g. {'Mix': 0.4}), or a value name for a choice parameter (e.g. "
         "{'Mode': 'Bright'}, see list_plugins parameter_values).",
     )
 
@@ -256,10 +262,17 @@ class InstrumentSpec(BaseModel):
         description="vst: program name or index inside the plugin (see list_plugins detail); "
         "omit for the plugin's default state.",
     )
+    plugin_state: str | None = Field(
+        None,
+        description="vst: path to a captured plugin state file (see open_plugin_state_editor) — "
+        "how GUI-only plugins keep their sound (a TONEX tone, a Guitar Rig rig, a "
+        "SampleTank/Syntronik patch). Applied before plugin_preset/plugin_params, so those can "
+        "still tweak the captured sound.",
+    )
     plugin_params: dict[str, float | str] | None = Field(
         None,
-        description="vst: parameter values applied after the preset, keyed by parameter name "
-        "(or index) — a number (e.g. {'Gain': 0.5}) or a value name for a choice parameter "
+        description="vst: parameter values applied after the preset and state, keyed by parameter "
+        "name (or index) — a number (e.g. {'Gain': 0.5}) or a value name for a choice parameter "
         "(e.g. {'Osc 1 Type': 'Classic'}); list names with list_plugins parameter_search and "
         "values with parameter_values. This is how plugins without VST3 programs (IK's "
         "SampleTank, Syntronik) pick a patch: find the patch parameter, list its values and set "
@@ -499,6 +512,7 @@ class VstRenderer:
                 _resolve_sets(spec.plugin, spec.plugin_params),
                 midi,
                 out,
+                state=spec.plugin_state,
             )
         except audio.AudioError as exc:
             raise RenderError(str(exc)) from None
@@ -518,11 +532,13 @@ def apply_stem_effects(stem: Path, effects: list[EffectPlugin] | None) -> None:
     host = audio.find_vst_host()
     if host is None:
         raise RenderError("This track has VST effects, but the VST host is not installed.")
-    chain: list[tuple[str, str | None, list[tuple[int, float]]]] = []
+    chain: list[tuple[str, str | None, list[tuple[int, float | str]], str | None]] = []
     for effect in effects:
         if not Path(effect.plugin).exists():
             raise RenderError(f"VST plugin '{effect.plugin}' does not exist.")
-        chain.append((effect.plugin, effect.preset, _resolve_sets(effect.plugin, effect.params)))
+        chain.append(
+            (effect.plugin, effect.preset, _resolve_sets(effect.plugin, effect.params), effect.state)
+        )
     temp = stem.with_name(stem.stem + ".fx.wav")
     try:
         audio.process_vst(host, chain, stem, temp)
@@ -975,6 +991,7 @@ def _validate_sfizz(source: Path, spec: InstrumentSpec) -> None:
         ("program", spec.program),
         ("plugin", spec.plugin),
         ("plugin_preset", spec.plugin_preset),
+        ("plugin_state", spec.plugin_state),
     ):
         if value is not None:
             raise RenderError(f"'{option}' is a fluidsynth option; an SFZ instrument maps its own notes.")
@@ -1007,6 +1024,22 @@ def _vst_label(spec: InstrumentSpec) -> str | None:
         return None
     label = Path(spec.plugin).name
     return f"{label} - {spec.plugin_preset}" if spec.plugin_preset else label
+
+
+def _scan_vst_plugins(directory: str | None) -> list[dict[str, str]]:
+    """The .vst3 plugins under a directory; a Windows bundle is listed, not the file inside it."""
+    if not directory or not Path(directory).is_dir():
+        return []
+    kept: list[Path] = []
+    for path in sorted(Path(directory).rglob("*.vst3")):
+        # A Windows VST3 bundle is a directory holding a same-named .vst3 file inside it
+        # (Contents\x86_64-win\X.vst3): keep the bundle, drop the file inside it.
+        if any(entry in path.parents for entry in kept):
+            continue
+        kept.append(path)
+        if len(kept) >= MAX_VST_PLUGINS:
+            break
+    return [{"name": path.stem, "path": str(path)} for path in kept]
 
 
 _PARAMETER_CACHE: dict[tuple[str, str], dict[str, int]] = {}
@@ -1079,7 +1112,9 @@ def _validate_vst(spec: InstrumentSpec) -> None:
         ("program", spec.program),
     ):
         if value is not None:
-            raise RenderError(f"'{option}' is not a vst option; use 'plugin' and 'plugin_preset'.")
+            raise RenderError(
+                f"'{option}' is not a vst option; use 'plugin', 'plugin_preset' and 'plugin_state'."
+            )
     if spec.reverb_send is not None or spec.chorus_send is not None:
         raise RenderError(
             "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; a vst track has "
@@ -1113,6 +1148,11 @@ def _validate_vst(spec: InstrumentSpec) -> None:
             raise RenderError(
                 f"No program '{spec.plugin_preset}' in '{Path(spec.plugin).name}'. Programs: {listed}"
             )
+    if spec.plugin_state is not None and not Path(spec.plugin_state).is_file():
+        raise RenderError(
+            f"Plugin state '{spec.plugin_state}' does not exist; capture it with "
+            "open_plugin_state_editor (or the host's --editor / --dump-state)."
+        )
     _resolve_sets(spec.plugin, spec.plugin_params)  # parameter names must exist
 
 
@@ -1135,6 +1175,11 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
             raise RenderError(
                 f"Effect {index}: '{Path(effect.plugin).name}' is an instrument; 'effects' takes "
                 "effect plugins."
+            )
+        if effect.state is not None and not Path(effect.state).is_file():
+            raise RenderError(
+                f"Effect {index}: state file '{effect.state}' does not exist; capture it with "
+                "open_plugin_state_editor (or the host's --editor / --dump-state)."
             )
         if effect.preset is not None:
             programs = [str(name) for name in types[0].get("programs") or []] if types else []
@@ -1291,8 +1336,15 @@ def register(mcp: FastMCP, store_provider) -> None:
             elif spec.engine == "vst":
                 _validate_vst(spec)
             else:
-                if spec.sfz is not None or spec.plugin is not None or spec.plugin_preset is not None:
-                    raise RenderError("'sfz', 'plugin' and 'plugin_preset' are not fluidsynth options.")
+                if (
+                    spec.sfz is not None
+                    or spec.plugin is not None
+                    or spec.plugin_preset is not None
+                    or spec.plugin_state is not None
+                ):
+                    raise RenderError(
+                        "'sfz', 'plugin', 'plugin_preset' and 'plugin_state' are not fluidsynth options."
+                    )
                 if spec.preset is not None and not Path(spec.preset).is_file():
                     raise RenderError(f"Soundfont '{spec.preset}' does not exist.")
                 preset_label(spec, channels.get(name, 0))  # validate bank/program against the sf2
@@ -1468,18 +1520,7 @@ def register(mcp: FastMCP, store_provider) -> None:
         separate process, so a crashing plugin cannot take the server down.
         """
         directory = os.environ.get("CHORDSMITH_VST_DIR")
-        scanned: list[dict[str, str]] = []
-        if directory and Path(directory).is_dir():
-            kept: list[Path] = []
-            for path in sorted(Path(directory).rglob("*.vst3")):
-                # A Windows VST3 bundle is a directory holding a same-named .vst3 file inside it
-                # (Contents\x86_64-win\X.vst3): keep the bundle, drop the file inside it.
-                if any(entry in path.parents for entry in kept):
-                    continue
-                kept.append(path)
-                if len(kept) >= MAX_VST_PLUGINS:
-                    break
-            scanned = [{"name": path.stem, "path": str(path)} for path in kept]
+        scanned = _scan_vst_plugins(directory)
         plugins = scanned
         if name_contains:
             needle = name_contains.lower()
@@ -1516,6 +1557,84 @@ def register(mcp: FastMCP, store_provider) -> None:
             "detail": payload,
             "parameters": parameter_list,
             "parameter_values": value_list,
+        }
+
+    @mcp.tool(title="Capture a plugin's state", annotations=_CREATES)
+    def open_plugin_state_editor(
+        plugin: Annotated[
+            str,
+            Field(
+                description="Plugin path or a name from list_plugins, e.g. 'Guitar Rig 7' or "
+                "'TONEX'."
+            ),
+        ],
+        state_name: Annotated[
+            str | None,
+            Field(
+                description="Name for the saved state file (default: the plugin's name); '.state' "
+                "is added, stored under 'states/' in the output folder."
+            ),
+        ] = None,
+    ) -> results.PluginEditorResult:
+        """Open a plugin's own UI on the server's desktop to capture its state once.
+
+        Returns immediately with the path the state will be written to: a window opens on the
+        server machine, the tone/rig/patch is loaded in it, and closing the window saves the
+        plugin state there. Reference that path from set_track_instrument's 'plugin_state' (a vst
+        instrument) or an effect's 'state' — every render then loads the captured sound headless,
+        which is the only way in for GUI-only plugins (TONEX tones, Guitar Rig rigs, SampleTank/
+        Syntronik patches). Needs a desktop session, so it refuses on the headless Linux Docker
+        server. The same capture from a shell is: vst_host --editor --plugin X --save-state out
+        (with --state to load an existing capture, and --dump-state for a GUI-free snapshot).
+        """
+        host = audio.find_vst_host()
+        if host is None:
+            raise RenderError(
+                "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
+            )
+        if (
+            sys.platform not in ("win32", "darwin")
+            and not os.environ.get("DISPLAY")
+            and not os.environ.get("WAYLAND_DISPLAY")
+        ):
+            raise RenderError(
+                "The plugin editor needs a desktop session and this server has none; run the "
+                "server natively on a desktop machine (see docs/vst.md) to capture plugin states."
+            )
+        target = plugin
+        if not Path(target).exists():
+            match = next(
+                (
+                    entry
+                    for entry in _scan_vst_plugins(os.environ.get("CHORDSMITH_VST_DIR"))
+                    if entry["name"] == plugin
+                ),
+                None,
+            )
+            if match is None:
+                raise RenderError(f"Plugin '{plugin}' is not a path or a scanned name.")
+            target = match["path"]
+        try:
+            audio.vst_plugin_info(host, target)  # fail early when the plugin cannot load at all
+        except audio.AudioError as exc:
+            raise RenderError(str(exc)) from None
+        store: FileStore = store_provider()
+        states_dir = store.root / "states"
+        states_dir.mkdir(parents=True, exist_ok=True)
+        filename = store.safe_name((state_name or Path(target).stem).removesuffix(".state"), ".state")
+        state_path = states_dir / filename
+        try:
+            audio.start_vst_editor(host, target, state_path)
+        except audio.AudioError as exc:
+            raise RenderError(str(exc)) from None
+        return {
+            "plugin": Path(target).name,
+            "state_path": str(state_path),
+            "started": True,
+            "note": "A plugin window opened on the server's desktop. Load the tone/rig/patch in "
+            "it, then close the window: the state is written to state_path. Pass that path as "
+            "'plugin_state' (a vst instrument) or 'state' (an effect) in a set_track_instrument "
+            "spec.",
         }
 
     @mcp.tool(title="Bake instruments into MIDI", annotations=_CREATES)

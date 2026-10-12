@@ -12,6 +12,31 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.3] - 2026-10-12
+
+Plugin state capture: GUI-only VST3s become usable in headless renders.
+
+### Added
+
+- **`open_plugin_state_editor`** — opens a plugin's own UI in a window on the server's desktop
+  and returns immediately with the path its state will be written to; closing the window saves
+  the plugin state there. The host command behind it is
+  `vst_host --editor --plugin X.vst3 --save-state out.state`; `vst_host --dump-state FILE`
+  writes the same snapshot without a GUI (parameter-driven plugins, tests).
+- `set_track_instrument` specs gain **`plugin_state`** and VST effects gain **`state`**: renders
+  load the captured state before presets/parameters — a TONEX tone, a Guitar Rig rig or a
+  SampleTank/Syntronik patch renders headlessly from one capture. The host side is
+  `--state FILE` on `--render`/`--process`/`--editor`.
+- ToneSynth's test plugin now saves/restores its parameters, so the host smoke tests prove a
+  full state round trip (`--dump-state` then `--state` reproduces the parameter-set render).
+
+### Notes
+
+- The editor needs a desktop session, so the tool refuses on the headless Linux Docker server;
+  capture on a native/desktop server and the state file renders anywhere. GUI-only plugins
+  (TONEX, Guitar Rig, SampleTank, Syntronik) ignore their standalone apps when hosted — this
+  capture is the only way their sound reaches a render. Tool count is 36; the budgets stand.
+
 ## [0.24.2] - 2026-10-12
 
 VST parameters by name: choice parameters that VST3 exposes as continuous values are settable now.

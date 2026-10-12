@@ -94,8 +94,19 @@ public:
     const juce::String getProgramName(int index) override { return index == 1 ? "Saw" : "Sine"; }
     void changeProgramName(int, const juce::String&) override {}
 
-    void getStateInformation(juce::MemoryBlock&) override {}
-    void setStateInformation(const void*, int) override {}
+    void getStateInformation(juce::MemoryBlock& destination) override {
+        juce::MemoryOutputStream stream(destination, false);
+        stream.writeFloat(gain->get());
+        stream.writeInt(wave->getIndex());
+    }
+
+    void setStateInformation(const void* data, int sizeInBytes) override {
+        juce::MemoryInputStream stream(data, static_cast<size_t>(sizeInBytes), false);
+        if (stream.getNumBytesRemaining() < static_cast<juce::int64>(sizeof(float) + sizeof(int))) return;
+        gain->setValue(stream.readFloat());
+        program = juce::jlimit(0, 1, stream.readInt());
+        *wave = program;
+    }
 
 private:
     struct Voice {

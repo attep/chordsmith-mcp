@@ -12,6 +12,7 @@ import base64
 import io
 import math
 import os
+import sys
 import wave
 from pathlib import Path
 
@@ -305,6 +306,49 @@ async def test_vst_plugin_params_by_name(store):
     )
     assert failed.isError and "no value matches" in failed.content[0].text, failed.content[0].text
     assert "Sine" in failed.content[0].text  # the error lists the available value names
+
+
+async def test_vst_plugin_state_round_trip(store, tmp_path):
+    song = await _make_song(store)
+    host = audio.find_vst_host()
+    state = tmp_path / "tone.state"
+    dumped = audio.dump_vst_state(host, str(TONE), state, sets=[(1, "Saw")])
+    assert state.is_file() and state.stat().st_size > 0 and dumped["bytes"] > 0, dumped
+
+    async def render_with(extra, output):
+        spec = {"engine": "vst", "plugin": str(TONE), **extra}
+        set_spec = await _call("set_track_instrument", {"filename": song, "tracks": {"Melody": spec}})
+        assert not set_spec.isError, set_spec.content[0].text
+        rendered = await _call(
+            "render_audio",
+            {"filename": song, "stems": True, "output_filename": output, "overwrite": True},
+        )
+        assert not rendered.isError, rendered.content[0].text
+        stem = next(s for s in rendered.structuredContent["stems"] if s["track"] == "Melody")
+        return base64.b64decode(stem["data_base64"])
+
+    by_set = await render_with({"plugin_params": {"Wave": "Saw"}}, "state_set")
+    by_state = await render_with({"plugin_state": str(state)}, "state_file")
+    assert by_state == by_set, "the captured state did not reproduce the parameter-set render"
+
+    missing_state = {
+        "engine": "vst",
+        "plugin": str(TONE),
+        "plugin_state": str(tmp_path / "no.state"),
+    }
+    missing = await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Melody": missing_state}},
+    )
+    assert missing.isError and "does not exist" in missing.content[0].text
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the desktop-session guard is Linux-specific")
+async def test_editor_tool_needs_a_desktop(store, monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    result = await _call("open_plugin_state_editor", {"plugin": str(TONE)})
+    assert result.isError and "desktop" in result.content[0].text, result.content[0].text
 
 
 async def test_bake_instruments_with_vst(store):

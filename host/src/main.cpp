@@ -16,15 +16,23 @@
 
       vst_host --list --plugin X.vst3
       vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]
-      vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME] \
+      vst_host --render --plugin X.vst3 [--state FILE] [--preset NAME|INDEX] [--set INDEX=VALUE|NAME] \
                [--tail SECONDS] --midi in.mid --wav out.wav
-      vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME]]... \
+      vst_host --process [--plugin X.vst3 [--state FILE] [--preset NAME|INDEX] [--set INDEX=VALUE|NAME]]... \
                --in in.wav --out out.wav
+      vst_host --editor --plugin X.vst3 [--state FILE] [--save-state FILE]
+      vst_host --dump-state FILE --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME]
 
     A --set value may be a number (a plain index for discrete parameters, 0-1 for continuous
     ones) or a value name the plugin resolves itself ("Saw"). --param-values scans a continuous
     parameter and lists the distinct texts it produces — VST3 plugins often expose their choice
     parameters as continuous, so the scan is what yields a usable list for them.
+
+    --state loads a plugin state file (a getStateInformation snapshot) before the preset and
+    --set values. --editor opens the plugin's own UI on the desktop so a GUI-only plugin (TONEX,
+    Guitar Rig, SampleTank) can be configured once; closing the window writes the state to
+    --save-state, and every later render loads it with --state. --dump-state writes the state
+    without a GUI (the same snapshot, for tests and debugging).
 
     Every mode prints one JSON line on stdout ({"ok": true, ...} or {"ok": false, "error": ...}).
 */
@@ -35,6 +43,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -50,10 +59,12 @@ struct Options {
     juce::StringArray plugins;
     juce::StringArray presets;  // one per plugin (empty = the plugin's default state)
     juce::StringArray sets;     // one per plugin: "index=plainValue;index=plainValue;..."
+    juce::StringArray states;   // one per plugin: a state file to load before preset/sets
     juce::String midi;
     juce::String wav;
     juce::String input;
     juce::String output;
+    juce::String saveState;  // --editor / --dump-state output file
     double tail = 2.0;
     int parameterValues = -1;
     int parameterLimit = 200;
@@ -89,12 +100,15 @@ void printUsage() {
     std::cout << "usage:\n"
               << "  vst_host --list --plugin X.vst3\n"
               << "  vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]\n"
-              << "  vst_host --render --plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME] "
-                 "[--tail SECONDS] --midi in.mid --wav out.wav\n"
-              << "  vst_host --process [--plugin X.vst3 [--preset NAME|INDEX] [--set INDEX=VALUE|NAME]]... "
-                 "--in in.wav --out out.wav\n"
+              << "  vst_host --render --plugin X.vst3 [--state FILE] [--preset NAME|INDEX] "
+                 "[--set INDEX=VALUE|NAME] [--tail SECONDS] --midi in.mid --wav out.wav\n"
+              << "  vst_host --process [--plugin X.vst3 [--state FILE] [--preset NAME|INDEX] "
+                 "[--set INDEX=VALUE|NAME]]... --in in.wav --out out.wav\n"
+              << "  vst_host --editor --plugin X.vst3 [--state FILE] [--save-state FILE]\n"
+              << "  vst_host --dump-state FILE --plugin X.vst3 [--preset NAME|INDEX] "
+                 "[--set INDEX=VALUE|NAME]\n"
               << "  (--set values may be numbers or value names; --param-values scans continuous "
-                 "parameters for their distinct texts)\n";
+                 "parameters; --state/--editor capture GUI-only plugin state)\n";
 }
 
 bool parseOptions(int argc, char** argv, Options& options, juce::String& error) {
@@ -111,12 +125,25 @@ bool parseOptions(int argc, char** argv, Options& options, juce::String& error) 
         };
         if (arg == "--help" || arg == "-h") {
             options.help = true;
-        } else if (arg == "--list" || arg == "--render" || arg == "--process" || arg == "--params") {
+        } else if (arg == "--list" || arg == "--render" || arg == "--process" || arg == "--params"
+                   || arg == "--editor") {
             options.mode = arg;
+        } else if (arg == "--dump-state") {
+            options.mode = arg;
+            options.saveState = value(arg);
+        } else if (arg == "--save-state") {
+            options.saveState = value(arg);
         } else if (arg == "--plugin") {
             options.plugins.add(value(arg));
             options.presets.add("");
             options.sets.add("");
+            options.states.add("");
+        } else if (arg == "--state") {
+            if (options.states.isEmpty()) {
+                error = "--state must follow a --plugin";
+                return false;
+            }
+            options.states.set(options.states.size() - 1, value(arg));
         } else if (arg == "--preset") {
             if (options.presets.isEmpty()) {
                 error = "--preset must follow a --plugin";
@@ -341,6 +368,52 @@ juce::String applySets(juce::AudioPluginInstance& instance, const juce::String& 
     }
     return {};
 }
+
+// A getStateInformation snapshot: what makes a GUI-configured plugin (TONEX's tone, a Guitar Rig
+// rig, a SampleTank patch) usable in headless renders.
+bool applyState(juce::AudioPluginInstance& instance, const juce::String& path, juce::String& error) {
+    if (path.isEmpty()) return true;
+    const juce::File file(path);
+    if (!file.existsAsFile()) {
+        error = "State file '" + path + "' does not exist";
+        return false;
+    }
+    juce::MemoryBlock block;
+    if (!file.loadFileAsData(block)) {
+        error = "Could not read '" + path + "'";
+        return false;
+    }
+    instance.setStateInformation(block.getData(), static_cast<int>(block.getSize()));
+    return true;
+}
+
+bool writeState(juce::AudioPluginInstance& instance, const juce::String& path, int& bytes,
+    juce::String& error) {
+    juce::MemoryBlock block;
+    instance.getStateInformation(block);
+    const juce::File file(path);
+    file.getParentDirectory().createDirectory();
+    if (!file.replaceWithData(block.getData(), block.getSize())) {
+        error = "Could not write '" + path + "'";
+        return false;
+    }
+    bytes = static_cast<int>(block.getSize());
+    return true;
+}
+
+// The plugin's own UI in a plain window: the one session where a human can pick a tone/rig/patch.
+// Closing the window ends the loop and (with --save-state) snapshots the result.
+class EditorWindow final : public juce::DocumentWindow {
+public:
+    explicit EditorWindow(const juce::String& name)
+        : DocumentWindow(name, juce::Colours::darkgrey, DocumentWindow::allButtons) {}
+
+    std::function<void()> onClose;
+
+    void closeButtonPressed() override {
+        if (onClose) onClose();
+    }
+};
 
 struct TimedMessage {
     double seconds;
@@ -576,6 +649,7 @@ int runRender(const Options& options) {
     if (instance == nullptr) return fail(error);
     configureBuses(*instance, true);
     instance->prepareToPlay(kSampleRate, kBlockSize);
+    if (!applyState(*instance, options.states[0], error)) return fail(error);
     if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
     if (const auto setsError = applySets(*instance, options.sets[0]); setsError.isNotEmpty())
         return fail(setsError);
@@ -640,6 +714,7 @@ int runProcess(const Options& options) {
         if (instance == nullptr) return fail(error);
         configureBuses(*instance, false);
         instance->prepareToPlay(kSampleRate, kBlockSize);
+        if (!applyState(*instance, options.states[i], error)) return fail(error);
         if (!applyPreset(*instance, options.presets[i], error)) return fail(error);
         if (const auto setsError = applySets(*instance, options.sets[i]); setsError.isNotEmpty())
             return fail(setsError);
@@ -668,6 +743,74 @@ int runProcess(const Options& options) {
     return 0;
 }
 
+int runEditor(const Options& options) {
+    if (options.plugins.isEmpty()) return fail("--editor needs --plugin");
+    juce::String error;
+    juce::OwnedArray<juce::PluginDescription> types;
+    if (!loadTypes(options.plugins[0], types, error)) return fail(error);
+    auto instance = instantiate(*types[0], error);
+    if (instance == nullptr) return fail(error);
+    configureBuses(*instance, types[0]->isInstrument);
+    instance->prepareToPlay(kSampleRate, kBlockSize);
+    if (!applyState(*instance, options.states[0], error)) return fail(error);
+    if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
+    if (const auto setsError = applySets(*instance, options.sets[0]); setsError.isNotEmpty())
+        return fail(setsError);
+
+    auto* editor = instance->createEditorIfNeeded();
+    if (editor == nullptr)
+        return fail("'" + types[0]->name + "' has no plugin editor; use --dump-state instead");
+
+    bool closed = false;
+    EditorWindow window(types[0]->name + " - close this window when done");
+    window.onClose = [&closed] { closed = true; };
+    window.setUsingNativeTitleBar(true);
+    window.setContentOwned(editor, true);
+    window.centreWithSize(window.getWidth(), window.getHeight());
+    window.setVisible(true);
+    window.toFront(true);
+    while (!closed) {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+        juce::Thread::sleep(5);
+    }
+    window.setVisible(false);
+
+    juce::String saved;
+    int bytes = 0;
+    if (options.saveState.isNotEmpty()) {
+        // Snapshot before the editor is deleted: some plugins flush pending changes on close.
+        if (!writeState(*instance, options.saveState, bytes, error)) return fail(error);
+        saved = options.saveState;
+    }
+    window.clearContentComponent();  // deletes the editor while its plugin is still alive
+    std::cout << "{\"ok\":true,\"mode\":\"editor\",\"plugin\":" << jsonString(types[0]->name)
+              << ",\"saved\":" << (saved.isEmpty() ? juce::String("null") : jsonString(saved))
+              << ",\"bytes\":" << bytes << "}" << std::endl;
+    return 0;
+}
+
+int runDumpState(const Options& options) {
+    if (options.plugins.isEmpty()) return fail("--dump-state needs --plugin");
+    if (options.saveState.isEmpty()) return fail("--dump-state needs a file");
+    juce::String error;
+    juce::OwnedArray<juce::PluginDescription> types;
+    if (!loadTypes(options.plugins[0], types, error)) return fail(error);
+    auto instance = instantiate(*types[0], error);
+    if (instance == nullptr) return fail(error);
+    configureBuses(*instance, types[0]->isInstrument);
+    instance->prepareToPlay(kSampleRate, kBlockSize);
+    if (!applyState(*instance, options.states[0], error)) return fail(error);
+    if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
+    if (const auto setsError = applySets(*instance, options.sets[0]); setsError.isNotEmpty())
+        return fail(setsError);
+    int bytes = 0;
+    if (!writeState(*instance, options.saveState, bytes, error)) return fail(error);
+    std::cout << "{\"ok\":true,\"mode\":\"dump-state\",\"plugin\":" << jsonString(types[0]->name)
+              << ",\"saved\":" << jsonString(options.saveState) << ",\"bytes\":" << bytes << "}"
+              << std::endl;
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -683,5 +826,7 @@ int main(int argc, char** argv) {
     if (options.mode == "--params") return runParams(options);
     if (options.mode == "--render") return runRender(options);
     if (options.mode == "--process") return runProcess(options);
+    if (options.mode == "--editor") return runEditor(options);
+    if (options.mode == "--dump-state") return runDumpState(options);
     return fail("Unknown mode '" + options.mode + "'");
 }

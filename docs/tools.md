@@ -464,6 +464,7 @@ Each spec has:
 | `sfz` | sfizz: path to a `.sfz` instrument file (with its samples) the server can read; required when `engine` is `"sfizz"` |
 | `plugin` | vst: path to a `.vst3` instrument plugin the server can read (see [list_plugins](#list_plugins)); required when `engine` is `"vst"` |
 | `plugin_preset` | vst: program name or index inside the plugin (from `list_plugins` `detail`); omit for its default state |
+| `plugin_state` | vst: path to a captured plugin state file (see [open_plugin_state_editor](#open_plugin_state_editor)) — a TONEX tone, Guitar Rig rig or SampleTank/Syntronik patch; applied before `plugin_preset`/`plugin_params`, so those can still tweak the captured sound |
 | `plugin_params` | vst: parameter values applied after the preset, keyed by parameter name (or index) — a number (`{"Gain": 0.5}`) or a value name for a choice parameter (`{"Osc 1 Type": "Classic"}`). How plugins **without** VST3 programs pick a patch: find the selector with `list_plugins` `parameter_search`, list its values with `parameter_values`, set one by name |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
@@ -471,7 +472,7 @@ Each spec has:
 | `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 | `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
-| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}]`. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
+| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}, {"plugin": "/vst/Tonex.vst3", "state": "states/tonex.state"}]`. An effect's `state` is a captured plugin state (see [open_plugin_state_editor](#open_plugin_state_editor)) — how TONEX gets its tone. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
 | `chain` | Built-in processing chain for the rendered stem — the same stages as the vocal chain (`eq` → `de-esser` → `saturation` → `compressor`), applied before VST effects. How instrument grit, filtering and glue work with no plugin host: e.g. `{"eq": {"highpass_hz": 120}, "saturation": {"enabled": true, "drive_db": 9}}` |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
@@ -569,6 +570,19 @@ choice parameters — the host scans the range and lists the distinct texts it f
 user-supplied and never bundled; the host is a separate process, so a crashing plugin cannot take
 the server down. See [VST plugins](vst.md) for setup on Windows and Docker, and free plugin
 suggestions.
+
+## open_plugin_state_editor
+
+`plugin` (a path, or a name from `list_plugins`) and an optional `state_name` (stored under
+`states/` in the output folder, `.state` added). Returns immediately with the path the state
+will be written to: a window opens on the **server's desktop** showing the plugin's own UI —
+load the tone/rig/patch in it, then close the window, and the plugin state is saved to that
+path. Reference the file from a vst spec's `plugin_state` or an effect's `state`, and every
+render loads it headlessly. This is how GUI-only plugins join a session: TONEX tones, Guitar Rig
+rigs, SampleTank/Syntronik patches. Needs a desktop session — the headless Linux Docker server
+refuses it (capture on a native/desktop server; the state file then renders anywhere). The shell
+equivalent: `vst_host --editor --plugin X.vst3 --save-state out.state` (and `--dump-state FILE`
+for a GUI-free snapshot).
 
 ## list_chord_types
 

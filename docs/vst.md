@@ -47,6 +47,26 @@ distinct texts it produces (stepped and toggle parameters list theirs directly).
 matches nothing **fails the render** with the available texts in the error, rather than
 silently rendering the wrong sound.
 
+### Capturing a plugin's state (TONEX, Guitar Rig, SampleTank)
+
+GUI-only plugins keep their sound in the plugin's **state**, not in its parameters: a TONEX tone,
+a Guitar Rig rig, a SampleTank/Syntronik patch, an AmpliTube preset. Their standalone apps do
+**not** prime the plugin — it boots with its own empty state — so capture it once on a desktop,
+then render headlessly:
+
+1. `open_plugin_state_editor` (`plugin`: a path or a name from `list_plugins`) opens the plugin's
+   own UI in a window on the server's desktop and returns the path the state will be saved to.
+   From a shell: `vst_host --editor --plugin X.vst3 --save-state out.state` (add `--state FILE`
+   to start from an earlier capture).
+2. Load the tone/rig/patch in that window, then close it — the state is written to the file.
+3. Reference it from a vst track's `plugin_state`, or an effect's `state`. It is applied before
+   `preset`/`plugin_params`, so parameters can still tweak the captured sound. Renders load it
+   with `vst_host --render/--process --state FILE` — no GUI needed on any server that can read
+   the file. `--dump-state FILE` writes a state without a GUI (parameter-driven plugins, tests).
+
+The editor needs a desktop session, so the Linux Docker server refuses it; capture on the
+Windows/native server and the state file renders anywhere.
+
 The Linux Docker server does **not** load Windows plugins (Wine/yabridge is not supported): it
 uses Linux VST3s only (see below). The Docker image still includes `vst_host` and the test
 plugins, so the VST tooling can be tried there with Linux plugins.

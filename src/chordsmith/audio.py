@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -361,6 +362,7 @@ def render_vst(
     midi_path: Path,
     target: Path,
     tail: float = 2.0,
+    state: str | None = None,
 ) -> dict:
     """Render a MIDI file through a VST3 instrument with the host (44.1 kHz, stereo)."""
     args = [
@@ -374,6 +376,8 @@ def render_vst(
         "--tail",
         f"{tail:g}",
     ]
+    if state:
+        args += ["--state", state]
     if preset:
         args += ["--preset", preset]
     args += _set_arguments(sets)
@@ -382,16 +386,49 @@ def render_vst(
 
 def process_vst(
     host: str,
-    chain: list[tuple[str, str | None, list[tuple[int, float | str]]]],
+    chain: list[tuple[str, str | None, list[tuple[int, float | str]], str | None]],
     source: Path,
     target: Path,
 ) -> dict:
     """Run a wav through effect plugins in order; the host compensates reported latency."""
     args = ["--process"]
-    for plugin, preset, sets in chain:
+    for plugin, preset, sets, state in chain:
         args += ["--plugin", plugin]
+        if state:
+            args += ["--state", state]
         if preset:
             args += ["--preset", preset]
         args += _set_arguments(sets)
     args += ["--in", str(source), "--out", str(target)]
     return _run_vst_host(host, args)
+
+
+def dump_vst_state(
+    host: str,
+    plugin: str,
+    target: Path,
+    sets: list[tuple[int, float | str]] | None = None,
+    preset: str | None = None,
+) -> dict:
+    """Write the plugin's state snapshot to a file with no GUI (parameter-driven plugins)."""
+    args = ["--dump-state", str(target), "--plugin", plugin]
+    if preset:
+        args += ["--preset", preset]
+    args += _set_arguments(sets)
+    return _run_vst_host(host, args)
+
+
+def start_vst_editor(host: str, plugin: str, target: Path, state: str | None = None) -> None:
+    """Launch the plugin's editor detached; closing its window writes the state to ``target``."""
+    args = [host, "--editor", "--plugin", plugin, "--save-state", str(target)]
+    if state:
+        args += ["--state", state]
+    kwargs: dict = {"close_fds": True, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(args, **kwargs)
+    except OSError as exc:
+        raise AudioError(f"Could not start the VST editor: {exc}") from exc
