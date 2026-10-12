@@ -11,6 +11,8 @@ GPL-3.0-or-later, sources under `host/`). It is the third engine beside FluidSyn
 
 Plugins are **user-supplied and never bundled**. `list_plugins` shows what the server can see;
 `list_plugins` with `detail` loads one plugin and reports its programs, category and latency.
+[Working with VST plugins](vst-workflow.md) is the end-to-end flow: picking an endpoint,
+classifying a plugin, capturing GUI-only sounds, and recipes per part.
 
 ## Windows servers (IK Multimedia and other Windows VST3s)
 
