@@ -129,7 +129,9 @@ def main() -> None:
         params = run(host, ["--params", "--plugin", str(synth)])
         gain_index = next(p["index"] for p in params["parameters"] if p["name"] == "Gain")
         values = run(host, ["--params", "--plugin", str(synth), "--param-values", str(gain_index)])
-        assert values["steps"] == 0 and values["values"] == [], values  # a continuous parameter
+        # a continuous parameter: the scan lists the distinct texts (the synth formats 2 decimals)
+        assert values["steps"] == 0 and values["scanned"] is True, values
+        assert [entry["text"] for entry in values["values"]][:2] == ["0.00", "0.01"], values
         quiet = scratch_path / "quiet.wav"
         run(host, ["--render", "--plugin", str(synth), "--preset", "Sine",
                    "--set", f"{gain_index}=0.1", "--midi", str(midi), "--wav", str(quiet), "--tail", "1.0"])
