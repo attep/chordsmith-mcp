@@ -1563,10 +1563,7 @@ def register(mcp: FastMCP, store_provider) -> None:
     def open_plugin_state_editor(
         plugin: Annotated[
             str,
-            Field(
-                description="Plugin path or a name from list_plugins, e.g. 'Guitar Rig 7' or "
-                "'TONEX'."
-            ),
+            Field(description="Plugin path or a name from list_plugins, e.g. 'Guitar Rig 7' or 'TONEX'."),
         ],
         state_name: Annotated[
             str | None,

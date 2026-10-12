@@ -103,7 +103,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override {
         juce::MemoryInputStream stream(data, static_cast<size_t>(sizeInBytes), false);
         if (stream.getNumBytesRemaining() < static_cast<juce::int64>(sizeof(float) + sizeof(int))) return;
-        gain->setValue(stream.readFloat());
+        *gain = stream.readFloat();
         program = juce::jlimit(0, 1, stream.readInt());
         *wave = program;
     }
