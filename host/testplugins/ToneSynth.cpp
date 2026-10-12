@@ -18,7 +18,8 @@ class ToneSynthProcessor : public juce::AudioProcessor {
 public:
     ToneSynthProcessor()
         : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)) {
-        addParameter(&gain);
+        gain = new juce::AudioParameterFloat("gain", "Gain", 0.0f, 1.0f, 0.8f);
+        addParameter(gain);  // the processor takes ownership
     }
 
     const juce::String getName() const override { return "ToneSynth"; }
@@ -76,7 +77,7 @@ public:
                     [](const Voice& voice) { return voice.releasing && voice.level <= 0.0f; }),
                 voices.end());
             for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
-                buffer.setSample(channel, frame, sample * gain.get());
+                buffer.setSample(channel, frame, sample * gain->get());
         }
     }
 
@@ -99,7 +100,7 @@ private:
     };
 
     std::vector<Voice> voices;
-    juce::AudioParameterFloat gain {"gain", "Gain", 0.0f, 1.0f, 0.8f};
+    juce::AudioParameterFloat* gain = nullptr;  // owned by the processor (addParameter)
     double sampleRate = 44100.0;
     int program = 0;
 };

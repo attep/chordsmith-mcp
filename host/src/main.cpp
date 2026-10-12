@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -223,8 +224,17 @@ void configureBuses(juce::AudioPluginInstance& instance, bool instrument) {
                   << std::endl;
 }
 
-int plainValue(juce::AudioProcessorParameter& parameter) {
+// JUCE reports a continuous parameter's step count as INT_MAX; the JSON and --set take the
+// friendlier convention: 0 = continuous, 1 = toggle, N = discrete.
+constexpr int kContinuousSteps = std::numeric_limits<int>::max();
+
+int stepCount(const juce::AudioProcessorParameter& parameter) {
     const int steps = parameter.getNumSteps();
+    return steps >= kContinuousSteps ? 0 : steps;
+}
+
+int plainValue(juce::AudioProcessorParameter& parameter) {
+    const int steps = stepCount(parameter);
     const float value = parameter.getValue();
     if (steps > 1) return static_cast<int>(std::lround(value * (steps - 1)));
     if (steps == 1) return value > 0.5f ? 1 : 0;
@@ -244,7 +254,7 @@ void applySets(juce::AudioPluginInstance& instance, const juce::String& sets) {
             continue;
         }
         auto* parameter = parameters[index];
-        const int steps = parameter->getNumSteps();
+        const int steps = stepCount(*parameter);
         float normalized = 0.0f;
         if (steps > 1)
             normalized = static_cast<float>(juce::jlimit(0.0, 1.0, plain / (steps - 1)));
@@ -397,7 +407,7 @@ int runParams(const Options& options) {
         if (options.parameterValues >= parameters.size())
             return fail("parameter index " + juce::String(options.parameterValues) + " is out of range");
         auto* parameter = parameters[options.parameterValues];
-        const int steps = parameter->getNumSteps();
+        const int steps = stepCount(*parameter);
         const int limit = juce::jmax(1, options.parameterLimit);
         juce::String values;
         int count = 0;
@@ -423,7 +433,7 @@ int runParams(const Options& options) {
     for (int i = 0; i < parameters.size(); ++i) {
         if (i > 0) json += ",";
         auto* parameter = parameters[i];
-        const int steps = parameter->getNumSteps();
+        const int steps = stepCount(*parameter);
         const float value = parameter->getValue();
         json += "{\"index\":" + juce::String(i) +
                 ",\"name\":" + jsonString(parameter->getName(120)) +
