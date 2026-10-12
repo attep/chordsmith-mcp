@@ -12,6 +12,19 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.5] - 2026-10-13
+
+Both plugin worlds in one session: VST routing is per plugin, not per server.
+
+### Fixed
+
+- With a VST bridge configured, this server's own plugins still work: existence checks, plugin
+  scans, renders and effect chains pick the host **per plugin path** — Windows paths go to the
+  bridge, local paths to the server's own `vst_host`. `list_plugins` now scans both folders and
+  reports them together (e.g. `/vst + C:\Program Files\Common Files\VST3`), and an effect chain
+  may mix both worlds (consecutive effects that share a host run in one pass, the stem moves
+  between passes).
+
 ## [0.24.4] - 2026-10-13
 
 One endpoint for everything: the remote VST bridge.

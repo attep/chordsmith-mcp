@@ -49,12 +49,34 @@ def bridge_url() -> str | None:
     return url or None
 
 
+def local_vst_host() -> str | None:
+    """This machine's own vst_host binary (CHORDSMITH_VST_HOST or PATH)."""
+    return os.environ.get("CHORDSMITH_VST_HOST") or shutil.which("vst_host")
+
+
 def find_vst_host() -> str | None:
-    """The VST host to use: the bridge URL when configured, else the local vst_host binary."""
+    """Some VST host: the bridge URL when configured, else the local vst_host binary."""
     bridge = bridge_url()
     if bridge:
         return bridge
-    return os.environ.get("CHORDSMITH_VST_HOST") or shutil.which("vst_host")
+    return local_vst_host()
+
+
+def is_windows_path(path: str) -> bool:
+    """Whether a path is a Windows path (drive letter or UNC), as specs name them."""
+    return len(path) > 1 and (path[1] == ":" or path.startswith("\\\\"))
+
+
+def host_for_plugin(plugin: str) -> str | None:
+    """The host that can load this plugin: the bridge for Windows plugins, else the local one.
+
+    A bridged server still owns its own plugins (e.g. the Linux .vst3 files under /vst): only
+    Windows-path plugins go to the bridge, so both worlds work in one session.
+    """
+    bridge = bridge_url()
+    if bridge and is_windows_path(plugin):
+        return bridge
+    return local_vst_host()
 
 
 def _bridge_headers() -> dict[str, str]:

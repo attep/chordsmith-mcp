@@ -109,6 +109,12 @@ def test_bridge_routing_and_file_transfer(fake_bridge, tmp_path, monkeypatch):
     assert audio.bridge_paths_exist([DRUM]) == {DRUM: True}
     assert audio.bridge_shared_path("/data/states/x.state") == r"D:\ChordSmith\data\states\x.state"
 
+    # Routing is per plugin: Windows paths go to the bridge, local Linux paths stay here.
+    assert audio.host_for_plugin(DRUM) == fake_bridge
+    monkeypatch.setenv("CHORDSMITH_VST_HOST", "local-host")
+    assert audio.host_for_plugin("/vst/Local.vst3") == "local-host"
+    assert audio.host_for_plugin(DRUM) == fake_bridge
+
     payload = audio._run_vst_host(fake_bridge, ["--list", "--plugin", "X.vst3"])
     assert payload["ok"] is True and payload["mode"] == "list"
 
@@ -124,10 +130,15 @@ def test_bridge_routing_and_file_transfer(fake_bridge, tmp_path, monkeypatch):
         audio.bridge_plugin_scan()
 
 
-async def test_bridge_tools_see_the_windows_plugins(store, fake_bridge):
+async def test_bridge_tools_see_both_worlds(store, monkeypatch, fake_bridge, tmp_path):
+    local_dir = tmp_path / "vst"
+    local_dir.mkdir()
+    (local_dir / "Local.vst3").write_bytes(b"x")
+    monkeypatch.setenv("CHORDSMITH_VST_DIR", str(local_dir))
+
     listed = (await _call("list_plugins", {})).structuredContent
-    assert {entry["name"] for entry in listed["plugins"]} == {"MODO DRUM"}
-    assert listed["directory"] == r"C:\Plugins"
+    assert {entry["name"] for entry in listed["plugins"]} == {"Local", "MODO DRUM"}
+    assert listed["directory"] == f"{local_dir} + C:\\Plugins"
 
     filtered = (await _call("list_plugins", {"name_contains": "modo"})).structuredContent
     assert {entry["name"] for entry in filtered["plugins"]} == {"MODO DRUM"}

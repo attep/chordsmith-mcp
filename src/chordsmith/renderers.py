@@ -497,7 +497,7 @@ class VstRenderer:
         out: Path,
         effects: dict[str, float | int] | None = None,
     ) -> None:
-        host = audio.find_vst_host()
+        host = audio.host_for_plugin(spec.plugin) if spec.plugin else None
         if host is None:
             raise RenderError(
                 "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
@@ -526,27 +526,34 @@ class VstRenderer:
 
 
 def apply_stem_effects(stem: Path, effects: list[EffectPlugin] | None) -> None:
-    """Run a track's VST3 effect chain over its rendered stem (the host compensates latency)."""
+    """Run a track's VST3 effect chain over its rendered stem (the host compensates latency).
+
+    A chain may mix this server's plugins with the bridge's; consecutive effects that share a
+    host run in one pass, and the stem moves between passes.
+    """
     if not effects:
         return
-    host = audio.find_vst_host()
-    if host is None:
-        raise RenderError("This track has VST effects, but the VST host is not installed.")
-    chain: list[tuple[str, str | None, list[tuple[int, float | str]], str | None]] = []
+    groups: list[tuple[str, list[tuple[str, str | None, list[tuple[int, float | str]], str | None]]]] = []
     for effect in effects:
         if not _plugin_exists(effect.plugin):
             raise RenderError(f"VST plugin '{effect.plugin}' does not exist.")
-        chain.append(
-            (effect.plugin, effect.preset, _resolve_sets(effect.plugin, effect.params), effect.state)
-        )
-    temp = stem.with_name(stem.stem + ".fx.wav")
-    try:
-        audio.process_vst(host, chain, stem, temp)
-        temp.replace(stem)
-    except audio.AudioError as exc:
-        raise RenderError(str(exc)) from None
-    finally:
-        temp.unlink(missing_ok=True)
+        host = audio.host_for_plugin(effect.plugin)
+        if host is None:
+            raise RenderError("This track has VST effects, but the VST host is not installed.")
+        entry = (effect.plugin, effect.preset, _resolve_sets(effect.plugin, effect.params), effect.state)
+        if groups and groups[-1][0] == host:
+            groups[-1][1].append(entry)
+        else:
+            groups.append((host, [entry]))
+    for host, chain in groups:
+        temp = stem.with_name(stem.stem + ".fx.wav")
+        try:
+            audio.process_vst(host, chain, stem, temp)
+            temp.replace(stem)
+        except audio.AudioError as exc:
+            raise RenderError(str(exc)) from None
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 RENDERERS: dict[str, Renderer] = {
@@ -1027,13 +1034,15 @@ def _vst_label(spec: InstrumentSpec) -> str | None:
 
 
 def _plugin_exists(path: str) -> bool:
-    """Whether a plugin path exists — on the bridge's machine when one is configured."""
-    if audio.bridge_url():
+    """Whether a plugin path exists here (a local .vst3) or on the bridge (a Windows path)."""
+    if Path(path).exists():
+        return True
+    if audio.bridge_url() and audio.is_windows_path(path):
         try:
             return bool(audio.bridge_paths_exist([path]).get(path))
         except audio.AudioError:
             return False
-    return Path(path).exists()
+    return False
 
 
 def _basename(path: str) -> str:
@@ -1045,17 +1054,23 @@ def _resolve_plugin(plugin: str) -> str | None:
     """A plugin path or a scanned name -> its path; None when neither matches."""
     if _plugin_exists(plugin):
         return plugin
-    directory = os.environ.get("CHORDSMITH_VST_DIR")
-    if audio.bridge_url():
-        directory = os.environ.get("CHORDSMITH_VST_BRIDGE_VST_DIR") or directory
-    match = next((entry for entry in _scan_vst_plugins(directory) if entry["name"] == plugin), None)
+    scanned = _scan_vst_plugins(os.environ.get("CHORDSMITH_VST_DIR"))
+    match = next((entry for entry in scanned if entry["name"] == plugin), None)
     return match["path"] if match else None
 
 
 def _scan_vst_plugins(directory: str | None) -> list[dict[str, str]]:
-    """The .vst3 plugins under a directory; on a bridge, the plugins its machine can see."""
-    if audio.bridge_url():
-        return audio.bridge_plugin_scan()
+    """The .vst3 plugins under a directory; with a bridge, its machine's plugins too."""
+    local = _scan_vst_plugins_local(directory)
+    if not audio.bridge_url():
+        return local
+    remote = audio.bridge_plugin_scan()
+    combined = local + [entry for entry in remote if entry["path"] not in {e["path"] for e in local}]
+    return combined[:MAX_VST_PLUGINS]
+
+
+def _scan_vst_plugins_local(directory: str | None) -> list[dict[str, str]]:
+    """The .vst3 plugins under this server's own folder (Windows bundles listed once)."""
     if not directory or not Path(directory).is_dir():
         return []
     kept: list[Path] = []
@@ -1104,7 +1119,7 @@ def _resolve_sets(plugin: str, params: dict[str, float | str] | None) -> list[tu
     """
     if not params:
         return []
-    host = audio.find_vst_host()
+    host = audio.host_for_plugin(plugin)
     if host is None:
         raise RenderError(
             "VST parameters need the VST host; set CHORDSMITH_VST_HOST or put vst_host on PATH."
@@ -1150,7 +1165,7 @@ def _validate_vst(spec: InstrumentSpec) -> None:
         )
     if spec.sections:
         raise RenderError("Section overrides are not supported for vst tracks yet.")
-    host = audio.find_vst_host()
+    host = audio.host_for_plugin(spec.plugin)
     if host is None:
         raise RenderError("The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH.")
     try:
@@ -1188,12 +1203,15 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
     """Check a track's effect chain: readable plugins that load, effects only, real programs."""
     if not effects:
         return
-    host = audio.find_vst_host()
-    if host is None:
-        raise RenderError("This spec has VST effects, but the VST host is not installed.")
     for index, effect in enumerate(effects, start=1):
         if not _plugin_exists(effect.plugin):
             raise RenderError(f"Effect {index}: VST plugin '{effect.plugin}' does not exist.")
+        host = audio.host_for_plugin(effect.plugin)
+        if host is None:
+            raise RenderError(
+                f"Effect {index}: the VST host is not installed; set CHORDSMITH_VST_HOST or "
+                "put vst_host on PATH."
+            )
         try:
             info = audio.vst_plugin_info(host, effect.plugin)
         except audio.AudioError as exc:
@@ -1547,11 +1565,13 @@ def register(mcp: FastMCP, store_provider) -> None:
         parameter count and latency. Plugins are user-supplied and never bundled; the host is a
         separate process, so a crashing plugin cannot take the server down.
         """
-        directory = os.environ.get("CHORDSMITH_VST_DIR")
-        if audio.bridge_url():
-            directory = os.environ.get("CHORDSMITH_VST_BRIDGE_VST_DIR") or directory
-        scanned = _scan_vst_plugins(directory)
+        local_dir = os.environ.get("CHORDSMITH_VST_DIR")
+        scanned = _scan_vst_plugins(local_dir)
         plugins = scanned
+        directory = local_dir
+        if audio.bridge_url():
+            remote_dir = os.environ.get("CHORDSMITH_VST_BRIDGE_VST_DIR", "")
+            directory = " + ".join(part for part in (local_dir, remote_dir) if part) or None
         if name_contains:
             needle = name_contains.lower()
             plugins = [entry for entry in scanned if needle in entry["name"].lower()]
@@ -1613,13 +1633,17 @@ def register(mcp: FastMCP, store_provider) -> None:
         capture from a shell is: vst_host --editor --plugin X --save-state out (with --state to
         load an existing capture, and --dump-state for a GUI-free snapshot).
         """
-        host = audio.find_vst_host()
+        resolved = _resolve_plugin(plugin)
+        if resolved is None:
+            raise RenderError(f"Plugin '{plugin}' is not a path or a scanned name.")
+        target = resolved
+        host = audio.host_for_plugin(target)
         if host is None:
             raise RenderError(
                 "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
             )
         if (
-            not audio.bridge_url()
+            not host.startswith("http")
             and sys.platform not in ("win32", "darwin")
             and not os.environ.get("DISPLAY")
             and not os.environ.get("WAYLAND_DISPLAY")
@@ -1629,10 +1653,6 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "server natively on a desktop machine, or configure the VST bridge "
                 "(scripts/vst_bridge.py) and the window opens on the bridge's desktop instead."
             )
-        resolved = _resolve_plugin(plugin)
-        if resolved is None:
-            raise RenderError(f"Plugin '{plugin}' is not a path or a scanned name.")
-        target = resolved
         try:
             audio.vst_plugin_info(host, target)  # fail early when the plugin cannot load at all
         except audio.AudioError as exc:
