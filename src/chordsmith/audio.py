@@ -71,12 +71,15 @@ def host_for_plugin(plugin: str) -> str | None:
     """The host that can load this plugin: the bridge for Windows plugins, else the local one.
 
     A bridged server still owns its own plugins (e.g. the Linux .vst3 files under /vst): only
-    Windows-path plugins go to the bridge, so both worlds work in one session.
+    Windows-path plugins go to the bridge, so both worlds work in one session. A path that
+    exists on this machine is always ours (a Windows-native server with a bridge configured
+    must not send its own plugins away).
     """
     bridge = bridge_url()
-    if bridge and is_windows_path(plugin):
+    local = local_vst_host()
+    if bridge and is_windows_path(plugin) and not Path(plugin).exists():
         return bridge
-    return local_vst_host()
+    return local
 
 
 def _bridge_headers() -> dict[str, str]:
