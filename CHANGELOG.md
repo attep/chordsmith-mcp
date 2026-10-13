@@ -12,6 +12,26 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.9] - 2026-10-13
+
+### Added
+
+- **State library**: captured plugin states are now first-class. `plugin_state` and an effect's
+  `state` take a state by **name** (or path); `open_plugin_state_editor` gains `make_default`;
+  and a spec that names a plugin but gives no state uses that plugin's **default** state (a
+  TONEX track sounds right without repeating a path; `"none"` opts out). New read-only
+  `list_plugin_states` and `set_plugin_default_state` manage the library, and `list_plugins`
+  with `detail` lists the plugin's states and its default. Captures write a metadata sidecar
+  (plugin, saved time, default) so the library knows which plugin a state belongs to.
+
+### Changed
+
+- Section-gain overrides ramp over 15 ms at every boundary instead of stepping, so
+  Intro/Build/Drop level changes cannot click. Verified against stems that showed sample steps
+  at section starts.
+- Budgets raised deliberately: descriptions 22 -> 23 KB, payload ceiling 240 -> 248 KB (the
+  state library tools and the states block on list_plugins detail).
+
 ## [0.24.8] - 2026-10-13
 
 ### Added

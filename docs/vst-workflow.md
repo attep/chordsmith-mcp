@@ -41,15 +41,21 @@ open_plugin_state_editor(plugin="Guitar Rig 7", state_name="metal_rhythm")
 
 A window opens **on the Windows desktop** (through the bridge) running the plugin's own UI.
 Load the tone/rig/patch there, then close the window: the state is written to
-`states/<state_name>.state` in the output folder, which both machines share. Reference it:
+`states/<state_name>.state` in the output folder, which both machines share. Reference it by
+**name** or path:
 
 ```json
-{"plugin": "C:/Program Files/Common Files/VST3/TONEX.vst3",
- "state": "D:/ChordSmith/data/states/tonex_metal.state"}
+{"plugin": "C:/Program Files/Common Files/VST3/TONEX.vst3", "state": "tonex_metal"}
 ```
 
-Notes:
+### The state library
 
+- Every capture lands in the shared `states/` folder with a small metadata sidecar naming the
+  plugin; `list_plugin_states` lists the whole library, and `list_plugins` with `detail` lists
+  one plugin's states and its default.
+- **Defaults**: capture with `make_default: true` (or call `set_plugin_default_state`) and a
+  spec that names the plugin but gives **no** state uses it automatically — a TONEX track just
+  works. `"plugin_state": "none"` opts a spec out; an explicit state always wins.
 - The state **is** the sound: a new tone = a new capture (same name overwrites, or use a new
   name for a library of tones).
 - `vst_host --editor --plugin X.vst3 --save-state out.state` does the same from a shell;

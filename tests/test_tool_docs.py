@@ -20,7 +20,7 @@ from chordsmith import server
 
 pytestmark = pytest.mark.anyio
 
-DESCRIPTION_BUDGET_BYTES = 22 * 1024
+DESCRIPTION_BUDGET_BYTES = 23 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
 # effects, import, sections), 108 KB (v0.16.0: background render jobs), 116 KB (v0.17.0: wet
 # mix + effect sends), 128 KB (v0.18.0: job listings, get_file, import_audio), 136 KB
@@ -30,10 +30,12 @@ DESCRIPTION_BUDGET_BYTES = 22 * 1024
 # 160 KB (v0.22.0: swing/humanize on add_track, the sfizz engine, SFZ libraries), 164 KB
 # (v0.23.0: the VST engine, per-track effect chains, list_plugins), 232 KB (v0.24.0:
 # instrument chains + copy_from layers, and the mix job tool — MCP schemas are per-tool, so the
-# big mix schema is duplicated by design; descriptions moved 20 -> 22 KB in the same patch) and
-# 240 KB (v0.24.8: the chain's plugin-free reverb stage; the chain schema is duplicated too).
+# big mix schema is duplicated by design; descriptions moved 20 -> 22 KB in the same patch),
+# 240 KB (v0.24.8: the chain's plugin-free reverb stage; the chain schema is duplicated too)
+# and 248 KB (v0.24.9: the state library — list_plugin_states, set_plugin_default_state and
+# the states block on list_plugins detail; descriptions moved 22 -> 23 KB in the same patch).
 # The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 240 * 1024
+PAYLOAD_CEILING_BYTES = 248 * 1024
 
 
 @pytest.fixture
@@ -47,7 +49,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 36
+    assert len(tools) == 38
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

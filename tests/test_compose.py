@@ -273,6 +273,25 @@ def test_apply_section_gains_changes_only_its_window(tmp_path):
     assert renderers.apply_section_gains(stem, [(0.0, 1.0, 0.0)], baseline_db=0.0) is False
 
 
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_apply_section_gains_ramps_its_boundaries(tmp_path):
+    stem = tmp_path / "stem.wav"
+    rate = 44100
+    with wave.open(str(stem), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes((8000).to_bytes(2, "little", signed=True) * rate * 2)
+
+    assert renderers.apply_section_gains(stem, [(0.5, 1.5, -6.0)], baseline_db=0.0) is True
+
+    with wave.open(str(stem), "rb") as handle:
+        frames = handle.readframes(handle.getnframes())
+    values = [int.from_bytes(frames[i : i + 2], "little", signed=True) for i in range(0, len(frames), 2)]
+    largest = max(abs(b - a) for a, b in zip(values, values[1:], strict=False))
+    assert largest < 400, largest  # a hard boundary step would be ~4000 here
+
+
 @pytest.mark.skipif(not _voicebank_ready(), reason="DiffSinger voicebank not configured")
 async def test_lyrics_phoneme_mode_and_custom_words(store):
     song = await _make_song(store)

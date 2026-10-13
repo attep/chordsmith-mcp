@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from chordsmith import audio, server
+from chordsmith import audio, renderers, server
 
 TEST_DIR = Path(os.environ.get("CHORDSMITH_VST_TEST_DIR", "/opt/vst-test"))
 
@@ -341,6 +341,41 @@ async def test_vst_plugin_state_round_trip(store, tmp_path):
         {"filename": song, "tracks": {"Melody": missing_state}},
     )
     assert missing.isError and "does not exist" in missing.content[0].text
+
+
+async def test_vst_default_state_applies_unless_opted_out(store):
+    song = await _make_song(store)
+    host = audio.find_vst_host()
+    state = store.root / "states" / "tone_saw.state"
+    audio.dump_vst_state(host, str(TONE), state, sets=[(1, "Saw")])
+    renderers._write_state_metadata(state.parent, "tone_saw", str(TONE), default=True)
+
+    implied = await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Melody": {"engine": "vst", "plugin": str(TONE)}}},
+    )
+    assert not implied.isError, implied.content[0].text
+    assert implied.structuredContent["tracks"]["Melody"]["plugin_state"] == str(state)
+
+    named = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Melody": {"engine": "vst", "plugin": str(TONE), "plugin_state": "tone_saw"}},
+        },
+    )
+    assert not named.isError, named.content[0].text
+    assert named.structuredContent["tracks"]["Melody"]["plugin_state"] == str(state)
+
+    opted_out = await _call(
+        "set_track_instrument",
+        {
+            "filename": song,
+            "tracks": {"Melody": {"engine": "vst", "plugin": str(TONE), "plugin_state": "none"}},
+        },
+    )
+    assert not opted_out.isError, opted_out.content[0].text
+    assert opted_out.structuredContent["tracks"]["Melody"]["plugin_state"] is None
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the desktop-session guard is Linux-specific")

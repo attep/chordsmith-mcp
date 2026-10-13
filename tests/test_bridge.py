@@ -151,6 +151,28 @@ async def test_bridge_tools_see_both_worlds(store, monkeypatch, fake_bridge, tmp
     body = editor.structuredContent
     assert body["started"] is True
     assert body["state_path"].endswith("demo.state")
+    assert body["make_default"] is False
+
+    default = await _call(
+        "open_plugin_state_editor", {"plugin": "MODO DRUM", "state_name": "demo", "make_default": True}
+    )
+    assert default.structuredContent["make_default"] is True
+    sidecar = store.root / "states" / "demo.json"
+    metadata = json.loads(sidecar.read_text("utf-8"))
+    assert metadata["default"] is True
+    assert metadata["plugin_name"] == "MODO DRUM"
+    # the state file appears when the editor window closes (the fake bridge never closes it)
+    (store.root / "states" / "demo.state").write_bytes(b"x")
+
+    listed_states = (await _call("list_plugin_states", {})).structuredContent
+    assert [entry["name"] for entry in listed_states["states"]] == ["demo"]
+    assert listed_states["defaults"].get("MODO DRUM") == "demo"
+    filtered_states = (await _call("list_plugin_states", {"plugin": "MODO DRUM"})).structuredContent
+    assert [entry["name"] for entry in filtered_states["states"]] == ["demo"]
+
+    cleared = (await _call("set_plugin_default_state", {"plugin": "MODO DRUM"})).structuredContent
+    assert cleared["default_state"] is None
+    assert json.loads(sidecar.read_text("utf-8"))["default"] is False
 
 
 async def test_bridge_detail_uses_the_per_plugin_host(store, monkeypatch, fake_bridge, tmp_path):

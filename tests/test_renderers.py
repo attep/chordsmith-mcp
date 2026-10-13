@@ -55,6 +55,49 @@ def _marker_midi(path, sections=("Intro", "Verse")):
     midi.save(str(path))
 
 
+def test_state_library_names_and_defaults(store):
+    states = store.root / "states"
+    states.mkdir(parents=True, exist_ok=True)
+    tone = states / "tonex_metal.state"
+    tone.write_bytes(b"x")
+    renderers._write_state_metadata(states, "tonex_metal", r"C:\Plugins\TONEX.vst3", default=True)
+
+    assert renderers._default_state(store, r"C:\Plugins\TONEX.vst3") == str(tone)
+    assert renderers._default_state(store, "/vst/TONEX.vst3") == str(tone)  # matched by name
+    assert renderers._resolve_state_reference(store, r"C:\Plugins\TONEX.vst3", "tonex_metal") == str(tone)
+    assert renderers._resolve_state_reference(store, r"C:\Plugins\TONEX.vst3", str(tone)) == str(tone)
+    assert renderers._resolve_state_reference(store, r"C:\Plugins\TONEX.vst3", "none") is None
+    with pytest.raises(renderers.RenderError, match="no captured state"):
+        renderers._resolve_state_reference(store, r"C:\Plugins\TONEX.vst3", "missing")
+
+    library = renderers._state_library(store)
+    assert library["tonex_metal"]["default"] is True
+    assert library["tonex_metal"]["plugin_name"] == "TONEX"
+
+
+def test_materialize_states_stamps_defaults_and_switches_them(store):
+    states = store.root / "states"
+    states.mkdir(parents=True, exist_ok=True)
+    (states / "gr7.state").write_bytes(b"x")
+    renderers._write_state_metadata(states, "gr7", r"C:\Plugins\Guitar Rig 7.vst3", default=True)
+    spec = renderers.InstrumentSpec(engine="vst", plugin=r"C:\Plugins\Guitar Rig 7.vst3")
+    effect = renderers.EffectPlugin(plugin=r"C:\Plugins\TONEX.vst3")
+    (states / "tonex.state").write_bytes(b"x")
+    renderers._write_state_metadata(states, "tonex", r"C:\Plugins\TONEX.vst3", default=True)
+
+    spec.effects = [effect]
+    renderers._materialize_states(store, spec)
+    assert spec.plugin_state == str(states / "gr7.state")
+    assert effect.state == str(states / "tonex.state")
+
+    # a new default for the same plugin clears the old one
+    (states / "gr7_alt.state").write_bytes(b"x")
+    renderers._write_state_metadata(states, "gr7_alt", r"C:\Plugins\Guitar Rig 7.vst3", default=True)
+    library = renderers._state_library(store)
+    assert library["gr7_alt"]["default"] is True
+    assert library["gr7"]["default"] is False
+
+
 def test_vst_section_overrides_are_gain_only(monkeypatch, tmp_path):
     source = tmp_path / "song.mid"
     _marker_midi(source)

@@ -368,13 +368,37 @@ class PluginsResult(TypedDict):
     detail: dict | None
     parameters: list[dict] | None
     parameter_values: dict | None
+    states: list[StateEntry] | None
+    default_state: str | None
+
+
+class StateEntry(TypedDict):
+    name: str
+    path: str
+    plugin: str | None
+    plugin_name: str | None
+    saved_at: str | None
+    default: bool
+    size_bytes: int
 
 
 class PluginEditorResult(TypedDict):
     plugin: str
     state_path: str
     started: bool
+    make_default: bool
     note: str
+
+
+class PluginStatesResult(TypedDict):
+    directory: str
+    states: list[StateEntry]
+    defaults: dict[str, str]
+
+
+class PluginDefaultResult(TypedDict):
+    plugin: str
+    default_state: str | None
 
 
 class InstrumentMapResult(TypedDict):

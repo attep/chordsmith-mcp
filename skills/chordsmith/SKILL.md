@@ -126,7 +126,8 @@ say so.
   `chain` otherwise. Sound recipe: programs → `plugin_preset`; named parameters → `plugin_params`
   (numbers or choice names); placeholder presets or silence → capture a state with
   `open_plugin_state_editor`; audio processors → the `effects` chain; plugin-free reverb →
-  `chain.reverb`. Full flow: `docs/vst-workflow.md`.
+  `chain.reverb`; captured states are name-addressable and a plugin can have a default state
+  (`make_default`, `'none'` opts out). Full flow: `docs/vst-workflow.md`.
 - **Long renders**: DiffSinger is slow on CPU (tens of seconds per minute) and runs in background
   jobs chunked at rests; long FluidSynth songs should use `render_audio_job`.
 - **Long mixes**: `mix_song_with_vocals` can outrun a client's tool timeout on stems sessions —

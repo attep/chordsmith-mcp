@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal, Protocol
 
@@ -1256,6 +1257,127 @@ def _validate_effects(effects: list[EffectPlugin] | None) -> None:
         _resolve_sets(effect.plugin, effect.params)  # parameter names must exist
 
 
+STATE_SUFFIX = ".state"
+
+
+def _states_dir(store: FileStore) -> Path:
+    """The captured plugin states live in 'states/' inside the output folder (the library)."""
+    return store.root / "states"
+
+
+def _state_library(store: FileStore) -> dict[str, dict]:
+    """Every captured state with its metadata: {name: {name, path, plugin, ...}}."""
+    directory = _states_dir(store)
+    library: dict[str, dict] = {}
+    if not directory.is_dir():
+        return library
+    for path in sorted(directory.glob(f"*{STATE_SUFFIX}")):
+        name = path.stem
+        metadata: dict = {}
+        sidecar = directory / f"{name}.json"
+        if sidecar.is_file():
+            try:
+                loaded = json.loads(sidecar.read_text("utf-8"))
+                if isinstance(loaded, dict):
+                    metadata = loaded
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+        plugin = str(metadata.get("plugin") or "") or None
+        plugin_name = metadata.get("plugin_name")
+        if not plugin_name and plugin:
+            plugin_name = _basename(plugin).removesuffix(".vst3")
+        library[name] = {
+            "name": name,
+            "path": str(path),
+            "plugin": plugin,
+            "plugin_name": plugin_name,
+            "saved_at": metadata.get("saved_at"),
+            "default": bool(metadata.get("default")),
+            "size_bytes": path.stat().st_size,
+        }
+    return library
+
+
+def _plugin_key(plugin: str) -> str:
+    return _basename(plugin).removesuffix(".vst3").casefold()
+
+
+def _default_state(store: FileStore, plugin: str) -> str | None:
+    """The plugin's registered default state path, or None."""
+    key = _plugin_key(plugin)
+    for entry in _state_library(store).values():
+        if entry["default"] and entry.get("plugin_name") and str(entry["plugin_name"]).casefold() == key:
+            return entry["path"]
+    return None
+
+
+def _resolve_state_reference(store: FileStore, plugin: str, value: str | None) -> str | None:
+    """Resolve plugin_state/state: a path, a library name, 'none', or None (-> the default)."""
+    if value is None:
+        return _default_state(store, plugin)
+    text = str(value).strip()
+    if text == "" or text.casefold() == "none":
+        return None
+    candidate = Path(text)
+    if candidate.is_file():
+        return str(candidate)
+    library = _state_library(store)
+    name = text[: -len(STATE_SUFFIX)] if text.endswith(STATE_SUFFIX) else text
+    entry = library.get(name)
+    if entry is not None:
+        return entry["path"]
+    available = ", ".join(sorted(library)) or "(none captured yet)"
+    raise RenderError(
+        f"Plugin state '{value}' is not a file, and no captured state is named '{name}'. "
+        f"States: {available}. Capture one with open_plugin_state_editor."
+    )
+
+
+def _write_state_metadata(directory: Path, name: str, plugin: str, default: bool) -> None:
+    """Write/refresh a state's metadata sidecar; 'default' also clears other defaults."""
+    plugin_name = _basename(plugin).removesuffix(".vst3")
+    sidecar = directory / f"{name}.json"
+    previous: dict = {}
+    if sidecar.is_file():
+        try:
+            loaded = json.loads(sidecar.read_text("utf-8"))
+            if isinstance(loaded, dict):
+                previous = loaded
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+    if default:
+        for other in directory.glob("*.json"):
+            if other == sidecar:
+                continue
+            try:
+                data = json.loads(other.read_text("utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or not data.get("default"):
+                continue
+            other_name = data.get("plugin_name") or _basename(str(data.get("plugin") or "")).removesuffix(
+                ".vst3"
+            )
+            if str(other_name).casefold() == plugin_name.casefold():
+                data["default"] = False
+                other.write_text(json.dumps(data, indent=1) + "\n", "utf-8")
+    payload = {
+        "plugin": plugin,
+        "plugin_name": plugin_name,
+        "saved_at": previous.get("saved_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "default": bool(default) or bool(previous.get("default")),
+    }
+    sidecar.write_text(json.dumps(payload, indent=1) + "\n", "utf-8")
+
+
+def _materialize_states(store: FileStore, spec: InstrumentSpec) -> None:
+    """Resolve state references (names, defaults) into concrete paths before saving a spec."""
+    if spec.engine == "vst" and spec.plugin is not None:
+        spec.plugin_state = _resolve_state_reference(store, spec.plugin, spec.plugin_state)
+    for effect in spec.effects or []:
+        effect.state = _resolve_state_reference(store, effect.plugin, effect.state)
+
+
 def section_gain_windows(
     spec: InstrumentSpec, timeline: list[tuple[str, float, float]]
 ) -> list[tuple[float, float, float]]:
@@ -1270,11 +1392,16 @@ def section_gain_windows(
     return windows
 
 
+SECTION_RAMP_SECONDS = 0.015  # linear ramp at every section-gain boundary: no click from a step
+
+
 def apply_section_gains(stem: Path, windows: list[tuple[float, float, float]], baseline_db: float) -> bool:
     """Apply per-section gain deltas to a rendered stem with an ffmpeg volume envelope.
 
     Only the *difference* from the track's baseline is applied, so the stem keeps the baseline
-    for the mix and the combined result is exact. Returns True when a pass ran.
+    for the mix and the combined result is exact. Every boundary ramps over
+    ``SECTION_RAMP_SECONDS`` instead of stepping, so section changes never click. Returns True
+    when a pass ran.
     """
     deltas = [
         (start, end, gain - baseline_db) for start, end, gain in windows if abs(gain - baseline_db) > 0.05
@@ -1284,13 +1411,33 @@ def apply_section_gains(stem: Path, windows: list[tuple[float, float, float]], b
     ffmpeg = audio.find_ffmpeg()
     if ffmpeg is None:
         raise RenderError("ffmpeg is not installed (it is in the Docker image); needed for section gains.")
-    chain = []
-    for index, (start, end, delta) in enumerate(deltas):
-        source_label = "[0:a]" if index == 0 else f"[g{index - 1}]"
-        chain.append(
-            f"{source_label}volume=enable='between(t,{start:.3f},{end:.3f})':"
-            f"volume={10 ** (delta / 20.0):.4f}[g{index}]"
-        )
+    # The envelope in dB: a list of (time, change) boundaries, each changing the level over the
+    # next ramp window; summing the ramp terms gives the piecewise-linear envelope.
+    boundaries: list[tuple[float, float]] = []
+    current = 0.0
+    for start, end, delta in sorted(deltas):
+        if abs(delta - current) > 1e-9:
+            boundaries.append((start, delta - current))
+            current = delta
+        boundaries.append((end, -current))
+        current = 0.0
+    merged: list[list[float]] = []
+    for time, change in boundaries:
+        if merged and abs(merged[-1][0] - time) < 1e-6:
+            merged[-1][1] += change
+        else:
+            merged.append([time, change])
+    terms = [
+        f"{change:.4f}*min(max((t-{time:.3f})/{SECTION_RAMP_SECONDS:g},0),1)"
+        for time, change in merged
+        if abs(change) > 1e-9
+    ]
+    if not terms:
+        return False
+    # volume's eval=frame evaluates once per input frame; feeding 16-sample frames (0.36 ms)
+    # before it makes the ramps smooth instead of stepping at the default ~23 ms granularity.
+    # p=0 keeps the last partial frame as-is (no silent padding at the end).
+    gain_filter = f"asetnsamples=n=16:p=0,volume=volume='pow(10,(({'+'.join(terms)}))/20)':eval=frame"
     temp = stem.with_name(stem.stem + ".sec.wav")
     try:
         _ffmpeg(
@@ -1300,10 +1447,8 @@ def apply_section_gains(stem: Path, windows: list[tuple[float, float, float]], b
                 "error",
                 "-i",
                 str(stem),
-                "-filter_complex",
-                ";".join(chain),
-                "-map",
-                f"[g{len(deltas) - 1}]",
+                "-af",
+                gain_filter,
                 str(temp),
             ]
         )
@@ -1393,6 +1538,7 @@ def register(mcp: FastMCP, store_provider) -> None:
                 specs.pop(name, None)
                 continue
             get_renderer(spec.engine)  # validate engine availability now, not at render time
+            _materialize_states(store, spec)  # names/defaults become concrete state paths
             if spec.engine == "sfizz":
                 _validate_sfizz(source, spec)
             elif spec.engine == "vst":
@@ -1595,6 +1741,8 @@ def register(mcp: FastMCP, store_provider) -> None:
         payload = None
         parameter_list = None
         value_list = None
+        detail_states = None
+        detail_default = None
         if detail is not None:
             resolved = _resolve_plugin(detail)
             if resolved is None:
@@ -1606,6 +1754,22 @@ def register(mcp: FastMCP, store_provider) -> None:
                     "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
                 )
             payload = audio.vst_plugin_info(plugin_host, target)
+            key = _plugin_key(target)
+            store: FileStore = store_provider()
+            detail_states = [
+                {
+                    "name": entry["name"],
+                    "path": entry["path"],
+                    "plugin": entry["plugin"],
+                    "plugin_name": entry["plugin_name"],
+                    "saved_at": entry["saved_at"],
+                    "default": entry["default"],
+                    "size_bytes": entry["size_bytes"],
+                }
+                for entry in sorted(_state_library(store).values(), key=lambda item: item["name"])
+                if entry.get("plugin_name") and str(entry["plugin_name"]).casefold() == key
+            ]
+            detail_default = next((entry["name"] for entry in detail_states if entry["default"]), None)
             if parameters or parameter_search is not None:
                 info = audio.vst_plugin_params(plugin_host, target)
                 entries = info.get("parameters") or []
@@ -1622,6 +1786,8 @@ def register(mcp: FastMCP, store_provider) -> None:
             "detail": payload,
             "parameters": parameter_list,
             "parameter_values": value_list,
+            "states": detail_states,
+            "default_state": detail_default,
         }
 
     @mcp.tool(title="Capture a plugin's state", annotations=_CREATES)
@@ -1637,6 +1803,13 @@ def register(mcp: FastMCP, store_provider) -> None:
                 "is added, stored under 'states/' in the output folder."
             ),
         ] = None,
+        make_default: Annotated[
+            bool,
+            Field(
+                description="Make this capture the plugin's default state: specs that give no "
+                "plugin_state/state use it automatically."
+            ),
+        ] = False,
     ) -> results.PluginEditorResult:
         """Open a plugin's own UI on the server's desktop to capture its state once.
 
@@ -1648,7 +1821,9 @@ def register(mcp: FastMCP, store_provider) -> None:
         Syntronik patches). Needs a desktop session: native/desktop servers show the window
         directly, and with a VST bridge configured it opens on the bridge's desktop. The same
         capture from a shell is: vst_host --editor --plugin X --save-state out (with --state to
-        load an existing capture, and --dump-state for a GUI-free snapshot).
+        load an existing capture, and --dump-state for a GUI-free snapshot). With
+        ``make_default`` the capture becomes the plugin's default: specs that name no state use
+        it; later default changes go through set_plugin_default_state.
         """
         resolved = _resolve_plugin(plugin)
         if resolved is None:
@@ -1675,25 +1850,114 @@ def register(mcp: FastMCP, store_provider) -> None:
         except audio.AudioError as exc:
             raise RenderError(str(exc)) from None
         store: FileStore = store_provider()
-        states_dir = store.root / "states"
+        states_dir = _states_dir(store)
         states_dir.mkdir(parents=True, exist_ok=True)
         filename = store.safe_name(
             (state_name or Path(_basename(target)).stem).removesuffix(".state"), ".state"
         )
         state_path = states_dir / filename
+        _write_state_metadata(states_dir, state_path.stem, target, default=make_default)
         try:
             audio.start_vst_editor(host, target, state_path)
         except audio.AudioError as exc:
             raise RenderError(str(exc)) from None
+        note = (
+            "A plugin window opened on the server's desktop. Load the tone/rig/patch in it, then "
+            "close the window: the state is written to state_path. Specs reference it as "
+            "'plugin_state' (a vst instrument) or 'state' (an effect) — by that path or by name."
+        )
+        if make_default:
+            note += " It is now the plugin's default state: specs that name no state use it."
         return {
             "plugin": Path(target).name,
             "state_path": str(state_path),
             "started": True,
-            "note": "A plugin window opened on the server's desktop. Load the tone/rig/patch in "
-            "it, then close the window: the state is written to state_path. Pass that path as "
-            "'plugin_state' (a vst instrument) or 'state' (an effect) in a set_track_instrument "
-            "spec.",
+            "make_default": make_default,
+            "note": note,
         }
+
+    @mcp.tool(title="List plugin states", annotations=_READ_ONLY)
+    def list_plugin_states(
+        plugin: Annotated[
+            str | None,
+            Field(
+                description="Only states captured for this plugin (a path or a name from "
+                "list_plugins), e.g. 'TONEX'."
+            ),
+        ] = None,
+    ) -> results.PluginStatesResult:
+        """List the captured plugin states (the state library) and each plugin's default; read-only.
+
+        States are captured with open_plugin_state_editor and stored in 'states/' in the output
+        folder. A spec's plugin_state/state takes one by name (or path), and a plugin's default
+        is used whenever a spec names no state at all. Returns each state's name, path, plugin,
+        size and saved time, plus a plugin-name -> default-state map.
+        """
+        store: FileStore = store_provider()
+        library = _state_library(store)
+        entries = [
+            {
+                "name": entry["name"],
+                "path": entry["path"],
+                "plugin": entry["plugin"],
+                "plugin_name": entry["plugin_name"],
+                "saved_at": entry["saved_at"],
+                "default": entry["default"],
+                "size_bytes": entry["size_bytes"],
+            }
+            for entry in sorted(library.values(), key=lambda item: item["name"])
+        ]
+        defaults = {
+            str(entry["plugin_name"]): entry["name"]
+            for entry in library.values()
+            if entry["default"] and entry.get("plugin_name")
+        }
+        if plugin is not None:
+            key = _plugin_key(plugin)
+            entries = [entry for entry in entries if str(entry.get("plugin_name") or "").casefold() == key]
+        return {"directory": str(_states_dir(store)), "states": entries, "defaults": defaults}
+
+    @mcp.tool(title="Set a plugin's default state", annotations=_CREATES)
+    def set_plugin_default_state(
+        plugin: Annotated[str, Field(description="Plugin path or a name from list_plugins, e.g. 'TONEX'.")],
+        state: Annotated[
+            str | None,
+            Field(
+                description="State name or path to make this plugin's default; null (or 'none') "
+                "clears the default."
+            ),
+        ] = None,
+    ) -> results.PluginDefaultResult:
+        """Mark a captured state as the plugin's default (or clear it).
+
+        The default is used whenever a spec names this plugin but gives no plugin_state/state
+        ('none' in a spec opts out). The state must already exist in the library. Returns the
+        plugin and the state now used by default (null when cleared).
+        """
+        store: FileStore = store_provider()
+        target = _resolve_plugin(plugin) or plugin
+        directory = _states_dir(store)
+        clearing = state is None or str(state).strip().casefold() == "none"
+        if clearing:
+            for other in directory.glob("*.json"):
+                try:
+                    data = json.loads(other.read_text("utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(data, dict) or not data.get("default"):
+                    continue
+                other_name = data.get("plugin_name") or _basename(str(data.get("plugin") or "")).removesuffix(
+                    ".vst3"
+                )
+                if str(other_name).casefold() == _plugin_key(target):
+                    data["default"] = False
+                    other.write_text(json.dumps(data, indent=1) + "\n", "utf-8")
+            return {"plugin": _basename(target), "default_state": None}
+        resolved = _resolve_state_reference(store, target, str(state))
+        if resolved is None:
+            return {"plugin": _basename(target), "default_state": None}
+        _write_state_metadata(directory, Path(resolved).stem, target, default=True)
+        return {"plugin": _basename(target), "default_state": Path(resolved).stem}
 
     @mcp.tool(title="Bake instruments into MIDI", annotations=_CREATES)
     def bake_instruments(

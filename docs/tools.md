@@ -464,7 +464,7 @@ Each spec has:
 | `sfz` | sfizz: path to a `.sfz` instrument file (with its samples) the server can read; required when `engine` is `"sfizz"` |
 | `plugin` | vst: path to a `.vst3` instrument plugin the server can read (see [list_plugins](#list_plugins)); required when `engine` is `"vst"` |
 | `plugin_preset` | vst: program name or index inside the plugin (from `list_plugins` `detail`); omit for its default state |
-| `plugin_state` | vst: path to a captured plugin state file (see [open_plugin_state_editor](#open_plugin_state_editor)) — a TONEX tone, Guitar Rig rig or SampleTank/Syntronik patch; applied before `plugin_preset`/`plugin_params`, so those can still tweak the captured sound |
+| `plugin_state` | vst: a captured plugin state — **by name from the state library** or by path (see [open_plugin_state_editor](#open_plugin_state_editor)) — a TONEX tone, Guitar Rig rig or SampleTank/Syntronik patch; omit it to use the plugin's **default state** (`"none"` for the bare plugin). Applied before `plugin_preset`/`plugin_params`, so those can still tweak the captured sound |
 | `plugin_params` | vst: parameter values applied after the preset, keyed by parameter name (or index) — a number (`{"Gain": 0.5}`) or a value name for a choice parameter (`{"Osc 1 Type": "Classic"}`). How plugins **without** VST3 programs pick a patch: find the selector with `list_plugins` `parameter_search`, list its values with `parameter_values`, set one by name |
 | `bank` | CC0 bank select, 0–127 (`0` is the melodic bank, `128` the percussion bank — FluidR3's kits); omit to keep the file's bank (a track on MIDI channel 10 always plays the percussion bank) |
 | `program` | MIDI program 0–127: a GM instrument number minus 1, or a drum kit on a drum track; omit to keep the file's program. [`list_instruments`](#list_instruments) returns the real preset table of the soundfont |
@@ -472,7 +472,7 @@ Each spec has:
 | `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part. FluidSynth tracks only — sfizz/vst tracks use the chain's `reverb` stage or a VST effect |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 | `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
-| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}, {"plugin": "/vst/Tonex.vst3", "state": "states/tonex.state"}]`. An effect's `state` is a captured plugin state (see [open_plugin_state_editor](#open_plugin_state_editor)) — how TONEX gets its tone. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
+| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}, {"plugin": "/vst/Tonex.vst3", "state": "tonex_metal"}]`. An effect's `state` is a captured plugin state, by name or path (the plugin's default applies when omitted) — how TONEX gets its tone. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
 | `chain` | Built-in processing chain for the rendered stem — the same stages as the vocal chain (`eq` → `de-esser` → `saturation` → `compressor`) plus an optional convolution `reverb` (no plugin host needed; `{"reverb": {"decay_s": 2.5, "damping": 0.4, "wet": 0.18}}`), applied before VST effects. How instrument grit, filtering, glue and space work without plugins: e.g. `{"eq": {"highpass_hz": 120}, "saturation": {"enabled": true, "drive_db": 9}}` |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:
@@ -562,7 +562,7 @@ Lists the `.vst3` plugins found under `CHORDSMITH_VST_DIR` (Docker: `/vst`) as n
 values `set_track_instrument` takes as `plugin` — plus the resolved `host` binary. With `detail`
 (a path, or a name from the scan) the VST host loads that plugin and returns each of its types:
 vendor, category, whether it is an instrument, its `programs` (the values `plugin_preset` takes),
-parameter count and `latency_samples`. `parameters: true` (optionally with `parameter_search`)
+parameter count and `latency_samples`, plus its captured `states` and `default_state`. `parameters: true` (optionally with `parameter_search`)
 returns the parameter list — index, name, steps, current text — the keys `plugin_params` takes;
 `parameter_values: <index>` dumps a parameter's value strings (a patch selector's list, for
 example) so a value can be picked by name; for parameters with no discrete steps — many VST3
@@ -584,6 +584,20 @@ rigs, SampleTank/Syntronik patches. Needs a desktop session — the headless Lin
 refuses it (capture on a native/desktop server; the state file then renders anywhere). The shell
 equivalent: `vst_host --editor --plugin X.vst3 --save-state out.state` (and `--dump-state FILE`
 for a GUI-free snapshot).
+
+## list_plugin_states
+
+No options, or a `plugin` filter (a path or a name from `list_plugins`). Read-only. Lists the
+state library: each captured `.state` with its name, path, plugin, size and saved time, plus a
+plugin-name → default-state map. A spec's `plugin_state`/effect `state` takes a state by name
+from here; the default is used when a spec names the plugin but no state.
+
+## set_plugin_default_state
+
+`plugin` (a path or a name from `list_plugins`) and `state` (a name from `list_plugin_states`
+or a path); pass `null` (or `"none"`) to clear. Marks the state as the plugin's default, used
+whenever a spec names the plugin but gives no state. Returns the plugin and the state now used
+by default. See [open_plugin_state_editor](#open_plugin_state_editor).
 
 ## list_chord_types
 
