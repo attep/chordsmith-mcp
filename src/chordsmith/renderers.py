@@ -1580,24 +1580,25 @@ def register(mcp: FastMCP, store_provider) -> None:
         parameter_list = None
         value_list = None
         if detail is not None:
-            if host is None:
-                raise RenderError(
-                    "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
-                )
             resolved = _resolve_plugin(detail)
             if resolved is None:
                 raise RenderError(f"Plugin '{detail}' is not a path or a scanned name.")
             target = resolved
-            payload = audio.vst_plugin_info(host, target)
+            plugin_host = audio.host_for_plugin(target)
+            if plugin_host is None:
+                raise RenderError(
+                    "The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH."
+                )
+            payload = audio.vst_plugin_info(plugin_host, target)
             if parameters or parameter_search is not None:
-                info = audio.vst_plugin_params(host, target)
+                info = audio.vst_plugin_params(plugin_host, target)
                 entries = info.get("parameters") or []
                 if parameter_search:
                     needle = parameter_search.lower()
                     entries = [entry for entry in entries if needle in str(entry.get("name", "")).lower()]
                 parameter_list = entries[:500]
             if parameter_values is not None:
-                value_list = audio.vst_param_values(host, target, parameter_values)
+                value_list = audio.vst_param_values(plugin_host, target, parameter_values)
         return {
             "host": host,
             "directory": directory,

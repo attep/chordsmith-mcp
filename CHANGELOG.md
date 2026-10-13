@@ -12,6 +12,15 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.6] - 2026-10-13
+
+### Fixed
+
+- `list_plugins` with `detail` (and its `parameters`/`parameter_values` dumps) now runs against
+  the plugin's own host: local Linux plugins are described by this server, Windows plugins by
+  the bridge. Before, a bridged server sent local plugins to the bridge and got a bogus
+  "does not exist".
+
 ## [0.24.5] - 2026-10-13
 
 Both plugin worlds in one session: VST routing is per plugin, not per server.

@@ -151,3 +151,32 @@ async def test_bridge_tools_see_both_worlds(store, monkeypatch, fake_bridge, tmp
     body = editor.structuredContent
     assert body["started"] is True
     assert body["state_path"].endswith("demo.state")
+
+
+async def test_bridge_detail_uses_the_per_plugin_host(store, monkeypatch, fake_bridge, tmp_path):
+    local_dir = tmp_path / "vst"
+    local_dir.mkdir()
+    (local_dir / "Local.vst3").write_bytes(b"x")
+    monkeypatch.setenv("CHORDSMITH_VST_DIR", str(local_dir))
+    monkeypatch.setenv("CHORDSMITH_VST_HOST", "/fake/local-host")
+    hosts: list[str] = []
+
+    def fake_info(host, target):
+        hosts.append(host)
+        return {"types": [{"name": "Local", "programs": [], "is_instrument": True}]}
+
+    def fake_params(host, target):
+        hosts.append(host)
+        return {"parameters": []}
+
+    monkeypatch.setattr(audio, "vst_plugin_info", fake_info)
+    monkeypatch.setattr(audio, "vst_plugin_params", fake_params)
+
+    local = await _call("list_plugins", {"detail": str(local_dir / "Local.vst3"), "parameters": True})
+    assert not local.isError, local.content[0].text
+    assert hosts == ["/fake/local-host"]
+
+    hosts.clear()
+    bridged = await _call("list_plugins", {"detail": DRUM, "parameters": True})
+    assert not bridged.isError, bridged.content[0].text
+    assert hosts == [fake_bridge]
