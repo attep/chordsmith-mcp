@@ -28,11 +28,12 @@ DESCRIPTION_BUDGET_BYTES = 22 * 1024
 # chains, bus, returns, master; the description budget moved 17 -> 19 KB in the same patch),
 # 152 KB (v0.21.0: voicebank soft controls, air layer, de-esser/saturation enablement),
 # 160 KB (v0.22.0: swing/humanize on add_track, the sfizz engine, SFZ libraries), 164 KB
-# (v0.23.0: the VST engine, per-track effect chains, list_plugins) and 232 KB (v0.24.0:
+# (v0.23.0: the VST engine, per-track effect chains, list_plugins), 232 KB (v0.24.0:
 # instrument chains + copy_from layers, and the mix job tool — MCP schemas are per-tool, so the
-# big mix schema is duplicated by design; descriptions moved 20 -> 22 KB in the same patch).
+# big mix schema is duplicated by design; descriptions moved 20 -> 22 KB in the same patch) and
+# 240 KB (v0.24.8: the chain's plugin-free reverb stage; the chain schema is duplicated too).
 # The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 232 * 1024
+PAYLOAD_CEILING_BYTES = 240 * 1024
 
 
 @pytest.fixture

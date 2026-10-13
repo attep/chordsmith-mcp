@@ -58,6 +58,21 @@ Notes:
 - Linux plugins on the headless Docker server cannot be captured (no desktop); use their
   Windows builds through the bridge when a GUI pick is needed.
 
+## Reverb on any track (no plugin needed)
+
+Any stem can take a convolution reverb from the built-in chain — every engine, no plugin host:
+
+```json
+{"chain": {"reverb": {"decay_s": 2.5, "damping": 0.4, "wet": 0.18}}}
+```
+
+`decay_s` (0.1–8), `predelay_ms` (0–200) and `damping` (0 = bright, 1 = dark) are the same room
+model the vocal-mix returns use; `wet` is the share mixed in (0 = dry). The tail rings past the
+stem's last note, so the combined mix runs slightly longer (like the vocal returns).
+FluidSynth tracks can also use `reverb_send`/`chorus_send` (engine effects); vst/sfizz tracks
+cannot — use the chain reverb above or a VST effect with a dry/wet (e.g. Fame Studio Reverb,
+CSR Hall's `Mix`).
+
 ## Recipes
 
 **Drum kit** (MODO DRUM via the bridge):

@@ -323,9 +323,10 @@ class InstrumentSpec(BaseModel):
     chain: VocalChain | None = Field(
         None,
         description="Built-in chain for this track's rendered stem — the same stages as the "
-        "vocal chain (EQ, de-esser, saturation, compressor), applied before VST effects. How "
-        "instrument grit, filtering and glue work without a plugin host (e.g. saturate a "
-        "copied sub layer for grit).",
+        "vocal chain (EQ, de-esser, saturation, compressor) plus an optional convolution "
+        "'reverb' (no plugin needed), applied before VST effects. How instrument grit, "
+        "filtering, glue and space work without a plugin host (e.g. saturate a copied sub "
+        "layer for grit).",
     )
     gain_db: float = Field(
         0.0,
@@ -1005,7 +1006,7 @@ def _validate_sfizz(source: Path, spec: InstrumentSpec) -> None:
     if spec.reverb_send is not None or spec.chorus_send is not None:
         raise RenderError(
             "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; sfizz has none — "
-            "use the mix tools' returns for shared effects."
+            "use the chain's 'reverb' stage or a VST reverb effect."
         )
     if spec.sections:
         resolved = read_sections(source)
@@ -1161,7 +1162,8 @@ def _validate_vst(source: Path, spec: InstrumentSpec) -> None:
     if spec.reverb_send is not None or spec.chorus_send is not None:
         raise RenderError(
             "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; a vst track has "
-            "none — use its own effects chain or the mix tools' returns."
+            "none — use a VST reverb effect with a dry/wet (e.g. Fame Studio Reverb) or the "
+            "chain's 'reverb' stage."
         )
     if spec.sections:
         resolved = read_sections(source)

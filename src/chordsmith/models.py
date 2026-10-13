@@ -247,13 +247,42 @@ class VocalSends(BaseModel):
     delay_db: float | None = Field(None, ge=-60.0, le=12.0, description="Delay send level; null = no send.")
 
 
+class ReverbReturn(BaseModel):
+    """The shared reverb: a convolution room with decay, pre-delay and damping."""
+
+    decay_s: float = Field(2.0, ge=0.1, le=8.0, description="Decay length in seconds.")
+    predelay_ms: float = Field(20.0, ge=0.0, le=200.0, description="Pre-delay in ms (space before the room).")
+    damping: float = Field(0.5, ge=0.0, le=1.0, description="High-frequency damping: 0 bright, 1 dark.")
+
+
+class ChainReverb(ReverbReturn):
+    """A track-chain reverb: the shared room plus its wet fraction.
+
+    Convolves a rendered stem with a generated impulse response and mixes the room in at
+    ``wet`` — any engine's stem can take it, no plugin needed. Vocal *chains* use the mix
+    tools' reverb return instead; this stage runs on stems.
+    """
+
+    wet: float = Field(
+        0.2, ge=0.0, le=1.0, description="Share of the room mixed in (0 = dry, 1 = all wet), e.g. 0.35."
+    )
+
+
 class VocalChain(BaseModel):
-    """One voice's processing chain: EQ, then compressor (de-esser/saturation come later)."""
+    """One track's processing chain: EQ, de-esser, saturation, compressor, optional reverb.
+
+    Shared by vocal chains and instrument stems; the reverb stage applies to rendered stems.
+    """
 
     eq: VocalEq | None = None
     compressor: VocalCompressor | None = None
     deesser: VocalDeesser | None = None
     saturation: VocalSaturation | None = None
+    reverb: ChainReverb | None = Field(
+        None,
+        description="Convolution reverb on the rendered stem (works for every engine, no plugin): "
+        "decay_s/predelay_ms/damping from the shared room model plus 'wet'.",
+    )
 
 
 class LimiterSettings(BaseModel):
@@ -272,14 +301,6 @@ class VocalBus(BaseModel):
     air_layer: AirLayer | None = Field(
         None, description="Optional breathy air layer under the summed voices (follows the singing)."
     )
-
-
-class ReverbReturn(BaseModel):
-    """The shared reverb: a convolution room with decay, pre-delay and damping."""
-
-    decay_s: float = Field(2.0, ge=0.1, le=8.0, description="Decay length in seconds.")
-    predelay_ms: float = Field(20.0, ge=0.0, le=200.0, description="Pre-delay in ms (space before the room).")
-    damping: float = Field(0.5, ge=0.0, le=1.0, description="High-frequency damping: 0 bright, 1 dark.")
 
 
 class DelayReturn(BaseModel):

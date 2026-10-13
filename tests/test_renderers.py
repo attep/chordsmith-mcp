@@ -13,7 +13,7 @@ import mido
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from chordsmith import audio, renderers, server
+from chordsmith import audio, renderers, server, singing
 
 pytestmark = pytest.mark.anyio
 
@@ -1011,6 +1011,41 @@ async def test_stage0_backing_renders_stay_byte_identical(store):
         rendered = store.root / result.structuredContent["filename"]
         digest = hashlib.sha256(rendered.read_bytes()).hexdigest()
         assert digest == manifest["files"][reference]["sha256"]
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_stem_chain_reverb_adds_a_tail(tmp_path):
+    from chordsmith.models import VocalChain
+
+    stem = tmp_path / "stem.wav"
+    _write_tiny_wav(stem)
+    before = audio.wav_duration(stem)
+    singing.apply_stem_chain(stem, VocalChain(reverb={"decay_s": 0.5, "predelay_ms": 0.0, "wet": 0.3}))
+    after = audio.wav_duration(stem)
+    assert after > before + 0.3, (before, after)
+
+    dry = tmp_path / "dry.wav"
+    _write_tiny_wav(dry)
+    original = dry.read_bytes()
+    singing.apply_stem_chain(dry, VocalChain(reverb={"decay_s": 0.5, "wet": 0.0}))
+    assert dry.read_bytes() == original  # wet 0 leaves the stem untouched
+
+
+@pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")
+def test_voice_chain_reverb_warns_instead_of_applying(tmp_path):
+    from chordsmith.models import VocalChain
+    from chordsmith.singing import ProcessedVoice, _render_processed_vocals
+
+    voice = tmp_path / "voice.wav"
+    _write_tiny_wav(voice)
+    processed = _render_processed_vocals(
+        [ProcessedVoice(name="lead", path=voice, chain=VocalChain(reverb={"wet": 0.2}))],
+        None,
+        None,
+        None,
+        tmp_path,
+    )
+    assert any("instrument stems" in warning for warning in processed.warnings), processed.warnings
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")

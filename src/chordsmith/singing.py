@@ -1631,15 +1631,45 @@ def _voice_chain_filters(voice: ProcessedVoice, include_compressor: bool = True)
 def apply_stem_chain(stem: Path, chain: VocalChain | None) -> None:
     """Run a spec's built-in chain over its rendered stem, in place (via a temp file).
 
-    Instrument EQ/saturation/compression without a plugin host; any engine's stem can take it,
-    before VST effect chains.
+    EQ/saturation/compression and an optional convolution reverb without a plugin host; any
+    engine's stem can take it, before VST effect chains.
     """
     filters = chain_filters(chain)
-    if not filters:
+    reverb = chain.reverb if chain is not None else None
+    if reverb is not None and reverb.wet <= 0.0:
+        reverb = None
+    if not filters and reverb is None:
         return
     target = stem.with_name(stem.stem + ".chain.wav")
     try:
-        _ffmpeg(["-y", "-loglevel", "error", "-i", str(stem), "-af", ",".join(filters), str(target)])
+        if reverb is None:
+            _ffmpeg(["-y", "-loglevel", "error", "-i", str(stem), "-af", ",".join(filters), str(target)])
+        else:
+            ir_path = _reverb_ir(stem.parent, reverb)
+            # afir's output is only as long as its input: pad with the IR's length first, so the
+            # tail rings past the stem's last sample (the combined mix then runs slightly longer).
+            pad = _wav_duration(ir_path)
+            steps = [f"[0:a]{','.join(filters)}[dry]" if filters else "[0:a]anull[dry]"]
+            steps.append("[dry]asplit=2[dryout][wetin]")
+            steps.append(f"[wetin]apad=pad_dur={pad:.3f}[wpadded]")
+            steps.append(f"[wpadded][1:a]afir=wet={reverb.wet:g}:dry=0:gtype=none[wet]")
+            steps.append("[dryout][wet]amix=inputs=2:duration=longest:normalize=0[out]")
+            _ffmpeg(
+                [
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(stem),
+                    "-i",
+                    str(ir_path),
+                    "-filter_complex",
+                    ";".join(steps),
+                    "-map",
+                    "[out]",
+                    str(target),
+                ]
+            )
         target.replace(stem)
     except SingingError as exc:
         raise renderers.RenderError(str(exc)) from None
@@ -1861,6 +1891,14 @@ def _render_processed_vocals(
 ) -> ProcessedVocals:
     """Run the staged vocal pipeline: per-voice chains, sends, the bus, and the returns."""
     warnings: list[str] = []
+    chained_reverb = [
+        voice.name for voice in voices if voice.chain is not None and voice.chain.reverb is not None
+    ]
+    if chained_reverb:
+        warnings.append(
+            "Voice chains set 'reverb' (" + ", ".join(chained_reverb) + "); it applies to "
+            "instrument stems — for voices use the mix reverb return or a voice's reverb send."
+        )
     gain_reduction: dict[str, float] = {}
     ir_path: Path | None = None
     needs_ir = bool(returns is not None and returns.reverb is not None) or any(

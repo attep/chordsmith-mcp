@@ -12,6 +12,21 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.8] - 2026-10-13
+
+### Added
+
+- The built-in `chain` gains an optional convolution **`reverb`** stage (the shared room model
+  plus `wet`): any engine's stem gets plugin-free space, built with the same generated impulse
+  response as the vocal returns. The tail rings past the last note like the vocal mixes;
+  `wet: 0` leaves the stem byte-identical. Voice chains warn that stem reverb does not apply to
+  singing — the mix tools' reverb return is the voice path.
+
+### Changed
+
+- The 'reverb_send'/'chorus_send' rejections for vst/sfizz tracks now name the working
+  alternatives: a VST effect with a dry/wet (e.g. Fame Studio Reverb) or the chain's `reverb`.
+
 ## [0.24.7] - 2026-10-13
 
 ### Added
