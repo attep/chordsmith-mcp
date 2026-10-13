@@ -340,7 +340,7 @@ async def test_vst_plugin_state_round_trip(store, tmp_path):
         "set_track_instrument",
         {"filename": song, "tracks": {"Melody": missing_state}},
     )
-    assert missing.isError and "does not exist" in missing.content[0].text
+    assert missing.isError and "is not a file" in missing.content[0].text
 
 
 async def test_vst_default_state_applies_unless_opted_out(store):
