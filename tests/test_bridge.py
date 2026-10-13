@@ -174,7 +174,7 @@ async def test_bridge_detail_uses_the_per_plugin_host(store, monkeypatch, fake_b
 
     local = await _call("list_plugins", {"detail": str(local_dir / "Local.vst3"), "parameters": True})
     assert not local.isError, local.content[0].text
-    assert hosts == ["/fake/local-host"]
+    assert set(hosts) == {"/fake/local-host"}  # info + params both ran locally
 
     hosts.clear()
     bridged = await _call("list_plugins", {"detail": DRUM, "parameters": True})
