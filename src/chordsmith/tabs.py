@@ -90,9 +90,7 @@ def _convert_bridge(data: bytes, suffix: str, url: str) -> bytes:
     headers = {"X-Chordsmith-Token": token} if token else {}
     payload = {"name": f"input{suffix}", "data": base64.b64encode(data).decode()}
     try:
-        response = httpx.post(
-            f"{url}/tab", json=payload, headers=headers, timeout=TAB_TIMEOUT_SECONDS + 30
-        )
+        response = httpx.post(f"{url}/tab", json=payload, headers=headers, timeout=TAB_TIMEOUT_SECONDS + 30)
     except httpx.HTTPError as exc:
         raise TabError(f"The host bridge at {url} is unreachable: {exc}") from None
     if response.status_code != 200:
@@ -105,11 +103,7 @@ def _convert_bridge(data: bytes, suffix: str, url: str) -> bytes:
         raise TabError("The host bridge answered with non-JSON.") from None
     encoded = result.get("midi")
     if not encoded:
-        detail = (
-            result.get("error")
-            or str(result.get("stderr") or "").strip()[-400:]
-            or "no MIDI returned"
-        )
+        detail = result.get("error") or str(result.get("stderr") or "").strip()[-400:] or "no MIDI returned"
         raise TabError(f"Tab conversion failed on the host bridge: {detail}")
     try:
         midi = base64.b64decode(encoded, validate=True)
