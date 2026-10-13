@@ -10,7 +10,7 @@ engine details live in [VST plugins](vst.md); this page is the workflow.
 |---|---|---|
 | **Docker / public server** (+ VST bridge) | FluidSynth GM, sfizz, this image's Linux `.vst3`s (Surge XT, Odin2, Cardinal, Vital, DecentSampler) **and** — through the bridge — every Windows plugin | — |
 | **Windows-native server** | sfizz + all Windows `.vst3`s (MODO DRUM/BASS, TONEX, Guitar Rig, T-RackS, MixBox…) | no FluidSynth (GM parts render on the Docker server) |
-| **Bridge worker** (`scripts/vst_bridge.py` on Windows) | Executes `vst_host` jobs (scans, renders, states, editor windows) for any server that sets `CHORDSMITH_VST_BRIDGE_URL` | — |
+| **Bridge worker** (`scripts/vst_bridge.py` on Windows) | Executes `vst_host` jobs (scans, renders, states, editor windows) and converts Guitar Pro/MusicXML tabs to MIDI (`--musescore`) for any server that sets `CHORDSMITH_VST_BRIDGE_URL` | — |
 
 Routing is **per plugin path**: a Windows path (`C:\…\X.vst3`) goes to the bridge; a local path
 (`/vst/X.vst3`) runs on the server itself. One song can use both; an effect chain may even mix

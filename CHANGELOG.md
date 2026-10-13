@@ -12,6 +12,25 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.25.0] - 2026-10-13
+
+### Added
+
+- **`import_tab` — Guitar Pro / MusicXML import**: a tab (`.gp3`/`.gp4`/`.gp5`/`.gp`/`.gpx`,
+  or MusicXML/MSCZ) is converted to MIDI with MuseScore and imported like `import_midi` —
+  the same report (tracks with channels/programs/notes, tempo map, time signatures, markers,
+  warnings) plus `converted_from`, `converted_format`, `converter` and `conversion_seconds`.
+  The conversion runs locally (`CHORDSMITH_MUSESCORE` pointing at the executable) or on the
+  host worker (`scripts/vst_bridge.py --musescore`, reached through
+  `CHORDSMITH_VST_BRIDGE_URL`), so a Docker server without MuseScore still imports tabs
+  through the Windows machine that runs the VST bridge; with neither configured the error
+  names both setups. The tab bytes themselves are not stored.
+
+### Changed
+
+- Budgets raised deliberately: tool count 38 -> 39 and descriptions 23 -> 24 KB (the
+  `import_tab` tool).
+
 ## [0.24.9] - 2026-10-13
 
 ### Added

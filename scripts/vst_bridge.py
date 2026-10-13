@@ -18,12 +18,18 @@ Endpoints (all but /healthz need the X-Chordsmith-Token header):
     POST /exists {"paths": [...]}    -> {"exists": {path: bool}}
     POST /editor {"args": [...]}     -> {"ok": true} (spawns vst_host detached; the window
                                         opens on this machine's desktop)
+    POST /tab    {"name": "riff.gpx", "data": <base64>}
+                                     -> {"exit", "midi": <base64>, "stdout", "stderr"}
+        Converts a Guitar Pro (.gp3-.gp5/.gp/.gpx) or MusicXML/MSCZ tab to MIDI with
+        MuseScore. Needs --musescore <MuseScore4.exe>; without it the endpoint reports
+        that no converter is configured.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import json
 import os
 import shutil
@@ -39,6 +45,8 @@ FILE_OUTPUT_FLAGS = {"--wav", "--out", "--save-state", "--dump-state"}
 FILE_FLAGS = FILE_INPUT_FLAGS | FILE_OUTPUT_FLAGS
 MAX_BODY = 512 * 1024 * 1024
 HOST_TIMEOUT_SECONDS = 1800
+TAB_TIMEOUT_SECONDS = 180
+MAX_TAB_BYTES = 16 * 1024 * 1024
 MAX_SCAN = 500
 
 
@@ -115,6 +123,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send(200, {"exists": {path: os.path.exists(path) for path in paths}})
         elif route == "/editor":
             self._send(200, self._spawn_editor([str(item) for item in payload.get("args") or []]))
+        elif route == "/tab":
+            self._send(200, self._convert_tab(payload))
         else:
             self._send(404, {"error": "not found"})
 
@@ -185,6 +195,79 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return {"ok": False, "error": f"could not run {self.server.host_exe}: {exc}"}
         return {"ok": True}
 
+    def _convert_tab(self, payload: dict) -> dict:
+        """Convert a tab to MIDI with MuseScore (--musescore); never touches the caller's disk."""
+        musescore = self.server.musescore
+        if not musescore:
+            return {
+                "exit": -1,
+                "midi": None,
+                "error": "no MuseScore configured on this bridge; restart it with --musescore <path>",
+                "stdout": "",
+                "stderr": "",
+            }
+        name = str(payload.get("name") or "tab.gpx")
+        suffix = Path(name).suffix.lower() or ".gp"
+        try:
+            data = base64.b64decode(str(payload.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            return {"exit": -1, "midi": None, "error": "data is not valid base64", "stdout": "", "stderr": ""}
+        if not data or len(data) > MAX_TAB_BYTES:
+            return {
+                "exit": -1,
+                "midi": None,
+                "error": f"empty or oversized tab ({len(data)} bytes; limit {MAX_TAB_BYTES})",
+                "stdout": "",
+                "stderr": "",
+            }
+        scratch = tempfile.mkdtemp(prefix="cs-tab-")
+        try:
+            source = Path(scratch) / f"input{suffix}"
+            target = Path(scratch) / "output.mid"
+            source.write_bytes(data)
+            try:
+                process = subprocess.run(
+                    [musescore, "-o", str(target), str(source)],
+                    capture_output=True,
+                    text=True,
+                    timeout=TAB_TIMEOUT_SECONDS,
+                    cwd=scratch,
+                )
+            except subprocess.TimeoutExpired:
+                return {
+                    "exit": -1,
+                    "midi": None,
+                    "error": f"MuseScore timed out after {TAB_TIMEOUT_SECONDS}s",
+                    "stdout": "",
+                    "stderr": "",
+                }
+            except OSError as exc:
+                return {
+                    "exit": -1,
+                    "midi": None,
+                    "error": f"could not run MuseScore ({musescore}): {exc}",
+                    "stdout": "",
+                    "stderr": "",
+                }
+            stdout = process.stdout[-2000:]
+            stderr = process.stderr[-2000:]
+            if not target.is_file():
+                return {
+                    "exit": process.returncode,
+                    "midi": None,
+                    "error": "MuseScore produced no MIDI (see stderr)",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }
+            return {
+                "exit": process.returncode,
+                "midi": base64.b64encode(target.read_bytes()).decode(),
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ChordSmith VST bridge (Windows worker)")
@@ -196,6 +279,11 @@ def main() -> None:
     )
     parser.add_argument("--bind", default=os.environ.get("CHORDSMITH_VST_BRIDGE_BIND", "0.0.0.0"))
     parser.add_argument("--token", default=os.environ.get("CHORDSMITH_VST_BRIDGE_TOKEN", ""))
+    parser.add_argument(
+        "--musescore",
+        default=os.environ.get("CHORDSMITH_MUSESCORE", ""),
+        help="Optional MuseScore executable for /tab conversion (Guitar Pro/MusicXML -> MIDI).",
+    )
     args = parser.parse_args()
     if not args.token:
         parser.error("--token (or CHORDSMITH_VST_BRIDGE_TOKEN) is required; the bridge runs plugins")
@@ -204,8 +292,13 @@ def main() -> None:
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
     server.token = args.token
     server.host_exe = args.host_exe
+    server.musescore = args.musescore or None
     server.workdir = str(Path(args.host_exe).parent)
     print(f"vst_bridge on http://{args.bind}:{args.port} -> {args.host_exe}", flush=True)
+    if server.musescore:
+        print(f"tab conversion (POST /tab) via {server.musescore}", flush=True)
+    else:
+        print("tab conversion disabled (pass --musescore to enable POST /tab)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

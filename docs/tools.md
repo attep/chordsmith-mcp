@@ -347,6 +347,28 @@ events in several tracks, missing tempo/meter events, SysEx events (stored but i
 rendering), no notes. The imported file then works with the whole workflow — analyze,
 sections, per-track instruments, stems and the singing tools.
 
+## import_tab
+
+Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI and imports it — how a real, written
+arrangement (a riff, a full song) becomes the ground truth for a build. Accepted suffixes:
+`.gp3`/`.gp4`/`.gp5`/`.gp`/`.gpx` (Guitar Pro 3–7) and `.musicxml`/`.xml`/`.mxl`/`.mscz`. The
+conversion runs with MuseScore — locally when `CHORDSMITH_MUSESCORE` points at the executable,
+or on the host worker (`scripts/vst_bridge.py --musescore`, reached through
+`CHORDSMITH_VST_BRIDGE_URL`) when this server itself has no MuseScore; with neither configured
+the error explains both setups.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Name of the tab, e.g. `"riff.gpx"`; the MIDI is stored as `<name>.mid` |
+| `data_base64` (required) | The tab bytes, base64-encoded (up to 5 MB decoded) |
+| `overwrite` | Replace an existing `.mid` of that name |
+
+The result is the [import_midi](#import_midi) report plus `converted_from`,
+`converted_format`, `converter` and `conversion_seconds`; the tab bytes themselves are not
+kept. MuseScore writes the tab's own tempo automation into the MIDI — a tab may carry stepped
+tempo shifts (check `tempo_changes`; smooth them if they wobble). See
+[guitarpro.md](guitarpro.md) for the full grounding recipe.
+
 ## import_audio
 
 Imports an audio file (`.wav` or `.mp3`) into the output folder — a vocal take, a render made

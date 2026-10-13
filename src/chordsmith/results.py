@@ -463,6 +463,13 @@ class ImportResult(TypedDict):
     warnings: list[str]
 
 
+class ImportTabResult(ImportResult):
+    converted_from: str
+    converted_format: str
+    converter: str
+    conversion_seconds: float
+
+
 class GetFileResult(_FileIdentity, DeliveryFields):
     mime_type: str
 

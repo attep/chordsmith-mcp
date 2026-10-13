@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 import wave
 from collections.abc import Callable
 from pathlib import Path
@@ -36,6 +37,7 @@ from chordsmith import (
     results,
     sections,
     singing,
+    tabs,
 )
 from chordsmith import sections as sections_module
 from chordsmith.analysis import analyze_file, describe_midi
@@ -749,6 +751,60 @@ def import_midi(
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "mime_type": "audio/midi",
+        **describe_midi(midi),
+    }
+
+
+@mcp.tool(title="Import tab", annotations=CREATES)
+def import_tab(
+    filename: Annotated[str, Field(description="Name for the imported file, e.g. 'riff.gpx' or 'song.gp5'.")],
+    data_base64: Annotated[str, Field(description="The tab bytes, base64-encoded (up to 5 MB decoded).")],
+    overwrite: Overwrite = False,
+) -> results.ImportTabResult:
+    """Convert a Guitar Pro tab (or MusicXML/MSCZ score) to MIDI and import it.
+
+    Accepts Guitar Pro 3-7 (.gp3/.gp4/.gp5/.gp/.gpx) and MusicXML/MSCZ
+    (.musicxml/.xml/.mxl/.mscz). The conversion runs with MuseScore — locally
+    (set CHORDSMITH_MUSESCORE to the executable) or on the host worker
+    (scripts/vst_bridge.py started with --musescore, reached through
+    CHORDSMITH_VST_BRIDGE_URL); with neither configured the error explains both setups. The
+    derived MIDI is stored as '<name>.mid' (the tab bytes themselves are not kept) and the
+    result is the same report as import_midi — tracks with channels/programs/note counts,
+    every tempo and time-signature change, markers and warnings — plus which converter
+    produced it. The file then works with the normal workflow: analyze_midi,
+    set_track_instrument, render_audio (stems) and the singing tools.
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix not in tabs.TAB_SUFFIXES:
+        accepted = ", ".join(sorted(tabs.TAB_SUFFIXES))
+        raise ValueError(
+            f"Import a Guitar Pro or MusicXML/MSCZ file ({accepted}); MIDI files go through import_midi."
+        )
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("data_base64 is not valid base64.") from None
+    if len(data) > MAX_IMPORT_BYTES:
+        raise ValueError(f"The file is {len(data)} bytes; the import limit is {MAX_IMPORT_BYTES} bytes.")
+    started = time.monotonic()
+    try:
+        midi_bytes, converter = tabs.convert_tab(data, suffix)
+    except tabs.TabError as exc:
+        raise ValueError(str(exc)) from None
+    midi = mido.MidiFile(file=io.BytesIO(midi_bytes))
+    with store.claimed_path(Path(filename).stem + ".mid", "imported", overwrite) as target:
+        target.write_bytes(midi_bytes)
+    return {
+        "filename": target.name,
+        "path": str(target),
+        "uri": f"midi://{target.name}",
+        "size_bytes": len(midi_bytes),
+        "sha256": hashlib.sha256(midi_bytes).hexdigest(),
+        "mime_type": "audio/midi",
+        "converted_from": filename,
+        "converted_format": suffix,
+        "converter": converter,
+        "conversion_seconds": round(time.monotonic() - started, 2),
         **describe_midi(midi),
     }
 

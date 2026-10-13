@@ -71,7 +71,8 @@ say so.
 ## Tool map
 
 - **Files**: `list_generated_files`, `get_midi_file`, `get_file`, `rename_midi_file`,
-  `delete_midi_file`, `create_empty_file`, `remove_track`, `import_midi`, `import_audio`
+  `delete_midi_file`, `create_empty_file`, `remove_track`, `import_midi`, `import_audio`,
+  `import_tab`
 - **Compose**: `create_chord_progression`, `create_progression_from_roman`, `add_track`,
   `transpose_midi`, `set_song_sections`, `list_chord_types`
 - **Instruments & render**: `set_track_instrument`, `list_instruments`, `bake_instruments`,
@@ -135,6 +136,12 @@ say so.
 - **Audible lows**: a 30–50 Hz sine disappears on phones. Layer it: `add_track(copy_from=...,
   transpose_semitones=12)` for an octave-up layer, then again with a square/saw preset
   (`instrument` 80/81) plus a spec `chain` (`saturation`) for grit — never ship a bare sub sine.
+- **Grounding on a tab**: `import_tab` (Guitar Pro/MusicXML via MuseScore — locally with
+  `CHORDSMITH_MUSESCORE`, or the host worker started with `--musescore`) turns a written
+  arrangement into the bed; then `copy_from` layers, per-track specs and the state library
+  build the parts on top. Read the imported `tempo_changes` first: stepped "loose belt"
+  automation needs smoothing before building, and vocals must be re-rendered after a tempo
+  fix. Full recipe: `docs/guitarpro.md`.
 - **Voices**: VOICEVOX sings Japanese kana or a hum; its whisper styles are Japanese-only and
   mostly air (they drift off pitch). English needs a DiffSinger voicebank the user provides.
   DiffSinger soft controls: `velocity`, `gender` (0 = the bank's own character), `expr`, `steps`,
