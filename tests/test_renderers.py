@@ -43,6 +43,56 @@ async def _call(name, args):
         return await client.call_tool(name, args)
 
 
+def _marker_midi(path, sections=("Intro", "Verse")):
+    midi = mido.MidiFile()
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+    track.append(mido.MetaMessage("track_name", name="song", time=0))
+    for name in sections:
+        track.append(mido.MetaMessage("marker", text=f"section: {name}", time=0))
+        track.append(mido.Message("note_on", note=60, velocity=90, time=0))
+        track.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    midi.save(str(path))
+
+
+def test_vst_section_overrides_are_gain_only(monkeypatch, tmp_path):
+    source = tmp_path / "song.mid"
+    _marker_midi(source)
+    monkeypatch.setattr(renderers, "_plugin_exists", lambda path: True)
+    monkeypatch.setattr(audio, "host_for_plugin", lambda plugin: "host")
+    monkeypatch.setattr(
+        audio, "vst_plugin_info", lambda host, plugin: {"types": [{"is_instrument": True, "programs": []}]}
+    )
+
+    spec = renderers.InstrumentSpec(
+        engine="vst", plugin=r"C:\Plugins\Synth.vst3", sections={"Intro": {"gain_db": -3.0}}
+    )
+    renderers._validate_vst(source, spec)  # a gain-only override passes
+
+    bad = renderers.InstrumentSpec(
+        engine="vst", plugin=r"C:\Plugins\Synth.vst3", sections={"Verse": {"program": 4}}
+    )
+    with pytest.raises(renderers.RenderError, match="gain_db override"):
+        renderers._validate_vst(source, bad)
+
+    unknown = renderers.InstrumentSpec(
+        engine="vst", plugin=r"C:\Plugins\Synth.vst3", sections={"Chorus": {"gain_db": -2.0}}
+    )
+    with pytest.raises(renderers.RenderError, match="Unknown section"):
+        renderers._validate_vst(source, unknown)
+
+    plain = tmp_path / "plain.mid"
+    midi = mido.MidiFile()
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+    track.append(mido.MetaMessage("track_name", name="song", time=0))
+    track.append(mido.Message("note_on", note=60, velocity=90, time=0))
+    track.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    midi.save(str(plain))
+    with pytest.raises(renderers.RenderError, match="no section map"):
+        renderers._validate_vst(plain, spec)
+
+
 async def test_list_plugins_keeps_bundles_not_their_inner_files(monkeypatch, tmp_path):
     # A Windows VST3 bundle is a directory with a same-named .vst3 inside it; the scan must list
     # the plugin once (the bundle), not also the file inside it (the live IK folder showed both).

@@ -12,6 +12,15 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.24.7] - 2026-10-13
+
+### Added
+
+- vst tracks take **gain-only section overrides**, like sfizz: `sections: {"Drop 1": {"gain_db": 6}}`
+  shapes a plugin layer's level per section, applied to the rendered stem, so plugin basses can
+  follow a song's drops. Program/bank/preset overrides stay fluidsynth-only and are rejected with
+  a clear message.
+
 ## [0.24.6] - 2026-10-13
 
 ### Fixed

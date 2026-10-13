@@ -1142,7 +1142,7 @@ def _resolve_sets(plugin: str, params: dict[str, float | str] | None) -> list[tu
     return sets
 
 
-def _validate_vst(spec: InstrumentSpec) -> None:
+def _validate_vst(source: Path, spec: InstrumentSpec) -> None:
     """Check a vst spec: a readable .vst3 instrument that loads, and no other engine's options."""
     if spec.plugin is None:
         raise RenderError("engine='vst' needs 'plugin': the path to a .vst3 plugin.")
@@ -1164,7 +1164,21 @@ def _validate_vst(spec: InstrumentSpec) -> None:
             "none — use its own effects chain or the mix tools' returns."
         )
     if spec.sections:
-        raise RenderError("Section overrides are not supported for vst tracks yet.")
+        resolved = read_sections(source)
+        if not resolved:
+            raise RenderError(
+                "The file has no section map; call set_song_sections before adding section overrides."
+            )
+        available = [section.name for section in resolved]
+        unknown = sorted(set(spec.sections) - set(available))
+        if unknown:
+            raise RenderError(f"Unknown section(s) {', '.join(unknown)}. Sections: {', '.join(available)}.")
+        for section_name, override in spec.sections.items():
+            if override.program is not None or override.bank is not None or override.preset is not None:
+                raise RenderError(
+                    f"Section '{section_name}' changes program/bank/preset; a vst track only takes "
+                    "a gain_db override (the gain is applied to the rendered stem)."
+                )
     host = audio.host_for_plugin(spec.plugin)
     if host is None:
         raise RenderError("The VST host is not installed; set CHORDSMITH_VST_HOST or put vst_host on PATH.")
@@ -1380,7 +1394,7 @@ def register(mcp: FastMCP, store_provider) -> None:
             if spec.engine == "sfizz":
                 _validate_sfizz(source, spec)
             elif spec.engine == "vst":
-                _validate_vst(spec)
+                _validate_vst(source, spec)
             else:
                 if (
                     spec.sfz is not None
