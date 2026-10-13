@@ -1099,15 +1099,6 @@ def stitch_chunks(
 _EMBED_NEUTRAL = {"breathiness": 0.0, "voicing": 1.0, "tension": 0.0, "energy": 1.0}
 
 
-_FEED_DTYPES = {
-    "tensor(float)": np.float32,
-    "tensor(double)": np.float64,
-    "tensor(int64)": np.int64,
-    "tensor(int32)": np.int32,
-    "tensor(bool)": np.bool_,
-}
-
-
 def _feed(session, values: dict, context: str) -> dict:
     """The declared inputs of a session, filled from ``values`` and cast to their dtypes.
 
@@ -1115,6 +1106,13 @@ def _feed(session, values: dict, context: str) -> dict:
     ``note_midi`` as int64, another's as float), so every value is cast to whatever the
     graph declares. A declared input we cannot fill fails loudly.
     """
+    dtypes = {
+        "tensor(float)": np.float32,
+        "tensor(double)": np.float64,
+        "tensor(int64)": np.int64,
+        "tensor(int32)": np.int32,
+        "tensor(bool)": np.bool_,
+    }
     declared = [value for value in session.get_inputs()]
     missing = [value.name for value in declared if value.name not in values]
     if missing:
@@ -1125,7 +1123,7 @@ def _feed(session, values: dict, context: str) -> dict:
     feed: dict = {}
     for value in declared:
         data = values[value.name]
-        dtype = _FEED_DTYPES.get(value.type)
+        dtype = dtypes.get(value.type)
         if dtype is not None and isinstance(data, np.ndarray) and data.dtype != dtype:
             data = data.astype(dtype)
         feed[value.name] = data

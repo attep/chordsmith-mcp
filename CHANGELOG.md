@@ -12,6 +12,14 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.26.1] - 2026-10-13
+
+### Fixed
+
+- Importing ChordSmith without the optional DiffSinger packages crashed: the input-dtype
+  table added in v0.26.0 referenced numpy at module import time. It is built lazily now, so
+  servers without the `diffsinger` extra work as before (supersedes the v0.26.0 tag).
+
 ## [0.26.0] - 2026-10-13
 
 ### Added
