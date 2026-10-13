@@ -195,6 +195,9 @@ resolved from the bank's own `dsconfig.yaml` files:
 - `dsdur/dsconfig.yaml` and `dspitch/dsconfig.yaml` name their `linguistic`/`dur`/`pitch`
   models plus optional `speakers:` embeddings, and `dsdict-*.yaml` files set the languages
 - a vocoder `.onnx` under the declared folder (or `dsvocoder/`) that takes `mel` (+ `f0`)
+- each module's own `phonemes` file is honored: a bank whose pitch model carries a shorter
+  phoneme list than its acoustic model (TIGER: 60 vs 68 phones) still sings every phone at
+  the id each model was trained with
 
 Other model generations (reflow-only exports and other architectures) are not supported yet.
 The adapter feeds each ONNX graph exactly the inputs it declares — casting dtypes per graph —

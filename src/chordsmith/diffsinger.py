@@ -266,6 +266,8 @@ class BankPaths:
     display_name: str
     author: str
     phonemes: Path
+    dur_phonemes: Path
+    pitch_phonemes: Path
     dictionaries: dict[str, Path]
     acoustic: Path
     acoustic_speakers: list[tuple[str, Path]]
@@ -302,11 +304,19 @@ def _load_bank(bank: Path) -> BankPaths:
         if re.fullmatch(r"[a-z]{2}|zh-yue", code):
             dictionaries[code] = path
     vocoder = _find_vocoder(bank, root_cfg.get("vocoder"))
+    root_phonemes = _relative(bank, str(root_cfg.get("phonemes", "")))
+
+    def module_phonemes(config: dict, base: Path) -> Path:
+        value = str(config.get("phonemes") or "").strip()
+        return _relative(base, value) if value else root_phonemes
+
     paths = BankPaths(
         root=bank,
         display_name=_short_name(_full_name(bank)) or bank.name,
         author=_character_author(bank),
-        phonemes=_relative(bank, str(root_cfg.get("phonemes", ""))),
+        phonemes=root_phonemes,
+        dur_phonemes=module_phonemes(dur_cfg, dur_dir),
+        pitch_phonemes=module_phonemes(pitch_cfg, pitch_dir),
         dictionaries=dictionaries,
         acoustic=_relative(bank, str(root_cfg.get("acoustic", ""))),
         acoustic_speakers=acoustic_speakers,
@@ -320,6 +330,8 @@ def _load_bank(bank: Path) -> BankPaths:
     )
     for path, label in (
         (paths.phonemes, "phoneme list"),
+        (paths.dur_phonemes, "duration phoneme list"),
+        (paths.pitch_phonemes, "pitch phoneme list"),
         (paths.acoustic, "acoustic model"),
         (paths.dur_linguistic, "duration linguistic model"),
         (paths.dur, "duration model"),
@@ -471,6 +483,8 @@ class _Voicebank:
     lock: threading.Lock = field(default_factory=threading.Lock)
     sessions: dict[str, ort.InferenceSession] = field(default_factory=dict)
     phoneme_ids: dict[str, int] = field(default_factory=dict)
+    dur_phoneme_ids: dict[str, int] = field(default_factory=dict)
+    pitch_phoneme_ids: dict[str, int] = field(default_factory=dict)
     symbol_types: dict[str, str] = field(default_factory=dict)
     en_dict: dict[str, list[str]] = field(default_factory=dict)
     cmu: dict = field(default_factory=dict)
@@ -585,10 +599,9 @@ def get_voicebank(identifier: str | Path | None = None) -> _Voicebank:
     with _voicebank_lock:
         if key not in _banks:
             bank = _Voicebank(paths=_load_bank(path))
-            bank.phoneme_ids = {
-                line: index
-                for index, line in enumerate(bank.paths.phonemes.read_text(encoding="utf-8").splitlines())
-            }
+            bank.phoneme_ids = _phoneme_table(bank.paths.phonemes)
+            bank.dur_phoneme_ids = _phoneme_table(bank.paths.dur_phonemes)
+            bank.pitch_phoneme_ids = _phoneme_table(bank.paths.pitch_phonemes)
             dsdict = yaml.safe_load((path / "dsdur/dsdict.yaml").read_text(encoding="utf-8"))
             bank.symbol_types = {s["symbol"]: s["type"] for s in dsdict["symbols"]}
             en_path = bank.paths.dictionaries.get("en")
@@ -1099,6 +1112,26 @@ def stitch_chunks(
 _EMBED_NEUTRAL = {"breathiness": 0.0, "voicing": 1.0, "tension": 0.0, "energy": 1.0}
 
 
+def _phoneme_table(path: Path) -> dict[str, int]:
+    """The phoneme-id table of one module's phonemes.txt (one symbol per line)."""
+    return {line: index for index, line in enumerate(path.read_text(encoding="utf-8").splitlines())}
+
+
+def _index_tokens(bank: _Voicebank, phonemes: list[str], table: dict[str, int], module: str) -> np.ndarray:
+    """Token ids for one module, indexed by its own phoneme table.
+
+    Modules can carry different tables (TIGER's pitch list holds 60 phones, its acoustic 68 —
+    the same phones at different indices), so every model gets the ids it was trained with.
+    """
+    missing = sorted({phone for phone in phonemes if phone not in table})
+    if missing:
+        raise DiffSingerError(
+            f"Phoneme(s) {', '.join(missing)} are not in '{bank.paths.display_name}'s {module} "
+            "phoneme list; this voicebank cannot sing them."
+        )
+    return np.array([[table[phone] for phone in phonemes]], dtype=np.int64)
+
+
 def _feed(session, values: dict, context: str) -> dict:
     """The declared inputs of a session, filled from ``values`` and cast to their dtypes.
 
@@ -1242,13 +1275,7 @@ def render(
             segments.append({"phoneme": phone, "note": index, "kind": kind})
     segments.append({"phoneme": "SP", "note": -1, "kind": "pad"})
 
-    unknown = sorted({s["phoneme"] for s in segments if s["phoneme"] not in bank.phoneme_ids})
-    if unknown:
-        raise DiffSingerError(
-            f"Phoneme(s) {', '.join(unknown)} are not in '{bank.paths.display_name}'s phoneme "
-            "set; map the lyrics against this voicebank first."
-        )
-    tokens = np.array([[bank.phoneme_ids[s["phoneme"]] for s in segments]], dtype=np.int64)
+    dur_tokens = _index_tokens(bank, [s["phoneme"] for s in segments], bank.dur_phoneme_ids, "duration")
     word_div, word_dur = _word_inputs(segments, notes, bank)
     linguistic = session_for(bank.paths.dur_linguistic)
     encoder_out, x_masks = linguistic.run(
@@ -1256,7 +1283,7 @@ def render(
         _feed(
             linguistic,
             {
-                "tokens": tokens,
+                "tokens": dur_tokens,
                 "word_div": np.array([word_div], dtype=np.int64),
                 "word_dur": np.array([word_dur], dtype=np.int64),
             },
@@ -1269,7 +1296,7 @@ def render(
     dur_embed = bank.embed("dur", variant)
     dur_values = {"encoder_out": encoder_out, "x_masks": x_masks, "ph_midi": note_pitch}
     if dur_embed is not None:
-        dur_values["spk_embed"] = np.tile(dur_embed, (1, tokens.shape[1], 1))
+        dur_values["spk_embed"] = np.tile(dur_embed, (1, dur_tokens.shape[1], 1))
     dur_session = session_for(bank.paths.dur)
     predicted_flat = dur_session.run(
         None, _feed(dur_session, dur_values, f"'{bank.paths.display_name}' duration")
@@ -1286,7 +1313,10 @@ def render(
     total_frames = int(ph_dur.sum())
     if total_frames < HEAD_FRAMES + TAIL_FRAMES + len(notes):
         raise DiffSingerError("Notes are too short for the model.")
-    tokens = np.array([[bank.phoneme_ids[entry["phoneme"]] for entry in timeline]], dtype=np.int64)
+    pitch_tokens = _index_tokens(
+        bank, [entry["phoneme"] for entry in timeline], bank.pitch_phoneme_ids, "pitch"
+    )
+    tokens = _index_tokens(bank, [entry["phoneme"] for entry in timeline], bank.phoneme_ids, "acoustic")
 
     # --- pitch
     note_dur, note_midis, note_rests = _note_partition(timeline, notes)
@@ -1295,7 +1325,7 @@ def render(
         None,
         _feed(
             pitch_linguistic,
-            {"tokens": tokens, "ph_dur": ph_dur},
+            {"tokens": pitch_tokens, "ph_dur": ph_dur},
             f"'{bank.paths.display_name}' pitch linguistic",
         ),
     )[0]

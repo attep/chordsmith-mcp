@@ -12,6 +12,16 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.26.2] - 2026-10-13
+
+### Fixed
+
+- Voicebanks whose modules carry their own phoneme tables (the male TIGER DS: a 60-entry
+  pitch list against a 68-entry acoustic list) failed to render common phones like `w` with
+  an ONNX "indices element out of data bounds" error. Each module is now indexed by its own
+  `phonemes` file (falling back to the root list when it declares none), so Hanami/LEONA
+  renders are unchanged and TIGER can sing every phone it lists.
+
 ## [0.26.1] - 2026-10-13
 
 ### Fixed

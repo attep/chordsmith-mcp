@@ -125,6 +125,29 @@ def test_variant_embeddings_load_per_module(two_banks):
         bank.embed("acoustic", "missing")
 
 
+def test_module_specific_phoneme_tables(tmp_path, monkeypatch):
+    root = tmp_path / "banks"
+    root.mkdir()
+    _fake_bank(root, "TwinBank", display="Twin")
+    bank_root = root / "TwinBank"
+    # The pitch module ships a shorter table (same phones, shifted ids); the duration module
+    # keeps the root table — TIGER's layout in miniature.
+    (bank_root / "dspitch" / "files" / "phonemes.txt").write_text("SP\nAP\na\n", encoding="utf-8")
+    (bank_root / "dspitch" / "dsconfig.yaml").write_text(
+        "linguistic: linguistic.onnx\npitch: pitch.onnx\n"
+        "phonemes: files/phonemes.txt\nspeakers:\n- files/single\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHORDSMITH_DIFFSINGER_VOICE", str(root))
+    monkeypatch.chdir(tmp_path)
+    bank = diffsinger.get_voicebank("twin")
+    assert bank.phoneme_ids == {"SP": 0, "AP": 1, "l": 2, "a": 3}
+    assert bank.dur_phoneme_ids == bank.phoneme_ids  # no module table: the root list applies
+    assert bank.pitch_phoneme_ids == {"SP": 0, "AP": 1, "a": 2}
+    with pytest.raises(diffsinger.DiffSingerError, match="pitch"):
+        diffsinger._index_tokens(bank, ["l"], bank.pitch_phoneme_ids, "pitch")
+
+
 def test_broken_bank_appears_with_error_not_a_crash(tmp_path, monkeypatch):
     root = tmp_path / "banks"
     root.mkdir()
