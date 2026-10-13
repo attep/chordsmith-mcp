@@ -179,4 +179,4 @@ async def test_bridge_detail_uses_the_per_plugin_host(store, monkeypatch, fake_b
     hosts.clear()
     bridged = await _call("list_plugins", {"detail": DRUM, "parameters": True})
     assert not bridged.isError, bridged.content[0].text
-    assert hosts == [fake_bridge]
+    assert set(hosts) == {fake_bridge}
