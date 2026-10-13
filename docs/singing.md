@@ -5,14 +5,16 @@ backing. Two engines are supported:
 
 - **VOICEVOX** (slice 1): a wordless hum on "う" (oo) or Japanese kana lyrics, soft voices,
   including whisper styles.
-- **DiffSinger** (slice 2): English lyrics through a voicebank you download and mount yourself
-  (Hoshino Hanami ~AI❤dol~ is the tested one). The voicebank is never bundled or committed.
+- **DiffSinger** (slice 2): lyrics through voicebanks you download and mount yourself — several
+  can live side by side, each with its own voice variants and languages (tested: Hanami
+  ~AI❤dol~, LEONA, and the male TIGER DS). Voicebanks are never bundled or committed.
 
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [Tools](#tools)
 - [Voices and soft controls](#voices-and-soft-controls)
 - [English lyrics (DiffSinger)](#english-lyrics-diffsinger)
+- [Voicebanks and variants](#voicebanks-and-variants)
 - [Mixing and export](#mixing-and-export)
 - [Settings](#settings)
 - [Limits and licence notes](#limits-and-licence-notes)
@@ -122,14 +124,14 @@ add breath to a voice model that has none: breathiness comes from the voicebank,
 
 ## English lyrics (DiffSinger)
 
-English singing uses a DiffSinger voicebank running in-process (onnxruntime, CPU). ChordSmith
-never downloads or redistributes voicebanks — you download one yourself, keep it out of git, and
-point ChordSmith at it:
+English singing uses DiffSinger voicebanks running in-process (onnxruntime, CPU). ChordSmith
+never downloads or redistributes them — you download banks yourself, keep them out of git, and
+point ChordSmith at one bank, several (`:`-separated), or a parent folder (every directory with
+a `dsconfig.yaml` is registered; `./voicebank` is scanned automatically):
 
 ```bash
-# download a voicebank (e.g. Hoshino Hanami ~AI❤dol~ for DiffSinger) and extract it, then:
-export CHORDSMITH_DIFFSINGER_VOICE="/path/to/voicebank"     # the folder with dsconfig.yaml
-# Docker: mount it read-only and set the same variable (compose mounts ./voicebank to /voicebank)
+export CHORDSMITH_DIFFSINGER_VOICE="/path/to/voicebank"     # one bank or a folder of banks
+# Docker: compose mounts ./voicebank to /voicebank — just drop bank folders in
 ```
 
 Then:
@@ -167,6 +169,38 @@ job record echoes the full settings (defaults included), so it always shows what
 License (any creative use including commercial, credit required); the bundled AI❤dolGAN vocoder
 is CC BY-NC-SA 4.0 (**non-commercial**) — get written permission or swap the vocoder before a
 commercial release. Always check each voicebank's own terms.
+
+## Voicebanks and variants
+
+`list_singing_voices` lists every configured bank with its voice variants, languages and (where
+known) a licence note. Voice ids look like `diffsinger:<bank>[/<variant>]`, e.g.
+`diffsinger:tiger_ds/fresh`; short words still work (`diffsinger:hanami/nectar`) and omitting
+the variant uses the bank's first one. `map_vocal_lyrics` takes `voice_id` so phoneme and word
+validation targets the right bank — each bank has its own phoneme set (TIGER, for example, has
+`aa` but no bare `a`); mapping before choosing a voice defaults to the first configured bank.
+
+**Tested banks** (download and licence are each author's; check before publishing):
+
+| Bank | Voice | Variants | Languages (dictionaries) | Licence notes |
+|---|---|---|---|---|
+| Hoshino Hanami ~AI❤dol~ | female pop soprano | Root / Fragrance / Nectar | en, ja, de, ko, es, zh, fr, … | Team L❤VE licence; the AI❤dolGAN vocoder is non-commercial |
+| LEONA -Ubasti- (beta) | female, cute | Core / CatNip / CatNap | en, ja | same author family; check the bank's readme |
+| [TIGER DS](https://github.com/spicytigermeat/tiger_diffsinger) | **male** | Fresh / Disco / Electric / Vinyl / Cetera / Mystic / Falsetto | en, es, it, zh | CC BY-NC-ND + Commons Clause: personal use free, commercial needs a paid licence |
+
+**What a compatible bank needs** — all tested banks share the OpenUtau DiffSinger v1 layout,
+resolved from the bank's own `dsconfig.yaml` files:
+
+- the root config names `phonemes`, `acoustic` (a `.onnx`), `vocoder` (folder or name) and
+  `speakers:` (one embedding path per voice variant)
+- `dsdur/dsconfig.yaml` and `dspitch/dsconfig.yaml` name their `linguistic`/`dur`/`pitch`
+  models plus optional `speakers:` embeddings, and `dsdict-*.yaml` files set the languages
+- a vocoder `.onnx` under the declared folder (or `dsvocoder/`) that takes `mel` (+ `f0`)
+
+Other model generations (reflow-only exports and other architectures) are not supported yet.
+The adapter feeds each ONNX graph exactly the inputs it declares — casting dtypes per graph —
+so newer packs (`speedup` instead of `steps`, no speaker embedding, a different vocoder) work
+too. Community banks are shared through the OpenUtau/DiffSinger ecosystem; the layout above is
+the compatibility checklist.
 
 ## Writing lyrics that stay clear
 
@@ -314,7 +348,8 @@ with no processing option the mix is exactly the plain graph.
 ## Limits and licence notes
 
 - One note at a time: `prepare_vocal_score` fails on overlapping notes (pick a monophonic track).
-- VOICEVOX sings Japanese kana or a wordless hum; English words need the DiffSinger voicebank.
+- VOICEVOX sings Japanese kana or a wordless hum; English words and exact phonemes need a
+  DiffSinger voicebank.
 - English phonemization looks hyphen-joined syllables up as whole words first (voicebank
   dictionary, then CMUdict), splitting the sounds across the word's notes; when the vowel count
   does not match, it falls back to per-piece lookup with a warning that names the word. Words in

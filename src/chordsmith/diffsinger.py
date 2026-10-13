@@ -1,19 +1,24 @@
-"""DiffSinger adapter (Sodium Gold slice 2): English lyrics through the Hanami voicebank.
+"""DiffSinger adapter (Sodium Gold slice 2): lyrics through any compatible voicebank.
 
-The voicebank is **never bundled or redistributed**: download it yourself, mount it read-only,
-and point ``CHORDSMITH_DIFFSINGER_VOICE`` at the directory that contains ``dsconfig.yaml``.
+Voicebanks are **never bundled or redistributed**: download them yourself, mount them
+read-only, and point ``CHORDSMITH_DIFFSINGER_VOICE`` at one bank, several (path-separated) or
+a parent folder — every directory with a ``dsconfig.yaml`` is registered.
 
-The pipeline follows the OpenUtau DiffSinger conventions: the dsmain linguistic encoder with
-word_div/word_dur predicts phoneme durations (dur.onnx), the durations are laid out so every
-syllable's vowel starts exactly on its note (consonants take time from the previous segment),
-the dspitch models predict the f0 curve, the acoustic model renders a mel spectrogram and the
-bundled AI-dolGAN vocoder turns it into 44.1 kHz audio.
+The pipeline follows the OpenUtau DiffSinger conventions, resolved per bank from its
+``dsconfig.yaml`` files: the duration module's linguistic encoder with word_div/word_dur
+predicts phoneme durations (dur.onnx), the durations are laid out so every syllable's vowel
+starts exactly on its note, the pitch module predicts the f0 curve, the acoustic model renders
+a mel spectrogram and the bank's vocoder turns it into 44.1 kHz audio. Inputs are fed
+according to what each ONNX graph declares, so banks with different exports (steps vs
+speedup, speaker embeddings or none) run the same code path.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 import threading
 import wave
 from dataclasses import dataclass, field, replace
@@ -39,17 +44,27 @@ FRAME_MS = 1000.0 * HOP_SIZE / SAMPLE_RATE
 HEAD_FRAMES = 8
 TAIL_FRAMES = 8
 DEFAULT_STEPS = 20
+SPEEDUP = 10.0  # the sampling-acceleration control that newer ONNX exports declare instead of steps
 DEFAULT_CHUNK_SECONDS = 30.0  # long scores render in phrase-sized chunks (attention is O(n^2))
 MIN_CHUNK_GAP_SECONDS = 0.3  # a gap at least this long is a clean split point (a rest)
 DEFAULT_DEPTH = 0.6
-MODES = {"root": "Root", "fragrance": "Fragrance", "nectar": "Nectar"}
-CREDIT = "Hoshino Hanami ~AI*dol~ by Lotte V"
-LICENCE_SUMMARY = (
-    "Voicebank models: Team L<3VE Voicebank License - any creative use including commercial, "
-    "credit required. Bundled vocoder (AI*dolGAN): CC BY-NC-SA 4.0 - non-commercial; get "
-    "written permission or swap the vocoder before a commercial release. DiffSinger/OpenUtau "
-    "code: Apache-2.0/MIT."
-)
+_BANK_LICENCES = {
+    "hoshino hanami": (
+        "Voicebank models: Team L<3VE Voicebank License - any creative use including commercial, "
+        "credit required. Bundled vocoder (AI*dolGAN): CC BY-NC-SA 4.0 - non-commercial; get "
+        "written permission or swap the vocoder before a commercial release."
+    ),
+    "leona": (
+        "Team L<3VE Voicebank License family (same author as Hanami): creative use with credit; "
+        "check the bank's readme for the bundled vocoder's terms before a commercial release."
+    ),
+    "tiger": (
+        "CC BY-NC-ND 4.0 + Commons Clause: free for non-commercial/personal use per the "
+        "character TOS; commercial use needs a paid license from the author, and the model may "
+        "not be redistributed (see the bank's extra/LICENSE.md)."
+    ),
+}
+_GENERIC_LICENCE = "Check the voicebank's own readme and licence before publishing rendered audio."
 
 
 class DiffSingerError(ValueError):
@@ -64,60 +79,334 @@ def _require_dependencies() -> None:
         )
 
 
-def voicebank_path() -> Path | None:
-    """Find the voicebank: CHORDSMITH_DIFFSINGER_VOICE, or one level under ./voicebank."""
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def _bank_roots() -> list[Path]:
+    """Every configured voicebank folder, deduplicated and in a stable order.
+
+    ``CHORDSMITH_DIFFSINGER_VOICE`` may name one bank, several (``os.pathsep``-separated), or a
+    parent folder to scan one level; ``./voicebank`` is scanned the same way. A directory is a
+    bank when it contains ``dsconfig.yaml``.
+    """
     candidates: list[Path] = []
     env = os.environ.get("CHORDSMITH_DIFFSINGER_VOICE", "").strip()
     if env:
-        candidates.append(Path(env).expanduser())
+        for entry in env.split(os.pathsep):
+            entry = entry.strip()
+            if not entry:
+                continue
+            path = Path(entry).expanduser()
+            if (path / "dsconfig.yaml").is_file():
+                candidates.append(path)
+            elif path.is_dir():
+                candidates.extend(sorted(p for p in path.iterdir() if p.is_dir()))
     default_root = Path.cwd() / "voicebank"
     if default_root.is_dir():
         candidates.extend(sorted(p for p in default_root.iterdir() if p.is_dir()))
+    banks: list[Path] = []
+    seen: set[str] = set()
     for candidate in candidates:
-        if (candidate / "dsconfig.yaml").is_file():
-            return candidate
+        if not (candidate / "dsconfig.yaml").is_file():
+            continue
+        # The same bank can be reachable through two paths (env + ./voicebank, two mounts):
+        # identify it by folder name + config content, not by path.
+        key = f"{candidate.name.casefold()}:{_bank_fingerprint(candidate)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        banks.append(candidate)
+    return banks
+
+
+def _bank_fingerprint(bank: Path) -> str:
+    try:
+        return hashlib.sha256((bank / "dsconfig.yaml").read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _match_bank(identifier: str) -> Path | None:
+    """Resolve a bank identifier: a folder path, a folder name, or a slug/word in either.
+
+    ``hanami`` finds ``Hoshino Hanami ~AIdol~ for DiffSinger v1.0`` — the folder slug, the
+    character name and any word inside them are all accepted, case-insensitively.
+    """
+    text = str(identifier).strip()
+    if not text:
+        return None
+    direct = Path(text).expanduser()
+    if (direct / "dsconfig.yaml").is_file():
+        return direct
+    banks = _bank_roots()
+    lowered = text.casefold()
+    for bank in banks:
+        full = _full_name(bank)
+        display = _short_name(full) if full else bank.name
+        if lowered in (bank.name.casefold(), _slug(bank.name), _slug(display), _slug(full) if full else ""):
+            return bank
+    for bank in banks:
+        full = _full_name(bank)
+        words = set(_slug(full or bank.name).split("_"))
+        words.update(_slug(bank.name).split("_"))
+        if lowered in words:
+            return bank
     return None
 
 
+def _full_name(bank: Path) -> str:
+    """The bank's full name: character.yaml ``name``, then the ``name=`` line of character.txt."""
+    name = ""
+    try:
+        config = yaml.safe_load((bank / "character.yaml").read_text(encoding="utf-8")) or {}
+        name = str(config.get("name") or "")
+    except Exception:  # noqa: BLE001 - a broken character.yaml never blocks a bank
+        name = ""
+    if not name:
+        try:
+            for line in (bank / "character.txt").read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.lower().startswith("name="):
+                    name = line.split("=", 1)[1].strip()
+                    break
+        except OSError:
+            name = ""
+    return name
+
+
+def _short_name(text: str) -> str:
+    """The name up to its first decoration, e.g. 'Hoshino Hanami ~AI...' -> 'Hoshino Hanami'."""
+    text = text.strip()
+    return re.split(r"\s+[~\-(\[]", text)[0].strip() or text
+
+
+def _bank_text_value(bank: Path, key: str) -> str:
+    """A ``key=value`` line from character.txt (author, voice, ...)."""
+    try:
+        for line in (bank / "character.txt").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.lower().startswith(f"{key}="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def voicebank_path(identifier: str | None = None) -> Path | None:
+    """Resolve a voicebank: by identifier (slug/name/path), else the first configured one."""
+    if identifier:
+        return _match_bank(identifier)
+    banks = _bank_roots()
+    return banks[0] if banks else None
+
+
 def available() -> bool:
-    return voicebank_path() is not None
+    return bool(_bank_roots())
 
 
-def describe() -> dict | None:
-    """Voicebank metadata for list_singing_voices."""
-    path = voicebank_path()
+def _relative(base: Path, value: str) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else (base / path)
+
+
+def _module_speakers(base: Path, entries) -> list[tuple[str, Path]]:
+    """(variant name, embedding base path) for a module's ``speakers`` list."""
+    out: list[tuple[str, Path]] = []
+    for entry in entries or []:
+        path = _relative(base, str(entry))
+        out.append((path.name, path))
+    return out
+
+
+def _strip_common_prefix(names: list[str]) -> list[str]:
+    """Drop a shared ``..._`` word prefix so ``tiger_fresh`` reads as ``fresh``.
+
+    Works for a single name too (``BetaBank_solo`` -> ``solo``); a name with no ``_`` in its
+    common prefix stays as it is.
+    """
+    if not names:
+        return names
+    prefix = os.path.commonprefix(names)
+    cut = prefix.rfind("_") + 1
+    if cut <= 0:
+        return names
+    return [name[cut:] or name for name in names]
+
+
+def _shorten_speakers(speakers: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    """Speaker lists with the shared variant prefix stripped (tiger_fresh -> fresh)."""
+    if not speakers:
+        return []
+    names = _strip_common_prefix([name for name, _ in speakers])
+    return list(zip(names, [path for _, path in speakers], strict=True))
+
+
+def _find_vocoder(bank: Path, value) -> Path | None:
+    """The bank's vocoder ONNX: the declared folder, else ``dsvocoder/``."""
+    text = str(value or "").strip()
+    declared = bank / text if text else None
+    directory = declared if declared is not None and declared.is_dir() else bank / "dsvocoder"
+    if not directory.is_dir():
+        return None
+    try:
+        config = yaml.safe_load((directory / "vocoder.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 - the vocoder.yaml is a hint, not a requirement
+        config = {}
+    model = config.get("model")
+    if model and (directory / str(model)).is_file():
+        return directory / str(model)
+    models = sorted(directory.glob("*.onnx"))
+    return models[0] if models else None
+
+
+@dataclass
+class BankPaths:
+    """One voicebank's resolved files, read from its dsconfig.yaml files."""
+
+    root: Path
+    display_name: str
+    author: str
+    phonemes: Path
+    dictionaries: dict[str, Path]
+    acoustic: Path
+    acoustic_speakers: list[tuple[str, Path]]
+    dur_linguistic: Path
+    dur: Path
+    dur_speakers: list[tuple[str, Path]]
+    pitch_linguistic: Path
+    pitch: Path
+    pitch_speakers: list[tuple[str, Path]]
+    vocoder: Path
+
+    @property
+    def variants(self) -> list[str]:
+        return [name for name, _ in self.acoustic_speakers]
+
+
+def _load_bank(bank: Path) -> BankPaths:
+    """Resolve a bank's model files from its configs (cheap; never loads a model)."""
+    _require_dependencies()
+    try:
+        root_cfg = yaml.safe_load((bank / "dsconfig.yaml").read_text(encoding="utf-8")) or {}
+        dur_cfg = yaml.safe_load((bank / "dsdur" / "dsconfig.yaml").read_text(encoding="utf-8")) or {}
+        pitch_cfg = yaml.safe_load((bank / "dspitch" / "dsconfig.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise DiffSingerError(f"Voicebank '{bank.name}' has unreadable config files: {exc}") from None
+    dur_dir = bank / "dsdur"
+    pitch_dir = bank / "dspitch"
+    acoustic_speakers = _shorten_speakers(_module_speakers(bank, root_cfg.get("speakers")))
+    dur_speakers = _shorten_speakers(_module_speakers(dur_dir, dur_cfg.get("speakers")))
+    pitch_speakers = _shorten_speakers(_module_speakers(pitch_dir, pitch_cfg.get("speakers")))
+    dictionaries: dict[str, Path] = {}
+    for path in sorted(dur_dir.glob("dsdict-*.yaml")):
+        code = path.stem[len("dsdict-") :]
+        if re.fullmatch(r"[a-z]{2}|zh-yue", code):
+            dictionaries[code] = path
+    vocoder = _find_vocoder(bank, root_cfg.get("vocoder"))
+    paths = BankPaths(
+        root=bank,
+        display_name=_short_name(_full_name(bank)) or bank.name,
+        author=_character_author(bank),
+        phonemes=_relative(bank, str(root_cfg.get("phonemes", ""))),
+        dictionaries=dictionaries,
+        acoustic=_relative(bank, str(root_cfg.get("acoustic", ""))),
+        acoustic_speakers=acoustic_speakers,
+        dur_linguistic=_relative(dur_dir, str(dur_cfg.get("linguistic", ""))),
+        dur=_relative(dur_dir, str(dur_cfg.get("dur", ""))),
+        dur_speakers=dur_speakers,
+        pitch_linguistic=_relative(pitch_dir, str(pitch_cfg.get("linguistic", ""))),
+        pitch=_relative(pitch_dir, str(pitch_cfg.get("pitch", ""))),
+        pitch_speakers=pitch_speakers,
+        vocoder=vocoder or (bank / "dsvocoder" / "missing.onnx"),
+    )
+    for path, label in (
+        (paths.phonemes, "phoneme list"),
+        (paths.acoustic, "acoustic model"),
+        (paths.dur_linguistic, "duration linguistic model"),
+        (paths.dur, "duration model"),
+        (paths.pitch_linguistic, "pitch linguistic model"),
+        (paths.pitch, "pitch model"),
+        (paths.vocoder, "vocoder"),
+    ):
+        if not path.is_file():
+            raise DiffSingerError(f"Voicebank '{bank.name}' is missing its {label} (expected at {path}).")
+    return paths
+
+
+def _character_author(bank: Path) -> str:
+    author = ""
+    try:
+        config = yaml.safe_load((bank / "character.yaml").read_text(encoding="utf-8")) or {}
+        author = str(config.get("author") or "")
+    except Exception:  # noqa: BLE001 - a broken character.yaml never blocks a bank
+        author = ""
+    return author or _bank_text_value(bank, "author")
+
+
+def list_voicebanks() -> list[dict]:
+    """Metadata for every configured bank (cheap: reads configs, never loads models).
+
+    A broken bank appears with an ``error`` field instead of taking the listing down.
+    """
+    entries: list[dict] = []
+    for path in _bank_roots():
+        try:
+            entries.append(_describe_bank(_load_bank(path)))
+        except DiffSingerError as exc:
+            entries.append({"voicebank": path.name, "path": str(path), "error": str(exc)})
+    return entries
+
+
+def describe(identifier: str | None = None) -> dict | None:
+    """Voicebank metadata for list_singing_voices and render_singing's voice ids."""
+    path = voicebank_path(identifier)
     if path is None:
         return None
+    return _describe_bank(_load_bank(path))
+
+
+def _describe_bank(bank: BankPaths) -> dict:
+    display = bank.display_name or bank.root.name
+    licence = _GENERIC_LICENCE
+    haystack = f"{_slug(display)} {_slug(bank.root.name)}"
+    for key, note in _BANK_LICENCES.items():
+        if _slug(key) in haystack:
+            licence = note
+            break
     return {
         "engine": "diffsinger",
-        "voicebank": path.name,
-        "path": str(path),
-        "credit": CREDIT,
-        "licence": LICENCE_SUMMARY,
-        "commercial_status": "voicebank allows commercial use with credit; bundled vocoder is "
-        "non-commercial - check before a commercial release",
-        "languages": ["en"],
-        "modes": list(MODES),
+        "voicebank": display,
+        "slug": _slug(display) or _slug(bank.root.name),
+        "path": str(bank.root),
+        "author": bank.author,
+        "credit": f"{display} by {bank.author}" if bank.author else display,
+        "licence": licence,
+        "languages": sorted(bank.dictionaries),
+        "variants": bank.variants,
         "sample_rate": SAMPLE_RATE,
-        "soft_controls": soft_controls() or {},
+        "soft_controls": _soft_controls_of(bank.root) or {},
     }
 
 
-def soft_controls() -> dict | None:
-    """Which soft controls the configured voicebank supports, from its dsconfig flags.
+def soft_controls(identifier: str | None = None) -> dict | None:
+    """Which soft controls a voicebank supports, from its dsconfig flags.
 
     DiffSinger voicebanks declare whether they were trained with the variance embeddings
-    (``use_breathiness_embed``, ``use_voicing_embed``, ``use_tension_embed``, ``use_energy_embed``).
-    Hanami ~AI❤dol~ declares none of them — breathiness cannot do anything for her — while a
-    voicebank with ``use_breathiness_embed: true`` gets the setting fed to its acoustic model.
-    Returns None when no voicebank is configured.
+    (``use_breathiness_embed``, ``use_voicing_embed``, ``use_tension_embed``, ``use_energy_embed``)
+    and the key-shift/speed embeddings behind the ``gender`` and ``velocity`` controls. A bank
+    that declares none of them — Hanami ~AI❤dol~ is one — cannot use those settings, while a
+    bank that declares one gets the setting fed to its acoustic model. Returns None when the
+    bank is not configured.
     """
-    path = voicebank_path()
+    path = voicebank_path(identifier)
     if path is None:
         return None
+    return _soft_controls_of(path)
+
+
+def _soft_controls_of(path: Path) -> dict | None:
     try:
         config = yaml.safe_load((path / "dsconfig.yaml").read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except Exception:  # noqa: BLE001 - an unreadable config reads as "none"
         return None
     return {
         "voicebank": path.name,
@@ -125,6 +414,8 @@ def soft_controls() -> dict | None:
         "voicing": bool(config.get("use_voicing_embed")),
         "tension": bool(config.get("use_tension_embed")),
         "energy_embed": bool(config.get("use_energy_embed")),
+        "key_shift": bool(config.get("use_key_shift_embed", True)),
+        "speed": bool(config.get("use_speed_embed", True)),
     }
 
 
@@ -169,30 +460,92 @@ def seeded_model_bytes(path: Path, seed: int) -> bytes:
     return model.SerializeToString()
 
 
+_EMBED_SUFFIXES = (".emb", ".npy", ".bin")
+
+
 @dataclass
 class _Voicebank:
-    path: Path
+    """One loaded bank: resolved paths plus lazily loaded sessions, dictionaries, embeddings."""
+
+    paths: BankPaths
     lock: threading.Lock = field(default_factory=threading.Lock)
-    sessions: dict = field(default_factory=dict)
-    phoneme_ids: dict = field(default_factory=dict)
-    symbol_types: dict = field(default_factory=dict)
-    en_dict: dict = field(default_factory=dict)
+    sessions: dict[str, ort.InferenceSession] = field(default_factory=dict)
+    phoneme_ids: dict[str, int] = field(default_factory=dict)
+    symbol_types: dict[str, str] = field(default_factory=dict)
+    en_dict: dict[str, list[str]] = field(default_factory=dict)
     cmu: dict = field(default_factory=dict)
-    embeds: dict = field(default_factory=dict)
+    embeds: dict[str, np.ndarray] = field(default_factory=dict)
 
-    def session(self, rel: str):
+    @property
+    def root(self) -> Path:
+        return self.paths.root
+
+    @property
+    def variants(self) -> list[str]:
+        return self.paths.variants
+
+    def session(self, path: Path) -> ort.InferenceSession:
+        key = str(path)
         with self.lock:
-            if rel not in self.sessions:
-                self.sessions[rel] = ort.InferenceSession(
-                    str(self.path / rel), providers=["CPUExecutionProvider"]
-                )
-            return self.sessions[rel]
+            if key not in self.sessions:
+                self.sessions[key] = ort.InferenceSession(key, providers=["CPUExecutionProvider"])
+            return self.sessions[key]
 
-    def embed(self, sub: str, mode: str):
-        key = f"{sub}/{mode}"
+    def variant(self, mode: str | None) -> str:
+        """Canonical variant name for a mode id (case-insensitive; the only one when single)."""
+        names = self.variants
+        if not names:
+            if mode:
+                raise DiffSingerError(
+                    f"Voicebank '{self.paths.display_name}' has no voice variants; drop '/{mode}'."
+                )
+            return "default"
+        if mode is None:
+            return names[0]
+        lowered = str(mode).casefold()
+        for name in names:
+            if name.casefold() == lowered:
+                return name
+        for name in names:
+            if _slug(name) == _slug(str(mode)):
+                return name
+        raise DiffSingerError(
+            f"Unknown voice variant '{mode}' for '{self.paths.display_name}'; use one of {', '.join(names)}."
+        )
+
+    def embed(self, module: str, variant: str) -> np.ndarray | None:
+        """The variant's embedding for a module ('acoustic'/'dur'/'pitch'), or None."""
+        speakers = {
+            "acoustic": self.paths.acoustic_speakers,
+            "dur": self.paths.dur_speakers,
+            "pitch": self.paths.pitch_speakers,
+        }[module]
+        if not speakers:
+            return None
+        match = None
+        for name, path in speakers:
+            if name.casefold() == variant.casefold():
+                match = (name, path)
+                break
+        if match is None and len(speakers) == 1:
+            match = speakers[0]
+        if match is None:
+            names = ", ".join(name for name, _ in speakers)
+            raise DiffSingerError(
+                f"Voicebank '{self.paths.display_name}' has no '{variant}' embeddings for its "
+                f"{module} model; it has {names}."
+            )
+        name, base = match
+        key = f"{module}/{name}"
         with self.lock:
             if key not in self.embeds:
-                self.embeds[key] = np.fromfile(self.path / sub / f"{MODES[mode]}.emb", dtype=np.float32)
+                for suffix in _EMBED_SUFFIXES:
+                    candidate = base.with_name(base.name + suffix)
+                    if candidate.is_file():
+                        self.embeds[key] = np.fromfile(candidate, dtype=np.float32)
+                        break
+                else:
+                    raise DiffSingerError(f"Embedding file for '{base}' not found.")
             return self.embeds[key]
 
     def is_vowel(self, phoneme: str) -> bool:
@@ -204,38 +557,47 @@ class _Voicebank:
             return list(self.en_dict[key])
         if key in self.cmu:
             return [phone.rstrip("012").lower() for phone in self.cmu[key][0]]
+        if not self.en_dict:
+            raise DiffSingerError(
+                f"Voicebank '{self.paths.display_name}' has no English dictionary; use "
+                "language='phonemes' with its own phoneme set."
+            )
         raise DiffSingerError(f"Unknown word for the English dictionary: '{word}'")
 
 
-_voicebank: _Voicebank | None = None
+_banks: dict[str, _Voicebank] = {}
 _voicebank_lock = threading.Lock()
 
 
-def get_voicebank() -> _Voicebank:
-    global _voicebank
+def get_voicebank(identifier: str | Path | None = None) -> _Voicebank:
+    """The loaded bank for an identifier (slug/name/path); the first configured one by default."""
     _require_dependencies()
-    path = voicebank_path()
+    path = voicebank_path(str(identifier) if identifier is not None else None)
     if path is None:
+        if identifier is not None:
+            names = ", ".join(bank.name for bank in _bank_roots()) or "(none)"
+            raise DiffSingerError(f"Unknown DiffSinger voicebank '{identifier}'. Banks here: {names}.")
         raise DiffSingerError(
             "No DiffSinger voicebank configured. Download one (see docs/singing.md), mount it and "
-            "set CHORDSMITH_DIFFSINGER_VOICE to its directory."
+            "set CHORDSMITH_DIFFSINGER_VOICE to its directory (or drop it into ./voicebank)."
         )
+    key = str(path.resolve()).lower()
     with _voicebank_lock:
-        if _voicebank is None or _voicebank.path != path:
-            bank = _Voicebank(path=path)
+        if key not in _banks:
+            bank = _Voicebank(paths=_load_bank(path))
             bank.phoneme_ids = {
                 line: index
-                for index, line in enumerate(
-                    (path / "dsmain/phonemes.txt").read_text(encoding="utf-8").splitlines()
-                )
+                for index, line in enumerate(bank.paths.phonemes.read_text(encoding="utf-8").splitlines())
             }
             dsdict = yaml.safe_load((path / "dsdur/dsdict.yaml").read_text(encoding="utf-8"))
             bank.symbol_types = {s["symbol"]: s["type"] for s in dsdict["symbols"]}
-            entries = yaml.safe_load((path / "dsdur/dsdict-en.yaml").read_text(encoding="utf-8"))["entries"]
-            bank.en_dict = {e["grapheme"].lower(): e["phonemes"] for e in entries}
+            en_path = bank.paths.dictionaries.get("en")
+            if en_path is not None:
+                entries = yaml.safe_load(en_path.read_text(encoding="utf-8"))["entries"]
+                bank.en_dict = {e["grapheme"].lower(): e["phonemes"] for e in entries}
             bank.cmu = cmudict.dict()
-            _voicebank = bank
-    return _voicebank
+            _banks[key] = bank
+    return _banks[key]
 
 
 # ------------------------------------------------------------------ phonemizer
@@ -737,6 +1099,39 @@ def stitch_chunks(
 _EMBED_NEUTRAL = {"breathiness": 0.0, "voicing": 1.0, "tension": 0.0, "energy": 1.0}
 
 
+_FEED_DTYPES = {
+    "tensor(float)": np.float32,
+    "tensor(double)": np.float64,
+    "tensor(int64)": np.int64,
+    "tensor(int32)": np.int32,
+    "tensor(bool)": np.bool_,
+}
+
+
+def _feed(session, values: dict, context: str) -> dict:
+    """The declared inputs of a session, filled from ``values`` and cast to their dtypes.
+
+    Export packs differ in dtype as well as names (one bank's pitch model wants
+    ``note_midi`` as int64, another's as float), so every value is cast to whatever the
+    graph declares. A declared input we cannot fill fails loudly.
+    """
+    declared = [value for value in session.get_inputs()]
+    missing = [value.name for value in declared if value.name not in values]
+    if missing:
+        raise DiffSingerError(
+            f"The {context} model of this voicebank needs input(s) this render cannot provide: "
+            f"{', '.join(missing)}. This model family is not supported yet."
+        )
+    feed: dict = {}
+    for value in declared:
+        data = values[value.name]
+        dtype = _FEED_DTYPES.get(value.type)
+        if dtype is not None and isinstance(data, np.ndarray) and data.dtype != dtype:
+            data = data.astype(dtype)
+        feed[value.name] = data
+    return feed
+
+
 def _acoustic_inputs(
     session,
     *,
@@ -748,28 +1143,33 @@ def _acoustic_inputs(
     spk_embed,
     depth: float,
     steps: int,
+    speedup: float = SPEEDUP,
     breathiness: float | None = None,
     voicing: float | None = None,
     tension: float | None = None,
+    context: str = "acoustic",
 ) -> dict:
-    """The acoustic model's inputs, plus the variance embeds the model declares.
+    """The acoustic model's declared inputs, filled from the render settings.
 
-    A voicebank trained with breathiness/voicing/tension/energy embeddings expects those inputs
-    (its dsconfig says so, and ONNX refuses to run without them), so a user-set or neutral value
-    is fed whenever the loaded model declares the input. Hanami declares none of them, so its
-    inputs are exactly as before — existing renders stay byte-identical.
+    Only inputs the graph declares are fed — export packs differ (older ones take ``steps``,
+    newer ones ``speedup``; some have speaker embeddings, some do not). A bank trained with
+    breathiness/voicing/tension/energy embeddings expects those inputs, so a user-set or
+    neutral value is fed whenever the model declares the input. A declared input we cannot
+    fill raises with the model's name, so an incompatible bank fails loudly.
     """
     total_frames = int(ph_dur.sum())
-    inputs: dict = {
+    values: dict = {
         "tokens": tokens,
         "durations": ph_dur,
         "f0": f0,
         "gender": np.full((1, total_frames), gender, dtype=np.float32),
         "velocity": np.full((1, total_frames), velocity, dtype=np.float32),
-        "spk_embed": spk_embed,
         "depth": np.array(depth, dtype=np.float32),
         "steps": np.array(steps, dtype=np.int64),
+        "speedup": np.array(speedup, dtype=np.float32),
     }
+    if spk_embed is not None:
+        values["spk_embed"] = spk_embed
     declared = {value.name for value in session.get_inputs()}
     for name, setting in (
         ("breathiness", breathiness),
@@ -779,15 +1179,16 @@ def _acoustic_inputs(
     ):
         if name in declared:
             value = _EMBED_NEUTRAL[name] if setting is None else float(setting)
-            inputs[name] = np.full((1, total_frames), value, dtype=np.float32)
-    return inputs
+            values[name] = np.full((1, total_frames), value, dtype=np.float32)
+    return _feed(session, values, context)
 
 
 def render(
     notes: list[NoteSpec],
     output: Path,
     *,
-    mode: str = "nectar",
+    mode: str | None = None,
+    bank_id: str | Path | None = None,
     steps: int = DEFAULT_STEPS,
     depth: float = DEFAULT_DEPTH,
     velocity: float = 1.0,
@@ -800,35 +1201,37 @@ def render(
     seed: int | None = None,
     total_seconds: float | None = None,
 ) -> dict:
-    """Render the notes to a 44.1 kHz mono wav with the voicebank.
+    """Render the notes to a 44.1 kHz mono wav with one variant of a voicebank.
 
-    ``seed`` fixes the sampling noise of the diffusion models (patched into the ONNX graphs in
-    memory), so the same input renders identical audio; None draws fresh noise every run.
+    ``bank_id`` names the bank (slug/name/path; the first configured one by default) and
+    ``mode`` its voice variant (case-insensitive; the first when omitted). ``seed`` fixes the
+    sampling noise of the diffusion models (patched into the ONNX graphs in memory), so the
+    same input renders identical audio; None draws fresh noise every run.
     """
-    if mode not in MODES:
-        raise DiffSingerError(f"Unknown mode '{mode}'; use one of {', '.join(MODES)}.")
     if not notes:
         raise DiffSingerError("No notes to render.")
     if any(note.is_rest for note in notes):
         raise DiffSingerError("Rest notes are not supported yet; drop silent notes instead.")
-    bank = get_voicebank()
+    bank = get_voicebank(bank_id)
+    variant = bank.variant(mode)
 
     if seed is None:
 
-        def session_for(rel: str):
-            return bank.session(rel)
+        def session_for(path: Path):
+            return bank.session(path)
     else:
         # ORT's random generators live inside the session: a fresh session starts from the
         # patched seeds' initial state, while a reused one keeps advancing. So seeded renders
         # build fresh sessions (cached per render, not across renders) and are reproducible.
         created: dict[str, ort.InferenceSession] = {}
 
-        def session_for(rel: str):
-            if rel not in created:
-                created[rel] = ort.InferenceSession(
-                    seeded_model_bytes(bank.path / rel, seed), providers=["CPUExecutionProvider"]
+        def session_for(path: Path):
+            key = str(path)
+            if key not in created:
+                created[key] = ort.InferenceSession(
+                    seeded_model_bytes(path, seed), providers=["CPUExecutionProvider"]
                 )
-            return created[rel]
+            return created[key]
 
     # --- duration prediction
     segments: list[dict] = [{"phoneme": "SP", "note": -1, "kind": "pad"}]
@@ -841,28 +1244,37 @@ def render(
             segments.append({"phoneme": phone, "note": index, "kind": kind})
     segments.append({"phoneme": "SP", "note": -1, "kind": "pad"})
 
+    unknown = sorted({s["phoneme"] for s in segments if s["phoneme"] not in bank.phoneme_ids})
+    if unknown:
+        raise DiffSingerError(
+            f"Phoneme(s) {', '.join(unknown)} are not in '{bank.paths.display_name}'s phoneme "
+            "set; map the lyrics against this voicebank first."
+        )
     tokens = np.array([[bank.phoneme_ids[s["phoneme"]] for s in segments]], dtype=np.int64)
     word_div, word_dur = _word_inputs(segments, notes, bank)
-    encoder_out, x_masks = session_for("dsmain/linguistic.onnx").run(
+    linguistic = session_for(bank.paths.dur_linguistic)
+    encoder_out, x_masks = linguistic.run(
         None,
-        {
-            "tokens": tokens,
-            "word_div": np.array([word_div], dtype=np.int64),
-            "word_dur": np.array([word_dur], dtype=np.int64),
-        },
+        _feed(
+            linguistic,
+            {
+                "tokens": tokens,
+                "word_div": np.array([word_div], dtype=np.int64),
+                "word_dur": np.array([word_dur], dtype=np.int64),
+            },
+            f"'{bank.paths.display_name}' duration linguistic",
+        ),
     )[:2]
     note_pitch = np.array(
         [[notes[s["note"]].midi if s["note"] >= 0 else 0 for s in segments]], dtype=np.int64
     )
-    variance_embed = bank.embed("dsmain/embeds/variance", mode)
-    predicted_flat = session_for("dsdur/dur.onnx").run(
-        None,
-        {
-            "encoder_out": encoder_out,
-            "x_masks": x_masks,
-            "ph_midi": note_pitch,
-            "spk_embed": np.tile(variance_embed, (1, tokens.shape[1], 1)),
-        },
+    dur_embed = bank.embed("dur", variant)
+    dur_values = {"encoder_out": encoder_out, "x_masks": x_masks, "ph_midi": note_pitch}
+    if dur_embed is not None:
+        dur_values["spk_embed"] = np.tile(dur_embed, (1, tokens.shape[1], 1))
+    dur_session = session_for(bank.paths.dur)
+    predicted_flat = dur_session.run(
+        None, _feed(dur_session, dur_values, f"'{bank.paths.display_name}' duration")
     )[0][0]
     predicted_by_note: list[list[float]] = [[] for _ in notes]
     for position, segment in enumerate(segments):
@@ -880,26 +1292,38 @@ def render(
 
     # --- pitch
     note_dur, note_midis, note_rests = _note_partition(timeline, notes)
-    pitch_enc = session_for("dspitch/linguistic.onnx").run(None, {"tokens": tokens, "ph_dur": ph_dur})[0]
+    pitch_linguistic = session_for(bank.paths.pitch_linguistic)
+    pitch_enc = pitch_linguistic.run(
+        None,
+        _feed(
+            pitch_linguistic,
+            {"tokens": tokens, "ph_dur": ph_dur},
+            f"'{bank.paths.display_name}' pitch linguistic",
+        ),
+    )[0]
     pitch_base = np.zeros(total_frames, dtype=np.float32)
     frame = 0
     for frames, midi in zip(note_dur, note_midis, strict=True):
         pitch_base[frame : frame + frames] = midi
         frame += frames
-    pitch_out = session_for("dspitch/pitch.onnx").run(
-        None,
-        {
-            "encoder_out": pitch_enc,
-            "ph_dur": ph_dur,
-            "note_midi": np.array([note_midis], dtype=np.float32),
-            "note_rest": np.array([note_rests], dtype=bool),
-            "note_dur": np.array([note_dur], dtype=np.int64),
-            "pitch": pitch_base.reshape(1, -1),
-            "expr": np.full((1, total_frames), expr, dtype=np.float32),
-            "retake": np.ones((1, total_frames), dtype=bool),
-            "spk_embed": np.tile(bank.embed("dspitch/embeds", mode), (1, total_frames, 1)),
-            "steps": np.array(steps, dtype=np.int64),
-        },
+    pitch_embed = bank.embed("pitch", variant)
+    pitch_values = {
+        "encoder_out": pitch_enc,
+        "ph_dur": ph_dur,
+        "note_midi": np.array([note_midis], dtype=np.float32),
+        "note_rest": np.array([note_rests], dtype=bool),
+        "note_dur": np.array([note_dur], dtype=np.int64),
+        "pitch": pitch_base.reshape(1, -1),
+        "expr": np.full((1, total_frames), expr, dtype=np.float32),
+        "retake": np.ones((1, total_frames), dtype=bool),
+        "steps": np.array(steps, dtype=np.int64),
+        "speedup": np.array(SPEEDUP, dtype=np.float32),
+    }
+    if pitch_embed is not None:
+        pitch_values["spk_embed"] = np.tile(pitch_embed, (1, total_frames, 1))
+    pitch_session = session_for(bank.paths.pitch)
+    pitch_out = pitch_session.run(
+        None, _feed(pitch_session, pitch_values, f"'{bank.paths.display_name}' pitch")
     )[0][0]
     voiced = np.concatenate(
         [np.full(entry["frames"], entry["kind"] not in ("pad", "gap"), dtype=bool) for entry in timeline]
@@ -910,7 +1334,8 @@ def render(
     f0 = (440.0 * np.power(2.0, (pitch_out - 69.0) / 12.0)).astype(np.float32).reshape(1, -1)
 
     # --- acoustic + vocoder
-    acoustic_session = session_for("dsmain/acoustic.onnx")
+    acoustic_session = session_for(bank.paths.acoustic)
+    acoustic_embed = bank.embed("acoustic", variant)
     mel = acoustic_session.run(
         None,
         _acoustic_inputs(
@@ -920,15 +1345,19 @@ def render(
             f0=f0,
             gender=gender,
             velocity=velocity,
-            spk_embed=np.tile(bank.embed("dsmain/embeds/acoustic", mode), (1, total_frames, 1)),
+            spk_embed=None if acoustic_embed is None else np.tile(acoustic_embed, (1, total_frames, 1)),
             depth=depth,
             steps=steps,
             breathiness=breathiness,
             voicing=voicing,
             tension=tension,
+            context=f"'{bank.paths.display_name}' acoustic",
         ),
     )[0]
-    samples = session_for("dsvocoder/aidolgan.onnx").run(None, {"mel": mel, "f0": f0})[0][0]
+    vocoder = session_for(bank.paths.vocoder)
+    samples = vocoder.run(
+        None, _feed(vocoder, {"mel": mel, "f0": f0}, f"'{bank.paths.display_name}' vocoder")
+    )[0][0]
     if not np.isfinite(samples).all():
         raise DiffSingerError("The vocoder produced invalid samples.")
     samples = samples.astype(np.float32) * float(energy)
@@ -947,5 +1376,5 @@ def render(
         "sample_rate": SAMPLE_RATE,
         "frames": total_frames,
         "peak_db": round(20.0 * float(np.log10(max(peak, 1e-6))), 2),
-        "mode": mode,
+        "mode": variant,
     }

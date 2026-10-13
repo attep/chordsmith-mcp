@@ -581,6 +581,7 @@ class MappingResult(TypedDict):
     version: int
     wordless: bool
     voice_hint: str
+    bank: str | None
     duration_seconds: float
     warnings: list[str]
     notes: list[MappingNoteEntry]

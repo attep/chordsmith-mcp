@@ -100,7 +100,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `import_midi` | Imports a MIDI file made elsewhere (base64) and reports what it contains |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |
 | `delete_midi_file` / `rename_midi_file` | Tidies up the output folder |
-| `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or English via a DiffSinger voicebank) and mixes it with the backing |
+| `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or DiffSinger voicebanks — English and exact phonemes; several banks with their own variants, male and female) and mixes it with the backing |
 
 The create tools accept **voicing** options (inversions, open/drop-2, voice leading, bass note),
 **rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), a `lofi`
@@ -129,8 +129,10 @@ Caddy obtains HTTPS for your domain. Prefer no open ports? Use the Cloudflare Tu
 ## Singing
 
 Wordless hums and Japanese kana work with the bundled VOICEVOX engine
-(`docker compose --profile singing up -d`). English lyrics need a DiffSinger voicebank that you
-download and mount yourself — it is never bundled or committed. The mixer measures the vocal
+(`docker compose --profile singing up -d`). English lyrics and exact phonemes need DiffSinger
+voicebanks that you download and mount yourself — several can live side by side (`./voicebank`
+is scanned; each bank brings its voice variants and languages, e.g. the male TIGER DS). They
+are never bundled or committed. The mixer measures the vocal
 against the band, can compress the voice or duck the band under it, and renders per-track stems
 you can balance with `backing_levels`. The guide track is auto-picked (an exact
 `Vocal`/`Voice`/`Melody` name first, else the first melody-like name); pass `guide_track` when

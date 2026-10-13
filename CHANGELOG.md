@@ -12,6 +12,29 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.26.0] - 2026-10-13
+
+### Added
+
+- **Multiple DiffSinger voicebanks**: `CHORDSMITH_DIFFSINGER_VOICE` takes several banks
+  (path-separated) or a parent folder, and every directory with a `dsconfig.yaml` — including
+  the auto-scanned `./voicebank` — is registered with its own voice variants, languages and
+  soft controls. `list_singing_voices` lists them all; voice ids are
+  `diffsinger:<bank>[/<variant>]` (short words like `hanami/nectar` still resolve) and
+  `map_vocal_lyrics` gains `voice_id` so phonemes and words validate against the target bank
+  (sets differ: TIGER has `aa` but no bare `a`). Per-bank metadata (name and author from the
+  character files, licence notes for the tested banks) is reported, and a broken bank appears
+  with its error instead of taking the listing down.
+
+### Changed
+
+- The DiffSinger adapter resolves each bank's model files, speakers and dictionaries from its
+  own `dsconfig.yaml` files instead of Hanami's fixed layout, feeds every ONNX graph exactly
+  the inputs it declares (casting dtypes per graph), and supports export packs that use
+  `speedup` instead of `steps`, banks without speaker or pitch embeddings, and any vocoder
+  name. Verified end-to-end with Hanami v1.0, LEONA v0.0.1b and the male TIGER DS v102;
+  voicebank folders are listed per bank in `docs/singing.md`.
+
 ## [0.25.0] - 2026-10-13
 
 ### Added

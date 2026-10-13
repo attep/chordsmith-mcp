@@ -349,14 +349,15 @@ async def test_list_singing_voices_diffsinger(fake_engine):
     result = await _call("list_singing_voices", {"engine": "diffsinger"})
     data = result.structuredContent
     voices = data["voices"]
-    assert [v["voice_id"] for v in voices] == [
-        "diffsinger:hanami/root",
-        "diffsinger:hanami/fragrance",
-        "diffsinger:hanami/nectar",
+    hanami = [v for v in voices if v["voice_id"].startswith("diffsinger:hoshino_hanami")]
+    assert [v["voice_id"] for v in hanami] == [
+        "diffsinger:hoshino_hanami/root",
+        "diffsinger:hoshino_hanami/fragrance",
+        "diffsinger:hoshino_hanami/nectar",
     ]
     assert all(v["language"] == "en" for v in voices)
-    assert "Lotte V" in voices[0]["credit"]
-    assert "non-commercial" in data["commercial_status"]
+    assert "Lotte V" in hanami[0]["credit"]
+    assert "non-commercial" in hanami[0]["licence"]
 
 
 # ------------------------------------------------------------------ mixing
@@ -1474,6 +1475,8 @@ def test_voicebank_soft_controls_read_from_dsconfig(tmp_path, monkeypatch):
         "voicing": False,
         "tension": True,
         "energy_embed": False,
+        "key_shift": True,
+        "speed": True,
     }
 
 
@@ -1481,7 +1484,12 @@ def test_settings_dict_is_voicebank_aware(monkeypatch):
     monkeypatch.setattr(
         diffsinger,
         "soft_controls",
-        lambda: {"voicebank": "Hanami", "breathiness": False, "voicing": False, "tension": False},
+        lambda identifier=None: {
+            "voicebank": "Hanami",
+            "breathiness": False,
+            "voicing": False,
+            "tension": False,
+        },
     )
     with pytest.raises(singing.SingingError, match="Hanami"):
         singing._settings_dict(singing.SoftSettings(breathiness=0.8), "diffsinger")
@@ -1490,7 +1498,12 @@ def test_settings_dict_is_voicebank_aware(monkeypatch):
     monkeypatch.setattr(
         diffsinger,
         "soft_controls",
-        lambda: {"voicebank": "Airy", "breathiness": True, "voicing": True, "tension": True},
+        lambda identifier=None: {
+            "voicebank": "Airy",
+            "breathiness": True,
+            "voicing": True,
+            "tension": True,
+        },
     )
     data = singing._settings_dict(singing.SoftSettings(breathiness=0.8, voicing=0.4), "diffsinger")
     assert data["breathiness"] == 0.8 and data["voicing"] == 0.4
@@ -1505,6 +1518,7 @@ def test_acoustic_inputs_feed_declared_embeds_only():
     class _Input:
         def __init__(self, name):
             self.name = name
+            self.type = "tensor(float)"
 
     class _Session:
         def __init__(self, names):
@@ -1515,7 +1529,14 @@ def test_acoustic_inputs_feed_declared_embeds_only():
 
     ph_dur = _numpy.array([[2, 2]], dtype="int64")
     common = dict(
-        tokens=None, ph_dur=ph_dur, f0=None, gender=0.0, velocity=1.0, spk_embed=None, depth=0.6, steps=20
+        tokens=None,
+        ph_dur=ph_dur,
+        f0=None,
+        gender=0.0,
+        velocity=1.0,
+        spk_embed=_numpy.zeros((1, 2, 256), dtype="float32"),
+        depth=0.6,
+        steps=20,
     )
     plain = diffsinger._acoustic_inputs(
         _Session(["tokens", "durations", "f0", "gender", "velocity", "spk_embed", "depth", "steps"]),
@@ -1545,6 +1566,19 @@ def test_acoustic_inputs_feed_declared_embeds_only():
     assert embedded["voicing"].tolist()[0] == pytest.approx([1.0] * 4)  # neutral when unset
     assert embedded["energy"].tolist()[0] == pytest.approx([1.0] * 4)  # energy setting is output gain
     assert "tension" not in embedded  # not declared by this model
+
+    # A model that declares spk_embed with no bank embeddings behind it fails loudly
+    with pytest.raises(diffsinger.DiffSingerError, match="spk_embed"):
+        diffsinger._acoustic_inputs(
+            _Session(["tokens", "durations", "f0", "spk_embed"]),
+            **{**common, "spk_embed": None},
+        )
+    # Newer export packs declare speedup instead of steps (and no speaker embedding)
+    speed = diffsinger._acoustic_inputs(
+        _Session(["tokens", "durations", "f0", "depth", "speedup"]),
+        **{**common, "spk_embed": None},
+    )
+    assert set(speed) == {"tokens", "durations", "f0", "depth", "speedup"}
 
 
 @needs_voicebank
@@ -1578,7 +1612,12 @@ async def test_diffsinger_job_passes_soft_embeds_to_the_worker(store, fake_engin
     monkeypatch.setattr(
         diffsinger,
         "soft_controls",
-        lambda: {"voicebank": "Airy", "breathiness": True, "voicing": True, "tension": True},
+        lambda identifier=None: {
+            "voicebank": "Airy",
+            "breathiness": True,
+            "voicing": True,
+            "tension": True,
+        },
     )
     monkeypatch.setattr(singing.subprocess, "Popen", lambda *args, **kwargs: _FakeWorker(*args, **kwargs))
     started = await _call(

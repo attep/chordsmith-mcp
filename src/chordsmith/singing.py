@@ -180,6 +180,7 @@ class VocalMapping:
     wordless: bool
     warnings: list[str]
     created_at: float
+    bank: str | None = None
 
 
 @dataclass
@@ -664,9 +665,11 @@ def build_mapping(
     holds: dict[int, int] | None,
     align_stress: bool = False,
     words: dict[str, str] | None = None,
+    voice_id: str | None = None,
 ) -> VocalMapping:
     wordless = lyrics is None or lyrics.strip() == ""
     warnings: list[str] = []
+    bank_ref: str | None = None
     retimed: dict[int, tuple[float, float]] = {}
     sung = [note for note in score.notes if not note.is_rest]
 
@@ -705,7 +708,8 @@ def build_mapping(
                     "English lyrics need the DiffSinger voicebank (see docs/singing.md) and "
                     "CHORDSMITH_DIFFSINGER_VOICE. Use wordless mode or Japanese kana for VOICEVOX."
                 )
-            bank = diffsinger.get_voicebank()
+            bank = diffsinger.get_voicebank(_diffsinger_bank_id(voice_id))
+            bank_ref = str(bank.root)
             if language == "en":
                 english = True
                 groups = diffsinger.split_syllables(lyrics)
@@ -815,6 +819,7 @@ def build_mapping(
         wordless=wordless,
         warnings=warnings,
         created_at=time.time(),
+        bank=bank_ref,
     )
 
 
@@ -825,6 +830,7 @@ def _mapping_payload(mapping: VocalMapping) -> dict:
         "version": mapping.version,
         "wordless": mapping.wordless,
         "voice_hint": mapping.voice_hint,
+        "bank": mapping.bank,
         "duration_seconds": round(mapping.total_seconds, 3),
         "warnings": mapping.warnings,
         "notes": [
@@ -955,7 +961,7 @@ def resolve_speakers(voice_id: str, singers: list[dict]) -> tuple[int, int]:
     return teacher, speaker
 
 
-def _settings_dict(settings: SoftSettings | None, engine: str) -> dict:
+def _settings_dict(settings: SoftSettings | None, engine: str, voice_id: str | None = None) -> dict:
     data = (settings or SoftSettings()).model_dump(exclude_none=True, exclude_defaults=True)
     if engine == "voicevox":
         for unsupported in ("breathiness", "voicing", "tension", "vibrato"):
@@ -973,7 +979,7 @@ def _settings_dict(settings: SoftSettings | None, engine: str) -> dict:
             raise SingingError(
                 "'vibrato' is not supported yet (DiffSinger vibrato needs pitch-curve support)."
             )
-        capabilities = diffsinger.soft_controls()
+        capabilities = diffsinger.soft_controls(_diffsinger_bank_id(voice_id))
         if capabilities:
             for param in ("breathiness", "voicing", "tension"):
                 if param in data and not capabilities.get(param):
@@ -991,6 +997,16 @@ def parse_voice_engine(voice_id: str) -> tuple[str, str]:
     if engine not in ("voicevox", "diffsinger") or not rest:
         raise SingingError(f"Unknown voice '{voice_id}'. Use list_singing_voices to pick one.")
     return engine, rest
+
+
+def _diffsinger_bank_id(voice_id: str | None) -> str | None:
+    """The bank id inside a diffsinger voice id; None for voicevox ids and wordless mode."""
+    if not voice_id:
+        return None
+    engine, _, rest = voice_id.partition(":")
+    if engine != "diffsinger" or not rest:
+        return None
+    return rest.split("/", 1)[0]
 
 
 def _voicevox_payload(mapping: VocalMapping) -> dict:
@@ -1018,9 +1034,27 @@ def _run_voicevox(job: SingingJob, mapping: VocalMapping, score: VocalScore, que
 
 def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore, path: Path) -> dict:
     _, voice = parse_voice_engine(job.voice_id)
-    mode = voice.split("/", 1)[-1]
-    if mode not in diffsinger.MODES:
-        raise SingingError(f"Unknown DiffSinger mode '{mode}'; use one of {', '.join(diffsinger.MODES)}.")
+    bank_id, _, variant = voice.partition("/")
+    try:
+        bank = diffsinger.get_voicebank(bank_id)
+        mode = bank.variant(variant or None)
+    except diffsinger.DiffSingerError as exc:
+        raise SingingError(str(exc)) from None
+    unknown = sorted(
+        {
+            phone
+            for note in mapping.notes
+            if note.phonemes
+            for phone in note.phonemes
+            if phone not in bank.phoneme_ids
+        }
+    )
+    if unknown:
+        raise SingingError(
+            f"The mapped lyrics use phoneme(s) {', '.join(unknown)} that "
+            f"'{bank.paths.display_name}' does not have; re-run map_vocal_lyrics with "
+            f"voice_id 'diffsinger:{bank_id}' first."
+        )
     specs = [
         {
             "phonemes": note.phonemes or [],
@@ -1041,6 +1075,7 @@ def _run_diffsinger(job: SingingJob, mapping: VocalMapping, score: VocalScore, p
     spec = {
         "notes": specs,
         "output": str(path),
+        "bank": str(bank.root),
         "mode": mode,
         "steps": int(job.settings.get("steps", 20)),
         "depth": float(job.settings.get("depth", 0.6)),
@@ -2764,8 +2799,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "voices": voices,
             }
         if engine in ("diffsinger", "all"):
-            info = diffsinger.describe()
-            if info is None:
+            banks = diffsinger.list_voicebanks()
+            if not banks:
                 if engine == "diffsinger":
                     raise SingingError(
                         "No DiffSinger voicebank configured; set CHORDSMITH_DIFFSINGER_VOICE "
@@ -2773,40 +2808,56 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                     )
                 result["engines"]["diffsinger"] = {"configured": False, "voices": []}
             else:
-                bank_controls = info.get("soft_controls") or {}
+                voices: list[dict] = []
+                for info in banks:
+                    if info.get("error"):
+                        voices.append(
+                            {
+                                "voice_id": f"diffsinger:{Path(info['path']).name}",
+                                "name": f"{info['voicebank']} (not usable)",
+                                "engine": "diffsinger",
+                                "error": info["error"],
+                            }
+                        )
+                        continue
+                    controls = info.get("soft_controls") or {}
+                    for variant in info.get("variants") or [None]:
+                        voices.append(
+                            {
+                                "voice_id": f"diffsinger:{info['slug']}"
+                                + (f"/{diffsinger._slug(variant)}" if variant else ""),
+                                "name": info["voicebank"] + (f" / {variant}" if variant else ""),
+                                "engine": "diffsinger",
+                                "language": "en",
+                                "languages": info.get("languages") or ["en"],
+                                "style_type": "diffsinger",
+                                "query_via_teacher": False,
+                                "licence": info["licence"],
+                                "credit": info["credit"],
+                                "soft_controls": {
+                                    "energy": True,
+                                    "velocity": bool(controls.get("speed", True)),
+                                    "gender": bool(controls.get("key_shift", True)),
+                                    "expr": True,
+                                    "steps": True,
+                                    "depth": True,
+                                    "breathiness": bool(controls.get("breathiness")),
+                                    "voicing": bool(controls.get("voicing")),
+                                    "tension": bool(controls.get("tension")),
+                                    "vibrato": False,
+                                },
+                            }
+                        )
+                first = banks[0]
                 result["engines"]["diffsinger"] = {
                     "configured": True,
-                    "voicebank": info["voicebank"],
-                    "credit": info["credit"],
-                    "licence": info["licence"],
-                    "commercial_status": info["commercial_status"],
-                    "voices": [
-                        {
-                            "voice_id": f"diffsinger:hanami/{mode}",
-                            "name": f"Hoshino Hanami / {mode.capitalize()}"
-                            + (" (soft)" if mode == "nectar" else ""),
-                            "engine": "diffsinger",
-                            "language": "en",
-                            "style_type": "diffsinger",
-                            "query_via_teacher": False,
-                            "licence": info["licence"],
-                            "credit": info["credit"],
-                            "commercial_status": info["commercial_status"],
-                            "soft_controls": {
-                                "energy": True,
-                                "velocity": True,
-                                "gender": True,
-                                "expr": True,
-                                "steps": True,
-                                "depth": True,
-                                "breathiness": bool(bank_controls.get("breathiness")),
-                                "voicing": bool(bank_controls.get("voicing")),
-                                "tension": bool(bank_controls.get("tension")),
-                                "vibrato": False,
-                            },
-                        }
-                        for mode in diffsinger.MODES
+                    "voicebank": first.get("voicebank"),
+                    "credit": first.get("credit"),
+                    "licence": first.get("licence"),
+                    "voicebanks": [
+                        info.get("slug") or Path(info["path"]).name for info in banks if not info.get("error")
                     ],
+                    "voices": voices,
                 }
         if engine == "all":
             return result["engines"]
@@ -2882,6 +2933,14 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "made-up languages or names get exact sounds."
             ),
         ] = None,
+        voice_id: Annotated[
+            str | None,
+            Field(
+                description="DiffSinger only: the target voice id from list_singing_voices, e.g. "
+                "'diffsinger:hanami/nectar' — phonemes and words are validated against that "
+                "voicebank. Omit to validate against the first configured bank."
+            ),
+        ] = None,
         holds: Annotated[
             dict[int, int] | None,
             Field(
@@ -2905,15 +2964,16 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         phonemes, timings) plus warnings, so mistakes are caught before rendering. The mapping is
         kept for 24 hours. English tokens are phonemized here; unknown words are refused by name
         (all of them at once) and words are never dropped or invented. Made-up words get exact
-        sounds through ``words``, or bypass the dictionaries entirely with
-        language='phonemes'. Mismatches produce warnings. The next step is render_singing with
-        the returned mapping_id.
+        sounds through ``words``, or bypass the dictionaries entirely with language='phonemes'.
+        ``voice_id`` picks the target voicebank for the validation (the first configured bank
+        when omitted). Mismatches produce warnings. The next step is render_singing with the
+        returned mapping_id.
         """
         with _registry.lock:
             score = _registry.scores.get(score_id)
         if score is None:
             raise SingingError(f"Score '{score_id}' not found (scores expire after 24 hours).")
-        mapping = build_mapping(score, lyrics, language, holds, align_stress, words)
+        mapping = build_mapping(score, lyrics, language, holds, align_stress, words, voice_id)
         with _registry.lock:
             _registry.versions[score_id] = _registry.versions.get(score_id, 0) + 1
             mapping.version = _registry.versions[score_id]
@@ -2955,7 +3015,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         if mapping is None or score is None:
             raise SingingError(f"Mapping '{mapping_id}' not found (mappings expire after 24 hours).")
         engine, _ = parse_voice_engine(voice_id)
-        settings_dict = _settings_dict(settings, engine)
+        settings_dict = _settings_dict(settings, engine, voice_id)
         echo_settings = (settings or SoftSettings()).model_dump(exclude_none=True)
         job, reused = start_job(mapping, score, voice_id, settings_dict, echo_settings)
         return {"job_id": job.job_id, "status": job.status, "reused": reused}

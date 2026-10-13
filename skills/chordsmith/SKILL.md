@@ -143,10 +143,15 @@ say so.
   automation needs smoothing before building, and vocals must be re-rendered after a tempo
   fix. Full recipe: `docs/guitarpro.md`.
 - **Voices**: VOICEVOX sings Japanese kana or a hum; its whisper styles are Japanese-only and
-  mostly air (they drift off pitch). English needs a DiffSinger voicebank the user provides.
-  DiffSinger soft controls: `velocity`, `gender` (0 = the bank's own character), `expr`, `steps`,
-  `depth`, `seed`; `breathiness`/`voicing`/`tension` work only when the voicebank declares the
-  matching `use_*_embed` (the server's error names what the bank lacks). No mixer setting adds
+  mostly air (they drift off pitch). English and exact phonemes need DiffSinger voicebanks the
+  user provides — several may be configured at once (`./voicebank` is scanned); ids are
+  `diffsinger:<bank>[/<variant>]` (short words like `hanami/nectar` still resolve) and
+  `list_singing_voices` shows each bank's variants, languages and licence. Pass `voice_id` to
+  `map_vocal_lyrics` so phonemes validate against the target bank (sets differ: TIGER has `aa`,
+  no bare `a`). DiffSinger soft controls: `velocity`, `gender` (0 = the bank's own character),
+  `expr`, `steps`, `depth`, `seed`; `breathiness`/`voicing`/`tension` work only when the
+  voicebank declares the matching `use_*_embed` (the server's error names what the bank lacks).
+  No mixer setting adds
   breath to a voice model that has none — for an airy feel use a soft take plus
   `vocal_bus.air_layer` (band-shaped noise gated by the voice: air, not words).
 - **Licences**: never bundle or redistribute voicebanks; VOICEVOX characters and the DiffSinger

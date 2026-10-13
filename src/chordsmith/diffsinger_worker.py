@@ -43,7 +43,8 @@ def main(argv: list[str] | None = None) -> int:
             diffsinger.render(
                 chunk.notes,
                 chunk_path,
-                mode=spec.get("mode", "nectar"),
+                mode=spec.get("mode"),
+                bank_id=spec.get("bank"),
                 steps=int(spec.get("steps", diffsinger.DEFAULT_STEPS)),
                 depth=float(spec.get("depth", diffsinger.DEFAULT_DEPTH)),
                 velocity=float(spec.get("velocity", 1.0)),
@@ -65,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             "done": True,
             "duration_seconds": round(duration, 3),
             "chunks": len(chunks),
-            "mode": spec.get("mode", "nectar"),
+            "mode": spec.get("mode"),
             "peak_db": round(audio.wav_peak_db(output), 2),
         }
     )
