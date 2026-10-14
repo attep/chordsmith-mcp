@@ -51,6 +51,11 @@ parameters.
 
 ## Notes and limits
 
+- `--render` runs in non-realtime mode and waits `--load-wait` seconds (default 15) before the
+  first block, so sample-based plugins (Kontakt libraries and friends) finish loading their
+  patch — without it, faster-than-realtime renders started before samples were ready (whole
+  instruments silent, or lines coming in late). Raise it for huge patches, lower it when only
+  quick synths render.
 - VST3 only (VST2 is not supported); plugins are user-supplied and never bundled.
 - Presets are the plugin's VST3 programs; `.vstpreset` state files are not supported yet.
 - Plugins run headless: ones that insist on a GUI may fail to instantiate, and that error is

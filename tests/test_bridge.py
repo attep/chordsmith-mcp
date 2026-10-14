@@ -62,6 +62,7 @@ class _FakeBridgeHandler(BaseHTTPRequestHandler):
         elif self.path == "/job":
             outputs = {}
             args = payload.get("args") or []
+            _FakeBridgeHandler.last_job_args = list(args)
             for index in range(1, len(args)):
                 if args[index - 1] == "--wav":
                     outputs[args[index]] = base64.b64encode(b"RIFF").decode()
@@ -128,6 +129,21 @@ def test_bridge_routing_and_file_transfer(fake_bridge, tmp_path, monkeypatch):
     monkeypatch.setenv("CHORDSMITH_VST_BRIDGE_TOKEN", "wrong")
     with pytest.raises(audio.AudioError):
         audio.bridge_plugin_scan()
+
+
+def test_render_sends_load_wait_only_when_configured(fake_bridge, tmp_path, monkeypatch):
+    source = tmp_path / "stem.mid"
+    source.write_bytes(b"MThd")
+    target = tmp_path / "out.wav"
+    payload = audio.render_vst(fake_bridge, DRUM, None, None, source, target)
+    assert payload["ok"] is True
+    assert "--load-wait" not in _FakeBridgeHandler.last_job_args  # old host builds keep working
+
+    monkeypatch.setenv("CHORDSMITH_VST_LOAD_WAIT", "25")
+    payload = audio.render_vst(fake_bridge, DRUM, None, None, source, target)
+    assert payload["ok"] is True
+    args = _FakeBridgeHandler.last_job_args
+    assert args[args.index("--load-wait") + 1] == "25"
 
 
 async def test_bridge_tools_see_both_worlds(store, monkeypatch, fake_bridge, tmp_path):

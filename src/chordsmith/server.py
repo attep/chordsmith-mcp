@@ -1392,6 +1392,9 @@ def _render_stems(
                 # download URLs) as a 0-byte placeholder while the engine works — minutes for a
                 # big sample library.
                 renderer.render(stem_midi, spec, working, effects)
+                if spec.chain or spec.effects:
+                    with store.claimed_path(None, f"{source.stem}_{name}_raw", extension=".wav") as raw_wav:
+                        shutil.copyfile(working, raw_wav)
                 windows = renderers.section_gain_windows(spec, section_timeline)
                 if windows:
                     renderers.apply_section_gains(working, windows, spec.gain_db)

@@ -17,8 +17,8 @@ DEFAULT_SOUNDFONT_PATHS = (
     "/usr/share/soundfonts/FluidR3_GM.sf2",
     "/usr/share/soundfonts/default.sf2",
 )
-RENDER_TIMEOUT_SECONDS = 300
-VST_TIMEOUT_SECONDS = 600
+RENDER_TIMEOUT_SECONDS = 2400
+VST_TIMEOUT_SECONDS = 2400
 EFFECTS_TAIL_SECONDS = 3.0  # with effects on, keep FluidSynth's natural tail past the last note
 
 
@@ -36,6 +36,15 @@ def find_ffmpeg() -> str | None:
 
 def find_sfizz_render() -> str | None:
     return os.environ.get("CHORDSMITH_SFIZZ_RENDER") or shutil.which("sfizz_render")
+
+
+def find_vst_load_wait() -> str | None:
+    """How many seconds vst_host waits for plugins to load samples before a VST render.
+
+    Off unless CHORDSMITH_VST_LOAD_WAIT is set: the flag only exists on newer vst_host
+    builds, so we never send it implicitly. The host itself keeps a sane default wait.
+    """
+    return os.environ.get("CHORDSMITH_VST_LOAD_WAIT")
 
 
 def bridge_url() -> str | None:
@@ -394,6 +403,7 @@ def render_sfizz(sfz: str, midi_path: Path, target: Path) -> None:
             str(target),
             "--samplerate",
             "44100",
+            "--use-eot",
         ]
     )
     if not target.is_file():
@@ -519,6 +529,9 @@ def render_vst(
     if preset:
         args += ["--preset", preset]
     args += _set_arguments(sets)
+    wait = find_vst_load_wait()
+    if wait:
+        args += ["--load-wait", wait]
     return _run_vst_host(host, args)
 
 

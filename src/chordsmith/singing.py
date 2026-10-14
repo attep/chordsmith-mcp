@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2448,9 +2449,13 @@ def remove_track(source: Path, target: Path, track_index: int) -> None:
 
 
 def extract_track(source: Path, target: Path, track_index: int) -> None:
-    """Write a copy of ``source`` with the conductor track and one note track (a stem)."""
+    """Write a copy of ``source`` with every note-free track (the conductor) and one note track (a stem)."""
     midi = mido.MidiFile(source)
-    keep = [0, track_index] if track_index != 0 else [0]
+    keep = [
+        index
+        for index, track in enumerate(midi.tracks)
+        if index == track_index or not any(m.type == "note_on" and m.velocity > 0 for m in track)
+    ]
     midi.tracks = [midi.tracks[index] for index in keep]
     midi.save(target)
 
@@ -2641,6 +2646,9 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
                     renderer = renderers.get_renderer(spec.engine)
                     try:
                         renderer.render(stem_midi, spec, stem_wav, effects)
+                        if spec.chain or spec.effects:
+                            with store.claimed_path(None, f"{source_path.stem}_{name}_raw", extension=".wav") as raw_wav:
+                                shutil.copyfile(stem_wav, raw_wav)
                         windows = renderers.section_gain_windows(spec, section_timeline)
                         if windows:
                             renderers.apply_section_gains(stem_wav, windows, spec.gain_db)

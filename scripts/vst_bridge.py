@@ -74,6 +74,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # keep the console quiet
         pass
 
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            pass
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
+
     def _authorized(self) -> bool:
         token = self.server.token
         return not token or self.headers.get("X-Chordsmith-Token") == token
@@ -132,6 +144,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         scratch = tempfile.mkdtemp(prefix="cs-bridge-")
         try:
             rewritten = [str(item) for item in args]
+            wait = os.environ.get("CHORDSMITH_VST_LOAD_WAIT")
+            if wait and "--render" in rewritten and "--load-wait" not in rewritten:
+                rewritten += ["--load-wait", wait]
             rewritten_map: dict[str, str] = {}  # temp path -> the path the caller gave us
             for index in range(1, len(rewritten)):
                 if rewritten[index - 1] not in FILE_FLAGS:

@@ -86,6 +86,9 @@ machine and point the server at it.
    - `CHORDSMITH_VST_BRIDGE_SHARED_FROM` / `CHORDSMITH_VST_BRIDGE_SHARED_TO` = the folder both
      machines see, e.g. `/data` and `D:\ChordSmith\data` — editor captures land there so the
      server can read them
+   - `CHORDSMITH_VST_LOAD_WAIT` = optional; seconds to let big libraries (e.g. Kontakt) load
+     samples before a render is trusted. Set it on the server (sent with each render) and/or on
+     the bridge itself — it reaches `vst_host` as `--load-wait` either way.
 3. `list_plugins` now lists the bridge's plugins, vst/sfizz renders route their VST work to the
    bridge, and `open_plugin_state_editor` opens the window **on the bridge's desktop** with the
    saved state appearing in the shared folder.

@@ -203,6 +203,7 @@ ChordSmith reads these optional environment variables:
 | `CHORDSMITH_SFZ_DIR` | unset | Folder whose `.sfz` instruments `list_instruments` lists (Docker: `/sfz`, mounted read-only) |
 | `CHORDSMITH_VST_DIR` | unset | Folder whose `.vst3` plugins `list_plugins` lists (Docker: `/vst`, mounted read-only) |
 | `CHORDSMITH_VST_HOST` | `vst_host` on PATH | The VST host binary, e.g. the released `vst_host.exe` on Windows (see [VST plugins](vst.md)) |
+| `CHORDSMITH_VST_LOAD_WAIT` | unset | Seconds `vst_host` waits for plugins to load samples before a VST render; only sent to hosts built with `--load-wait` support |
 
 The online-related variables are explained in [Run it online](remote.md#settings).
 

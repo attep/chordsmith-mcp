@@ -37,6 +37,10 @@
     Every mode prints one JSON line on stdout ({"ok": true, ...} or {"ok": false, "error": ...}).
 */
 
+#ifdef _WIN32
+#include <winsock2.h>  // before any windows.h from JUCE; NI plugins (Massive X) need WSAStartup
+#endif
+
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -66,6 +70,7 @@ struct Options {
     juce::String output;
     juce::String saveState;  // --editor / --dump-state output file
     double tail = 2.0;
+    double loadWait = 15.0;  // seconds of wall-clock sample loading before the first block
     int parameterValues = -1;
     int parameterLimit = 200;
     bool help = false;
@@ -101,7 +106,7 @@ void printUsage() {
               << "  vst_host --list --plugin X.vst3\n"
               << "  vst_host --params --plugin X.vst3 [--param-values INDEX] [--param-limit N]\n"
               << "  vst_host --render --plugin X.vst3 [--state FILE] [--preset NAME|INDEX] "
-                 "[--set INDEX=VALUE|NAME] [--tail SECONDS] --midi in.mid --wav out.wav\n"
+                 "[--set INDEX=VALUE|NAME] [--tail SECONDS] [--load-wait SECONDS] --midi in.mid --wav out.wav\n"
               << "  vst_host --process [--plugin X.vst3 [--state FILE] [--preset NAME|INDEX] "
                  "[--set INDEX=VALUE|NAME]]... --in in.wav --out out.wav\n"
               << "  vst_host --editor --plugin X.vst3 [--state FILE] [--save-state FILE]\n"
@@ -171,6 +176,8 @@ bool parseOptions(int argc, char** argv, Options& options, juce::String& error) 
             options.output = value(arg);
         } else if (arg == "--tail") {
             options.tail = value(arg).getDoubleValue();
+        } else if (arg == "--load-wait") {
+            options.loadWait = value(arg).getDoubleValue();
         } else {
             error = "Unknown argument '" + arg + "'";
             return false;
@@ -647,12 +654,29 @@ int runRender(const Options& options) {
         return fail("'" + types[0]->name + "' is an effect, not an instrument; use --process for effects");
     auto instance = instantiate(*types[0], error);
     if (instance == nullptr) return fail(error);
+    instance->setNonRealtime(true);
     configureBuses(*instance, true);
     instance->prepareToPlay(kSampleRate, kBlockSize);
     if (!applyState(*instance, options.states[0], error)) return fail(error);
     if (!applyPreset(*instance, options.presets[0], error)) return fail(error);
     if (const auto setsError = applySets(*instance, options.sets[0]); setsError.isNotEmpty())
         return fail(setsError);
+
+    // Sample-based plugins (Kontakt and friends) load patches asynchronously. Process silent
+    // blocks for a short wall-clock wait so the first rendered block already has audio: without
+    // this, faster-than-realtime renders started before patches were ready (whole instruments
+    // silent, or lines coming in late).
+    {
+        juce::AudioBuffer<float> warm(2, kBlockSize);
+        juce::MidiBuffer silence;
+        const double deadline =
+            juce::Time::getMillisecondCounterHiRes() + juce::jmax(0.0, options.loadWait) * 1000.0;
+        while (juce::Time::getMillisecondCounterHiRes() < deadline) {
+            warm.clear();
+            instance->processBlock(warm, silence);
+            juce::Thread::sleep(20);
+        }
+    }
 
     std::vector<TimedMessage> events;
     double end = 0.0;
@@ -673,6 +697,7 @@ int runRender(const Options& options) {
     std::unique_ptr<juce::AudioFormatWriter> holder(writer);
 
     size_t next = 0;
+    int blockIndex = 0;
     for (juce::int64 start = 0; start < totalFrames; start += kBlockSize) {
         midiBuffer.clear();
         while (next < events.size() &&
@@ -685,6 +710,10 @@ int runRender(const Options& options) {
         buffer.clear();
         instance->processBlock(buffer, midiBuffer);
         holder->writeFromAudioSampleBuffer(buffer, 0, kBlockSize);
+        // Some engines (Massive X's Qt/NI stack) keep parts of their DSP on the message thread;
+        // pumping the loop between chunks matches how they run inside a DAW's live process.
+        if (++blockIndex % 50 == 0)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(1);
     }
     const double seconds = static_cast<double>(totalFrames) / kSampleRate;
     std::cout << "{\"ok\":true,\"mode\":\"render\",\"plugin\":" << jsonString(types[0]->name)
@@ -712,6 +741,7 @@ int runProcess(const Options& options) {
             return fail("'" + types[0]->name + "' is an instrument; --process takes effects");
         auto instance = instantiate(*types[0], error);
         if (instance == nullptr) return fail(error);
+        instance->setNonRealtime(true);
         configureBuses(*instance, false);
         instance->prepareToPlay(kSampleRate, kBlockSize);
         if (!applyState(*instance, options.states[i], error)) return fail(error);
@@ -814,6 +844,11 @@ int runDumpState(const Options& options) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // NI plugins (Massive X) use ZeroMQ for their engine IPC and assert without Winsock initialized.
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
     juce::ScopedJuceInitialiser_GUI initialise;
     Options options;
     juce::String error;

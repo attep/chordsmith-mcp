@@ -423,6 +423,10 @@ send a track gets the GM default (a subtle reverb; send 0 is fully dry).
 for the backing, so a mix can be wet too; the vocal's own `vocal_reverb` is a separate effect and
 is never applied to instruments.
 
+**Raw takes:** a track whose spec sets `effects` or `chain` also saves the unprocessed engine render
+as `<source>_<track>_raw.wav` (for `render_audio` stems and for mix backings), so the dry instrument
+can be taken into other tools. Tracks without processing need no raw copy.
+
 ## render_audio_job and get_render_job
 
 For renders that may outrun a client's tool timeout — a three-minute, nine-track stems render

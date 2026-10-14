@@ -12,6 +12,37 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+## [0.27.0] - 2026-10-14
+
+### Added
+
+- Tracks whose spec sets `effects` or `chain` now keep an automatic dry copy of the engine's
+  render as `<source>_<track>_raw.wav` (for `render_audio` stems and for mix backings), so the
+  unprocessed instrument can be taken into other tools.
+- `CHORDSMITH_VST_LOAD_WAIT` (server or bridge worker) passes `--load-wait` to `vst_host`
+  renders, for sample libraries that need longer than the default before they can play. It is
+  only sent when set, so older host binaries keep working.
+
+### Changed
+
+- The VST and FluidSynth render timeouts (5 and 10 minutes) were too short for full-length
+  orchestral pieces; both are 40 minutes now.
+
+### Fixed
+
+- VST renders could come out silent or late for slow-loading sampled instruments (Kontakt
+  orchestra libraries, Massive X): `vst_host` now switches to non-realtime rendering, waits for
+  sample loading before the first block (`--load-wait`, 15 seconds by default), starts Winsock on
+  Windows (Native Instruments engines need it) and keeps pumping its message loop while
+  rendering.
+- `extract_track` kept the first track plus the requested one, so tabs whose instrument sat on
+  track 0 (or that had extra note-free tracks) leaked that instrument into every stem. Every
+  note-free track is kept now, and only the requested note track.
+- `sfizz_render` could produce huge runaway files on some SFZ instruments; it now runs with
+  `--use-eot`, so it stops at the end of the track.
+- `host/build/` was not excluded from Docker builds, breaking image builds on machines that had
+  built the host locally.
+
 ## [0.26.2] - 2026-10-13
 
 ### Fixed
