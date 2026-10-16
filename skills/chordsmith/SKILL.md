@@ -31,8 +31,8 @@ say so.
    - Notes: `{"pitch": "E6" or 76, "start_beat": 0, "beats": 0.5, "velocity": 80}` — place with
      `start_beat` (absolute) or with `section`+`bar`+`beat` once a section map exists.
    - Patterns: `{"pitch": 36, "steps": "x---x---"}` with `step_beats` (0.25 = sixteenth) — `x`
-     hits, `X` accents, `-`/`.` rests; `loop: true` repeats a short groove across the song
-     (write a one-bar drum or bass pattern once).
+     hits, `X` accents, `-`/`.` rests; `loop: {"length_beats": 4, "times": 36}` repeats a short
+     groove across the song (write a one-bar drum or bass pattern once).
    - `automation`: linear CC ramps, e.g. CC11 expression or CC7 fade.
    - `instrument`: a GM program number (e.g. 48 strings); `channel` 10 for drums.
 3. **Sections** (verse/chorus songs): `set_song_sections` writes names, bars, quarter-note BPM and
@@ -44,8 +44,8 @@ say so.
    MIDI itself.
 5. **Render**: `render_audio` for short pieces, or `render_audio_job` for long songs (poll
    `get_render_job`; per-track progress, retry). `stems: true` renders per-track files;
-   `normalize_peak_db` (default −1) sets the export peak; `reverb`/`chorus` switch the engine's
-   effects on.
+   `normalize_peak_db` (default `null` = raw engine level; set −1 for a listening-ready peak)
+   sets the export peak; `reverb`/`chorus` switch the engine's effects on.
 6. **Verify**: `analyze_midi` reports key, chords, tempo changes, sections and duration.
 
 ## Workflow 2 — a sung song (the flagship)

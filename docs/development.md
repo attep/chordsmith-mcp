@@ -20,8 +20,8 @@ npx @modelcontextprotocol/inspector .venv/bin/chordsmith-mcp   # try tools in a 
 docker build -t chordsmith-mcp .                                # build the Docker image
 ```
 
-CI (GitHub Actions) runs lint, format check and tests on Python 3.10 and 3.12 for every push and
-pull request.
+CI (GitHub Actions) runs lint, format check and tests on Python 3.10 and 3.12 on tags and pull
+requests (and manually via workflow dispatch).
 
 ## Project layout
 

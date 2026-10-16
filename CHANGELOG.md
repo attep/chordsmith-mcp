@@ -7,10 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
-(jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
-export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
-(CONTRIBUTING, SECURITY, pre-commit, mypy).
+Planned: project folders (one folder per song), genre presets and song-form templates,
+bass-line and drum-pattern helpers, MusicXML export, Roman-numeral analysis and an
+`explain_progression` tool, a master-bus plugin chain with plugin-state generation, quotas
+(bars, tracks, file size, storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY,
+pre-commit, mypy).
 
 ## [0.27.0] - 2026-10-14
 

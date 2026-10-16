@@ -287,7 +287,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="ChordSmith VST bridge (Windows worker)")
     parser.add_argument(
-        "--host-exe", default=os.environ.get("CHORDSMITH_VST_HOST", r"D:\ChordSmith\bin\vst_host.exe")
+        "--host-exe",
+        default=os.environ.get("CHORDSMITH_VST_HOST", ""),
+        help="vst_host executable; defaults to CHORDSMITH_VST_HOST.",
     )
     parser.add_argument(
         "--port", type=int, default=int(os.environ.get("CHORDSMITH_VST_BRIDGE_PORT", "18002"))
@@ -302,8 +304,8 @@ def main() -> None:
     args = parser.parse_args()
     if not args.token:
         parser.error("--token (or CHORDSMITH_VST_BRIDGE_TOKEN) is required; the bridge runs plugins")
-    if not os.path.isfile(args.host_exe):
-        parser.error(f"vst_host not found at {args.host_exe} (pass --host-exe)")
+    if not args.host_exe or not os.path.isfile(args.host_exe):
+        parser.error("vst_host not found (pass --host-exe or set CHORDSMITH_VST_HOST)")
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
     server.token = args.token
     server.host_exe = args.host_exe

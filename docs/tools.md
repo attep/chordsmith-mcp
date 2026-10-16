@@ -235,7 +235,7 @@ written immediately, so [add_track](#add_track) can use `section` + `bar` + `bea
 
 | Option | Description |
 |---|---|
-| `filename` (required) | Name for the new file, e.g. `"abyss"` (`.mid` is added) |
+| `filename` (required) | Name for the new file, e.g. `"my_song"` (`.mid` is added) |
 | `sections` | Optional section map, like [set_song_sections](#set_song_sections) |
 | `output_filename`, `overwrite` | As above |
 
