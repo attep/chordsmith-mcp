@@ -2472,6 +2472,16 @@ def _mix_tracks_at_mix_rate(
         balance_check = "ok"
     else:
         balance_check = "mismatch"
+    if master_effects:
+        # The measurement runs on the pre-plugin probe and subtracts the unplugged band; a
+        # whole-song plugin chain changes both, so the residual is not the vocal's level any
+        # more. Keep the numbers (they describe the mix the plugins received) but say so.
+        balance_check = "unavailable"
+        master_warnings.append(
+            "balance_check is unavailable when master_effects run: the measurement is taken "
+            "before the whole-song plugins (see vocal_to_backing_measured_db for the pre-plugin "
+            "value)."
+        )
 
     with wave.open(str(target), "rb") as handle:
         duration = handle.getnframes() / handle.getframerate()

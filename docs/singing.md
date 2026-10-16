@@ -342,8 +342,10 @@ with no processing option the mix is exactly the plain graph.
   limiter work on what the plugins produced: a plugin limiter's ceiling holds even when the
   loudness gain adds more, and the reported peak/loudness describe the file you hear. Entries
   take `plugin` plus optional `preset`, `state` and `params` exactly like per-track effects
-  (including the plugin's registered default state), and the balance measurement stays on the
-  pre-plugin mix — plugins may change the balance deliberately. Needs the VST host
+  (including the plugin's registered default state). The balance measurement stays on the
+  pre-plugin mix — plugins may change the balance deliberately — so `balance_check` reads
+  `unavailable` when this chain runs (the pre-plugin number stays in
+  `vocal_to_backing_measured_db`, with a warning). Needs the VST host
   (`CHORDSMITH_VST_HOST`, the Docker image's `/vst`, or the bridge).
 - **The sidecar**: `save_chain: true` writes the effective settings to
   `<source>.vocal_chain.json`; a later mix of the same song loads it automatically when no

@@ -174,6 +174,9 @@ def test_mix_master_effects_run_between_mix_and_limiter(tmp_path, monkeypatch):
     assert 0 < info["limiter_reduction_db"] < 3
     # the plugin pass changed the measured peak the report is based on (post-plugin file)
     assert info["peak_db"] <= -0.9
+    # the balance probe predates the plugins: the check says so instead of crying mismatch
+    assert info["balance_check"] == "unavailable"
+    assert any("balance_check is unavailable" in warning for warning in info["warnings"])
 
 
 def test_mix_without_master_effects_skips_the_plugin_pass(tmp_path, monkeypatch):
