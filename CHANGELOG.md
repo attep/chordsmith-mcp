@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Planned: a master-bus plugin chain with plugin-state generation and quotas (bars, tracks,
+file size, storage, TTL).
+
+## [0.29.0] - 2026-10-16
+
+Harmonic analysis, notation export and project hygiene: the server can now explain what a
+progression does, hand the song to a notation app, and the repo carries its own contributing
+and security docs.
+
 ### Added
 
 - **Roman-numeral analysis**: `analyze_midi` now reports each window's `roman_numerals` in the
@@ -26,8 +35,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mypy) and a curated mypy module set in `pyproject.toml` (the pydantic plugin understands
   model defaults; the list grows as modules get clean). `dev` installs now include mypy.
 
-Planned: a master-bus plugin chain with plugin-state generation and quotas (bars, tracks,
-file size, storage, TTL).
+### Changed
+
+- Tool count 42 -> 44; the description budget moved 26 -> 27 KB in the same patch (deliberate).
+- The README roadmap lists only what is still open (quotas and the mastering/plugin-state
+  work); the audit's leftovers are fixed (Hanami-specific test guard and skill default, the
+  stale module lists, the demo-render notes, a plugin name in a reverb hint).
 
 ## [0.28.0] - 2026-10-16
 
