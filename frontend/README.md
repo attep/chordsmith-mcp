@@ -84,9 +84,29 @@ All settings are saved in your browser (localStorage).
 |---|---|---|
 | ChordSmith URL | `http://localhost:8000` | Where the server runs |
 | MCP path | `/mcp` | The streamable-HTTP endpoint |
-| Bearer token | empty | Only needed when the server has auth on |
+| Bearer token | empty | A fixed access token (e.g. from a client that signed in); used as-is when set |
+| OAuth client ID | empty | With a refresh token, the UI renews access tokens by itself (hosted servers) |
+| OAuth refresh token | empty | Rotated automatically on every renewal; lasts about 30 days |
 | Ollama URL | `http://localhost:11434` | Where Ollama runs |
 | Poll interval | `1500` ms | How often the dashboard refreshes |
+
+## Monitoring a hosted (OAuth) server
+
+The dashboard can look inside a ChordSmith server that runs with OAuth (e.g. behind a
+Cloudflare tunnel). The server must run v0.31.0 or newer (it needs `GET /api/status`), and you
+need a token pair once:
+
+```bash
+# the sign-in password comes from CHORDSMITH_AUTH_PASSWORD or the container env
+python scripts/mint_monitor_token.py --server https://your-host.example.com --out monitor-token.json
+```
+
+Then paste the file's `server_url`, `client_id` and `refresh_token` into **Settings**. The UI
+exchanges the refresh token for short-lived access tokens in the background (the refresh token
+rotates on every use and lasts about 30 days), so monitoring keeps working without re-pasting.
+The token file is a secret — don't commit it. The server allows browser requests from
+`localhost`/`127.0.0.1` origins by default; to open the UI from another address, start the
+server with `CHORDSMITH_CORS_ORIGINS=<that origin>`.
 
 ## Opening the manager from another address
 

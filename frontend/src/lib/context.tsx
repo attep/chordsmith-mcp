@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { extractJobIds, loadJobs, mergeJobs, saveJobs, type KnownJob } from "./jobs";
 import { McpConnection, resultData, type CallToolResult, type Tool } from "./mcp";
 import { loadSettings, saveSettings, type Settings } from "./settings";
+import { cacheKey, cachedAccessToken, hasRefreshCredentials, refreshAccessToken, saveTokenCache } from "./token";
 
 export type ConnectionState = "connecting" | "connected" | "error";
 
@@ -14,6 +15,8 @@ interface AppContextValue {
   tools: Tool[];
   reconnect: () => void;
   callTool: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+  /** The bearer token to use right now: manual token, refreshed access token, or undefined. */
+  getToken: () => Promise<string | undefined>;
   jobs: KnownJob[];
   rememberJobs: (jobs: KnownJob[]) => void;
   forgetJob: (jobId: string) => void;
@@ -33,12 +36,45 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [attempt, setAttempt] = useState(0);
   const [jobs, setJobs] = useState<KnownJob[]>(loadJobs);
   const connectionRef = useRef<McpConnection | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const refreshInFlight = useRef<Promise<string | undefined> | null>(null);
+
+  /** A fresh bearer token: the manual one, or a silent refresh against the token endpoint. */
+  const getToken = useCallback(async (): Promise<string | undefined> => {
+    const current = settingsRef.current;
+    if (current.bearerToken) return current.bearerToken;
+    if (!hasRefreshCredentials(current)) return undefined;
+    const cached = cachedAccessToken(current);
+    if (cached) return cached;
+    if (!refreshInFlight.current) {
+      refreshInFlight.current = refreshAccessToken(current)
+        .then((fresh) => {
+          saveTokenCache({
+            refreshKey: cacheKey(current.refreshToken),
+            accessToken: fresh.accessToken,
+            expiresAt: fresh.expiresAt,
+          });
+          if (fresh.refreshToken && fresh.refreshToken !== settingsRef.current.refreshToken) {
+            // the token endpoint rotates refresh tokens: keep the new one
+            const next = { ...settingsRef.current, refreshToken: fresh.refreshToken };
+            saveSettings(next);
+            setSettings(next);
+          }
+          return fresh.accessToken;
+        })
+        .finally(() => {
+          refreshInFlight.current = null;
+        });
+    }
+    return refreshInFlight.current;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setConnectionState("connecting");
     setConnectionError(null);
-    McpConnection.open(settings)
+    (async () => McpConnection.open(settings, await getToken()))()
       .then(async (opened) => {
         if (cancelled) {
           void opened.close();
@@ -62,7 +98,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       connectionRef.current = null;
       if (current) void current.close();
     };
-  }, [settings.serverUrl, settings.mcpPath, settings.bearerToken, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [settings.serverUrl, settings.mcpPath, settings.bearerToken, settings.clientId, settings.refreshToken, attempt, getToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!connection) return;
@@ -124,12 +160,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       tools,
       reconnect: () => setAttempt((n) => n + 1),
       callTool,
+      getToken,
       jobs,
       rememberJobs,
       forgetJob,
       clearJobs,
     }),
-    [settings, updateSettings, connection, connectionState, connectionError, tools, callTool, jobs, rememberJobs, forgetJob, clearJobs],
+    [settings, updateSettings, connection, connectionState, connectionError, tools, callTool, getToken, jobs, rememberJobs, forgetJob, clearJobs],
   );
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

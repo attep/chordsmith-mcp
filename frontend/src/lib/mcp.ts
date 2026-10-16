@@ -16,9 +16,9 @@ export class McpConnection {
     private readonly headers: Record<string, string>,
   ) {}
 
-  static async open(settings: Settings): Promise<McpConnection> {
+  static async open(settings: Settings, token?: string): Promise<McpConnection> {
     const endpoint = serverEndpoint(settings, settings.mcpPath);
-    const headers = authHeaders(settings);
+    const headers = token ? { Authorization: `Bearer ${token}` } : authHeaders(settings);
     const transport = new StreamableHTTPClientTransport(new URL(endpoint), { requestInit: { headers } });
     const client = new Client(CLIENT_INFO);
     await client.connect(transport);

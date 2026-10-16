@@ -8,7 +8,18 @@ const FIELDS: { key: keyof Settings; label: string; hint: string; type?: string 
   {
     key: "bearerToken",
     label: "Bearer token (optional)",
-    hint: "Only needed when the server runs with OAuth on; locally, start it with CHORDSMITH_AUTH=off.",
+    hint: "A fixed access token; only needed when the server has OAuth on and no refresh token is set.",
+    type: "password",
+  },
+  {
+    key: "clientId",
+    label: "OAuth client ID (optional)",
+    hint: "With a refresh token, the access token renews itself in the background (for the hosted server).",
+  },
+  {
+    key: "refreshToken",
+    label: "OAuth refresh token (optional)",
+    hint: "Rotated automatically on every renewal; lasts about 30 days. Ignored when a bearer token is set.",
     type: "password",
   },
   { key: "ollamaUrl", label: "Ollama base URL", hint: "Used by the Assistant tab (/api/tags, /api/chat)." },

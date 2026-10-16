@@ -39,8 +39,9 @@ export interface Status extends Health {
   sessions: { tracked: boolean; stateless: boolean; count: number; clients: SessionRow[] };
 }
 
-async function getJson<T>(settings: Settings, path: string): Promise<T> {
-  const response = await fetch(serverEndpoint(settings, path), { headers: authHeaders(settings) });
+async function getJson<T>(settings: Settings, path: string, token?: string): Promise<T> {
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : authHeaders(settings);
+  const response = await fetch(serverEndpoint(settings, path), { headers });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${path}: HTTP ${response.status} ${text.slice(0, 200)}`);
@@ -48,5 +49,5 @@ async function getJson<T>(settings: Settings, path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export const getHealth = (settings: Settings) => getJson<Health>(settings, "/healthz");
-export const getStatus = (settings: Settings) => getJson<Status>(settings, "/api/status");
+export const getHealth = (settings: Settings, token?: string) => getJson<Health>(settings, "/healthz", token);
+export const getStatus = (settings: Settings, token?: string) => getJson<Status>(settings, "/api/status", token);

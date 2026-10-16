@@ -45,7 +45,7 @@ function parseDetail(kind: JobKind, data: unknown): ToolDetail | null {
 }
 
 export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Record<string, unknown>) => void }) {
-  const { settings, connection, connectionState, jobs, rememberJobs } = useApp();
+  const { settings, connection, connectionState, getToken, jobs, rememberJobs } = useApp();
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
@@ -57,7 +57,7 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
   usePolling(
     async () => {
       try {
-        setHealth(await getHealth(settings));
+        setHealth(await getHealth(settings, await getToken()));
         setHealthError(null);
       } catch (error) {
         setHealth(null);
@@ -70,7 +70,7 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
   usePolling(async () => {
     let current: Status | null = null;
     try {
-      current = await getStatus(settings);
+      current = await getStatus(settings, await getToken());
       setStatus(current);
       setStatusError(null);
     } catch (error) {

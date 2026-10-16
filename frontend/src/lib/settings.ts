@@ -2,6 +2,8 @@ export interface Settings {
   serverUrl: string;
   mcpPath: string;
   bearerToken: string;
+  clientId: string;
+  refreshToken: string;
   ollamaUrl: string;
   ollamaModel: string;
   pollMs: number;
@@ -11,6 +13,8 @@ export const DEFAULT_SETTINGS: Settings = {
   serverUrl: "http://localhost:8000",
   mcpPath: "/mcp",
   bearerToken: "",
+  clientId: "",
+  refreshToken: "",
   ollamaUrl: "http://localhost:11434",
   ollamaModel: "",
   pollMs: 1500,
