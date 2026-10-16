@@ -203,3 +203,28 @@ async def test_mix_job_start_validations(store):
 
     unknown = await _call("get_mix_job", {"job_id": "mix_nope"})
     assert unknown.isError and "not found" in unknown.content[0].text
+
+
+async def test_mix_job_passes_master_effects(store, legacy_engine, monkeypatch):
+    captured: dict = {}
+
+    def capturing_mix(backing, vocal, target, **kwargs):
+        captured.update(kwargs)
+        return _fake_mix(backing, vocal, target, **kwargs)
+
+    monkeypatch.setattr(singing, "mix_tracks", capturing_mix)
+    song = await _make_band(store)
+    started = await _call(
+        "mix_song_with_vocals_job",
+        {
+            "source": song,
+            "vocal": "vocal.wav",
+            "output_filename": "job_with_plugins",
+            "master_effects": [{"plugin": "Tape Machine 80.vst3"}],
+        },
+    )
+    assert not started.isError, started.content[0].text
+    job = await _wait_job(started.structuredContent["job_id"])
+    assert job["status"] == "done", job.get("error")
+    effects = captured.get("master_effects") or []
+    assert [effect.plugin for effect in effects] == ["Tape Machine 80.vst3"]

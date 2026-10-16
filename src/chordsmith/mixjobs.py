@@ -23,7 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from chordsmith import delivery, results
+from chordsmith import delivery, renderers, results
 from chordsmith.models import (
     ChorusSettings,
     MasterSettings,
@@ -220,6 +220,13 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
         master: Annotated[
             MasterSettings | None, Field(description="Master limiter and/or loudness target.")
         ] = None,
+        master_effects: Annotated[
+            list[renderers.EffectPlugin] | None,
+            Field(
+                description="Whole-song VST chain over the summed mix (backing plus vocals), "
+                "before the master stage (like mix_song_with_vocals)."
+            ),
+        ] = None,
         save_chain: Annotated[
             bool, Field(description="Save the effective chain to <source>.vocal_chain.json.")
         ] = False,
@@ -280,6 +287,7 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
             "vocal_bus": vocal_bus,
             "returns": returns,
             "master": master,
+            "master_effects": master_effects,
             "save_chain": save_chain,
             "reverb": reverb,
             "chorus": chorus,

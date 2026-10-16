@@ -245,6 +245,9 @@ def test_session_activity_is_captured(http_app, store):
         assert entry["tool"] == "list_chord_types"
         assert entry["status"] == 200
         assert entry["at"].endswith("+00:00")
+        assert isinstance(entry["duration_ms"], float) and entry["duration_ms"] >= 0
+        init_entry = next(item for item in payload["activity"] if item["method"] == "initialize")
+        assert init_entry["duration_ms"] >= 0
 
         listed = client.get("/api/status").json()["sessions"]["clients"]
         row = next(item for item in listed if item["session_id"] == session_id)

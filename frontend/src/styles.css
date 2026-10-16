@@ -67,6 +67,8 @@ tr.clickable:hover td { background: var(--panel-2); }
 tr.selected td { background: #24304a; }
 .session-detail h2 { display: flex; align-items: center; gap: 10px; }
 .activity-args { display: inline-block; max-width: 640px; white-space: pre-wrap; word-break: break-all; color: var(--muted); }
+.duration-warn { color: var(--warn); }
+.duration-bad { color: var(--bad); }
 .matrix-wrap { overflow-x: auto; }
 .matrix th.track { writing-mode: horizontal-tb; white-space: nowrap; }
 .cell { text-align: center !important; font-size: 12px; min-width: 70px; }

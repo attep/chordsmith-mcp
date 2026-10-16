@@ -762,6 +762,7 @@ class MixProcessing(TypedDict, total=False):
     vocal_bus: dict | None
     returns: dict | None
     master: dict | None
+    master_effects: list[EffectEntry] | None
     gain_reduction_db: dict[str, float]
     loudness: LoudnessInfo | None
     limiter_reduction_db: float | None

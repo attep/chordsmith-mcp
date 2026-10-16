@@ -336,6 +336,15 @@ with no processing option the mix is exactly the plain graph.
   pumping — and supersedes `normalize_peak_db`. The `processing.loudness` block reports the
   measured integrated LUFS, loudness range, true peak and short-term max, plus the limiter's
   reduction.
+- **Whole-song plugins** (`master_effects`): a VST effect chain over the summed mix — backing
+  plus vocals — the slot for tape emulations, bus compressors, EQ and plugin limiters. It runs
+  after the mix and **before** the master stage, so the loudness correction and the built-in
+  limiter work on what the plugins produced: a plugin limiter's ceiling holds even when the
+  loudness gain adds more, and the reported peak/loudness describe the file you hear. Entries
+  take `plugin` plus optional `preset`, `state` and `params` exactly like per-track effects
+  (including the plugin's registered default state), and the balance measurement stays on the
+  pre-plugin mix — plugins may change the balance deliberately. Needs the VST host
+  (`CHORDSMITH_VST_HOST`, the Docker image's `/vst`, or the bridge).
 - **The sidecar**: `save_chain: true` writes the effective settings to
   `<source>.vocal_chain.json`; a later mix of the same song loads it automatically when no
   chain option is passed (`processing.chain_source` says whether the settings came from

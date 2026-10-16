@@ -12,7 +12,8 @@ long-running servers.
 
 ## [0.32.0] - 2026-10-16
 
-See what a connected client is doing: the dashboard's client rows open a live activity log.
+See what a connected client is doing — and give the vocal mix the whole-song plugin slot it was
+missing.
 
 ### Added
 
@@ -23,6 +24,16 @@ See what a connected client is doing: the dashboard's client rows open a live ac
   `GET /api/sessions/{session_id}` returns one session in full (OAuth-guarded like
   `/api/status`; 404 for unknown ids), and the manager UI's client rows are clickable to
   watch the log live.
+- **Call durations**: every activity entry carries `duration_ms` (measured around the request,
+  initialize included), and the manager UI's activity table has a **Took** column — `520 ms` /
+  `5.2 s`, amber from 3 s and red from 10 s, so slow calls like `list_instruments` stand out.
+- **Whole-song plugins on the vocal mix**: `mix_song_with_vocals` and
+  `mix_song_with_vocals_job` take `master_effects` — a VST chain over the summed mix (backing
+  plus vocals) that runs **between the mix and the master stage**. Tape emulations and bus
+  compressors process the full song, the peak/loudness measurements then describe the file with
+  the plugins, and the built-in limiter still runs last so a plugin limiter's ceiling holds even
+  when the loudness correction adds gain. Entries take `preset`/`state`/`params` and default
+  states like per-track effects; mixes without `master_effects` stay byte-identical.
 
 ## [0.31.0] - 2026-10-16
 

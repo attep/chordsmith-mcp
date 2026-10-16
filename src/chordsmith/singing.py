@@ -2097,6 +2097,7 @@ def mix_tracks(
     vocal_bus: VocalBus | None = None,
     returns: Returns | None = None,
     master: MasterSettings | None = None,
+    master_effects: list[renderers.EffectPlugin] | None = None,
     starting_bpm: float | None = None,
 ) -> dict:
     """Mix the vocal into the backing, balancing levels by measurement.
@@ -2122,6 +2123,12 @@ def mix_tracks(
     reverb (a generated impulse response) and delay fed by the voices' sends; ``master`` adds a
     true-peak-safe limiter and, with ``loudness_target_lufs``, a static gain to hit a loudness
     target (the peak normalization is superseded; the result reports what was measured).
+    ``master_effects`` runs a whole-song VST chain between the mix and the master stage: the
+    plugins process the summed mix (latency compensated; presets, states and parameters as on
+    instrument tracks), and the peak/loudness measurements then describe what the plugins
+    produced, so the correction gain after them cannot quietly overshoot a plugin limiter's
+    ceiling — the built-in limiter always stays the last stage. The balance measurement is
+    taken before the plugins (they may change the balance deliberately).
     Everything off keeps the graph byte-identical to a plain mix.
     """
     original_vocal = vocal
@@ -2187,6 +2194,7 @@ def mix_tracks(
             duck_db=effective_duck,
             returns_paths=(processed.reverb_return, processed.delay_return) if processed else (None, None),
             master=master,
+            master_effects=master_effects,
             staged_vocal=processed is not None,
             air_layer=vocal_bus.air_layer if (vocal_bus is not None and processed is not None) else None,
         )
@@ -2211,6 +2219,7 @@ def _mix_tracks_at_mix_rate(
     duck_db: float = 0.0,
     returns_paths: tuple[Path | None, Path | None] = (None, None),
     master: MasterSettings | None = None,
+    master_effects: list[renderers.EffectPlugin] | None = None,
     staged_vocal: bool = False,
     air_layer: AirLayer | None = None,
 ) -> dict:
@@ -2347,9 +2356,38 @@ def _mix_tracks_at_mix_rate(
     render(0.0, probe, float_output=True)
     true_peak = _float_peak_db(probe)
     loudness_target = master.loudness_target_lufs if master is not None else None
+    if master_effects:
+        # Whole-song plugin chain: render the unmastered mix, run the plugins over it (latency
+        # compensated), and master the plugin output — the correction and limiter work on the
+        # file the listener gets, and the built-in limiter stays the last stage, so a lost
+        # loudness correction can never push peaks back over a plugin limiter's ceiling.
+        plugin_output = scratch / "mix_pre_plugins.wav"
+        render(0.0, plugin_output)
+        try:
+            renderers.apply_stem_effects(plugin_output, master_effects)
+        except renderers.RenderError as exc:
+            raise SingingError(str(exc)) from None
+        plugin_probe = scratch / "post_plugins_f32.raw"
+        _ffmpeg(
+            [
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(plugin_output),
+                "-f",
+                "f32le",
+                "-ar",
+                "44100",
+                str(plugin_probe),
+            ]
+        )
+        true_peak = _float_peak_db(plugin_probe)
     if loudness_target is not None:
         # loudness scales with gain, so the correction to hit the target is read off the probe
-        probe_loudness = loudness_report(probe, raw_f32=True)
+        probe_loudness = (
+            loudness_report(plugin_output) if master_effects else loudness_report(probe, raw_f32=True)
+        )
         integrated = probe_loudness["integrated_lufs"]
         correction = round(loudness_target - integrated, 2) if integrated is not None else 0.0
     elif normalize_peak_db is not None:
@@ -2358,7 +2396,31 @@ def _mix_tracks_at_mix_rate(
         correction = round(-0.1 - true_peak, 2)  # clipping guard: raw level, but never clipped
     else:
         correction = 0.0
-    render(correction, target)
+    if master_effects:
+        filters = []
+        if correction:
+            filters.append(f"volume={correction:.2f}dB")
+        if limiter_on:
+            filters.append(limiter_filter(master.limiter.ceiling_db - LIMITER_MARGIN_DB))
+        if filters:
+            _ffmpeg(
+                [
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(plugin_output),
+                    "-af",
+                    ",".join(filters),
+                    "-ar",
+                    "44100",
+                    str(target),
+                ]
+            )
+        else:
+            shutil.copyfile(plugin_output, target)
+    else:
+        render(correction, target)
     peak = peak_db(target)
 
     loudness: dict | None = None
@@ -2502,6 +2564,7 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
     vocal_bus = args.get("vocal_bus")
     returns = args.get("returns")
     master = args.get("master")
+    master_effects = args.get("master_effects")
     save_chain = args.get("save_chain", False)
     reverb = args.get("reverb")
     chorus = args.get("chorus")
@@ -2552,6 +2615,7 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
         or vocal_bus is not None
         or returns is not None
         or master is not None
+        or bool(master_effects)
         or (
             vocals is not None
             and any(
@@ -2708,6 +2772,7 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
             vocal_bus=vocal_bus,
             returns=returns,
             master=master,
+            master_effects=master_effects,
             starting_bpm=starting_bpm,
         )
         if save_chain:
@@ -2722,6 +2787,10 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
                 payload["returns"] = returns.model_dump(exclude_none=True)
             if master is not None:
                 payload["master"] = master.model_dump(exclude_none=True)
+            if master_effects:
+                payload["master_effects"] = [
+                    effect.model_dump(exclude_none=True) for effect in master_effects
+                ]
             sidecar_path.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     gain_reduction = info.pop("gain_reduction_db", {})
     loudness = info.pop("loudness", None)
@@ -2737,6 +2806,9 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
             "vocal_bus": vocal_bus.model_dump(exclude_none=True) if vocal_bus is not None else None,
             "returns": returns.model_dump(exclude_none=True) if returns is not None else None,
             "master": master.model_dump(exclude_none=True) if master is not None else None,
+            "master_effects": (
+                [effect.model_dump() for effect in master_effects] if master_effects else None
+            ),
             "gain_reduction_db": gain_reduction,
             "loudness": loudness,
             "limiter_reduction_db": limiter_reduction,
@@ -3185,6 +3257,16 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "EBU R128 (supersedes normalize_peak_db)."
             ),
         ] = None,
+        master_effects: Annotated[
+            list[renderers.EffectPlugin] | None,
+            Field(
+                description="Whole-song VST effect chain (mastering): runs over the summed mix — "
+                "backing plus vocals — after the mix and before the master stage, so a plugin "
+                "limiter's ceiling holds and the reported peak/loudness describe the file with "
+                "the plugins. Same plugin/preset/state/params as instrument effects; needs the "
+                "VST host."
+            ),
+        ] = None,
         save_chain: Annotated[
             bool,
             Field(
@@ -3291,6 +3373,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "vocal_bus": vocal_bus,
                 "returns": returns,
                 "master": master,
+                "master_effects": master_effects,
                 "save_chain": save_chain,
                 "reverb": reverb,
                 "chorus": chorus,

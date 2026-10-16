@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from chordsmith import audio, mastering, renderers, server
+from chordsmith import audio, mastering, renderers, server, singing
 from chordsmith.models import LimiterSettings, MasterSettings
 
 pytestmark = pytest.mark.anyio
@@ -136,3 +136,58 @@ async def test_render_master_effects_run_on_the_combined_mix(store, monkeypatch)
     assert stem_name.endswith("_Bass.wav")  # the combined mix, not a stem
     assert effects[0].plugin == "TestReverb.vst3"
     assert result.structuredContent["master"] is None
+
+
+def test_mix_master_effects_run_between_mix_and_limiter(tmp_path, monkeypatch):
+    _skip_without_ffmpeg()
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    target = tmp_path / "mix.wav"
+    _write_sine(backing, amplitude=4000)
+    _write_sine(vocal, amplitude=9000)
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_effects(stem, effects):
+        calls.append((stem.name, [effect.plugin for effect in effects]))
+        _write_sine(stem, amplitude=15000)  # a plugin that adds level, like a tape emulation
+
+    monkeypatch.setattr(renderers, "apply_stem_effects", fake_effects)
+    info = singing.mix_tracks(
+        backing,
+        vocal,
+        target,
+        vocal_level_db=0.0,
+        normalize_peak_db=None,
+        # a loud target forces the correction gain to push peaks at the ceiling, so the built-in
+        # limiter must engage *after* the plugins
+        master=MasterSettings(
+            loudness_target_lufs=-6.0, limiter=LimiterSettings(enabled=True, ceiling_db=-1.0)
+        ),
+        master_effects=[renderers.EffectPlugin(plugin="Loud.vst3")],
+    )
+    assert calls == [("mix_pre_plugins.wav", ["Loud.vst3"])]  # one whole-song pass, pre-master
+    assert target.is_file()
+    # the gain runs before ChordSmith's limiter: the ceiling holds even after the plugins added
+    # ~6 dB and the loudness correction added more
+    assert info["loudness"]["true_peak_db"] <= -0.9
+    assert info["limiter_reduction_db"] is not None
+    assert 0 < info["limiter_reduction_db"] < 3
+    # the plugin pass changed the measured peak the report is based on (post-plugin file)
+    assert info["peak_db"] <= -0.9
+
+
+def test_mix_without_master_effects_skips_the_plugin_pass(tmp_path, monkeypatch):
+    _skip_without_ffmpeg()
+    backing = tmp_path / "backing.wav"
+    vocal = tmp_path / "vocal.wav"
+    target = tmp_path / "mix.wav"
+    _write_sine(backing, amplitude=4000)
+    _write_sine(vocal, amplitude=9000)
+
+    def boom(stem, effects):
+        raise AssertionError("the plugin chain must not run without master_effects")
+
+    monkeypatch.setattr(renderers, "apply_stem_effects", boom)
+    info = singing.mix_tracks(backing, vocal, target, vocal_level_db=0.0, normalize_peak_db=-1.0)
+    assert target.is_file()
+    assert info["peak_db"] <= -0.9

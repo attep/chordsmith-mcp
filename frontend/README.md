@@ -6,7 +6,8 @@ A small web app for looking inside a running ChordSmith server and driving it by
   per-track status matrix (refreshed every 1.5 s), and the MCP clients connected right now
   (a client that disconnects without saying goodbye drops off the list after about a minute).
   **Click a client row** to see what it is doing: its recent requests, tool calls with a
-  compacted argument summary and the response status (keepalive pings are filtered).
+  compacted argument summary, the response status and **how long each call took** (amber from
+  3 s, red from 10 s; keepalive pings are filtered).
 - **Tools**: every ChordSmith tool with a form built from its input schema. Run it and see
   the JSON result (errors are shown in red). Job IDs from results are kept in your browser,
   so they're still there after a reload.

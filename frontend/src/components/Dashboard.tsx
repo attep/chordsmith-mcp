@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { getHealth, getSession, getStatus, type Health, type SessionDetail, type Status } from "../lib/api";
+import { durationClass, formatDuration } from "../lib/format";
 import { useApp, usePolling } from "../lib/context";
 import { isFinal, JOB_TOOLS, type JobKind } from "../lib/jobs";
 import { resultData } from "../lib/mcp";
@@ -301,6 +302,7 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
                   <th>Time</th>
                   <th>Request</th>
                   <th>Details</th>
+                  <th>Took</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -317,6 +319,7 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
                     <td>
                       <code className="activity-args">{entry.arguments ?? ""}</code>
                     </td>
+                    <td className={durationClass(entry.duration_ms)}>{formatDuration(entry.duration_ms)}</td>
                     <td>{entry.status ?? "–"}</td>
                   </tr>
                 ))}

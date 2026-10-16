@@ -40,6 +40,7 @@ export interface SessionActivityEntry {
   tool?: string | null;
   arguments?: string | null;
   status?: number | null;
+  duration_ms?: number | null;
 }
 
 export interface SessionDetail extends SessionRow {

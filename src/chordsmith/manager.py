@@ -199,6 +199,7 @@ class SessionTracker:
                 body, replay = await _buffer(receive, MAX_ACTIVITY_BODY_BYTES)
                 entry = _rpc_entry(body)
                 status: list[int] = []
+                started = time.perf_counter()
 
                 async def capture_status(message) -> None:
                     if message["type"] == "http.response.start":
@@ -210,6 +211,7 @@ class SessionTracker:
                 finally:
                     if entry is not None:
                         entry["status"] = status[0] if status else None
+                        entry["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
                         self._log(record, entry)
                 return
             try:
@@ -232,8 +234,11 @@ class SessionTracker:
         if client is None:
             await self.app(scope, replay, send)
             return
+        started = time.perf_counter()
+        init_entry: dict[str, Any] | None = None
 
         async def capture(message) -> None:
+            nonlocal init_entry
             if message["type"] == "http.response.start" and message.get("status", 500) < 400:
                 new_id = next(
                     (v.decode() for k, v in message.get("headers", []) if k.lower() == b"mcp-session-id"),
@@ -252,10 +257,13 @@ class SessionTracker:
                     record["activity"] = deque(maxlen=ACTIVITY_LIMIT)
                     record["last_activity_epoch"] = now
                     self.sessions[new_id] = record
-                    self._log(record, {"method": "initialize", "status": message.get("status")})
+                    init_entry = {"method": "initialize", "status": message.get("status")}
+                    self._log(record, init_entry)
             await send(message)
 
         await self.app(scope, replay, capture)
+        if init_entry is not None:
+            init_entry["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
 
     def snapshot(self, live_ids: set[str] | None) -> list[dict[str, Any]]:
         """Tracked sessions (dropping ones the SDK has closed) plus live ones seen before tracking."""

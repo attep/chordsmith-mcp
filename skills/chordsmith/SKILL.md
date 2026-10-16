@@ -73,7 +73,10 @@ say so.
    Useful options: `ducking` (+`duck_db`), `backing_levels` (per-track trims), `vocal_chain`
    (EQ → de-esser → saturation → compressor), `vocal_sends` + `returns` (shared reverb/delay),
    `vocal_bus` (gain, glue compressor, limiter, breathy `air_layer`), `master` (true-peak limiter
-   and/or `loudness_target_lufs`). Read back `balance_check`, `processing` and `warnings`.
+   and/or `loudness_target_lufs`), and `master_effects` — a whole-song VST chain over the mix
+   (tape/bus plugins) that runs **before** the master stage, so a plugin limiter's ceiling holds
+   and the reported peak/loudness describe the file with the plugins. Read back `balance_check`,
+   `processing` and `warnings`.
    `save_chain: true` writes a `<source>.vocal_chain.json` sidecar that later mixes auto-load.
 5. `export_vocal_song` — mix WAV + MP3 + vocal + source MIDI as base64 or signed links.
 
