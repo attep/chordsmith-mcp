@@ -18,11 +18,12 @@ Endpoints (all but /healthz need the X-Chordsmith-Token header):
     POST /exists {"paths": [...]}    -> {"exists": {path: bool}}
     POST /editor {"args": [...]}     -> {"ok": true} (spawns vst_host detached; the window
                                         opens on this machine's desktop)
-    POST /tab    {"name": "riff.gpx", "data": <base64>}
-                                     -> {"exit", "midi": <base64>, "stdout", "stderr"}
-        Converts a Guitar Pro (.gp3-.gp5/.gp/.gpx) or MusicXML/MSCZ tab to MIDI with
-        MuseScore. Needs --musescore <MuseScore4.exe>; without it the endpoint reports
-        that no converter is configured.
+    POST /tab    {"name": "riff.gpx", "data": <base64>, "target": ".mid"}
+                                     -> {"exit", "output": <base64>, "format", "stdout", "stderr"}
+        Converts a Guitar Pro (.gp3-.gp5/.gp/.gpx) or MusicXML/MSCZ tab to MIDI, or a MIDI
+        document to a MusicXML score (.musicxml/.mxl) when target says so (default .mid).
+        Needs --musescore <MuseScore4.exe>; without it the endpoint reports that no converter
+        is configured. The "midi" key is kept for MIDI targets (older servers).
 """
 
 from __future__ import annotations
@@ -211,11 +212,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def _convert_tab(self, payload: dict) -> dict:
-        """Convert a tab to MIDI with MuseScore (--musescore); never touches the caller's disk."""
+        """Convert with MuseScore (--musescore); never touches the caller's disk."""
         musescore = self.server.musescore
         if not musescore:
             return {
                 "exit": -1,
+                "output": None,
                 "midi": None,
                 "error": "no MuseScore configured on this bridge; restart it with --musescore <path>",
                 "stdout": "",
@@ -223,22 +225,40 @@ class BridgeHandler(BaseHTTPRequestHandler):
             }
         name = str(payload.get("name") or "tab.gpx")
         suffix = Path(name).suffix.lower() or ".gp"
-        try:
-            data = base64.b64decode(str(payload.get("data") or ""), validate=True)
-        except (binascii.Error, ValueError):
-            return {"exit": -1, "midi": None, "error": "data is not valid base64", "stdout": "", "stderr": ""}
-        if not data or len(data) > MAX_TAB_BYTES:
+        target_suffix = str(payload.get("target") or ".mid").lower()
+        if target_suffix not in (".mid", ".musicxml", ".mxl"):
             return {
                 "exit": -1,
+                "output": None,
                 "midi": None,
-                "error": f"empty or oversized tab ({len(data)} bytes; limit {MAX_TAB_BYTES})",
+                "error": f"unsupported conversion target '{target_suffix}'",
                 "stdout": "",
                 "stderr": "",
             }
-        scratch = tempfile.mkdtemp(prefix="cs-tab-")
+        try:
+            data = base64.b64decode(str(payload.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            return {
+                "exit": -1,
+                "output": None,
+                "midi": None,
+                "error": "data is not valid base64",
+                "stdout": "",
+                "stderr": "",
+            }
+        if not data or len(data) > MAX_TAB_BYTES:
+            return {
+                "exit": -1,
+                "output": None,
+                "midi": None,
+                "error": f"empty or oversized document ({len(data)} bytes; limit {MAX_TAB_BYTES})",
+                "stdout": "",
+                "stderr": "",
+            }
+        scratch = tempfile.mkdtemp(prefix="cs-convert-")
         try:
             source = Path(scratch) / f"input{suffix}"
-            target = Path(scratch) / "output.mid"
+            target = Path(scratch) / f"output{target_suffix}"
             source.write_bytes(data)
             try:
                 process = subprocess.run(
@@ -251,6 +271,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except subprocess.TimeoutExpired:
                 return {
                     "exit": -1,
+                    "output": None,
                     "midi": None,
                     "error": f"MuseScore timed out after {TAB_TIMEOUT_SECONDS}s",
                     "stdout": "",
@@ -259,6 +280,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except OSError as exc:
                 return {
                     "exit": -1,
+                    "output": None,
                     "midi": None,
                     "error": f"could not run MuseScore ({musescore}): {exc}",
                     "stdout": "",
@@ -269,14 +291,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not target.is_file():
                 return {
                     "exit": process.returncode,
+                    "output": None,
                     "midi": None,
-                    "error": "MuseScore produced no MIDI (see stderr)",
+                    "error": "MuseScore produced no output (see stderr)",
                     "stdout": stdout,
                     "stderr": stderr,
                 }
+            encoded = base64.b64encode(target.read_bytes()).decode()
             return {
                 "exit": process.returncode,
-                "midi": base64.b64encode(target.read_bytes()).decode(),
+                "output": encoded,
+                "midi": encoded if target_suffix == ".mid" else None,
+                "format": target_suffix,
                 "stdout": stdout,
                 "stderr": stderr,
             }
@@ -287,7 +313,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="ChordSmith VST bridge (Windows worker)")
     parser.add_argument(
-        "--host-exe", default=os.environ.get("CHORDSMITH_VST_HOST", r"D:\ChordSmith\bin\vst_host.exe")
+        "--host-exe",
+        default=os.environ.get("CHORDSMITH_VST_HOST", ""),
+        help="vst_host executable; defaults to CHORDSMITH_VST_HOST.",
     )
     parser.add_argument(
         "--port", type=int, default=int(os.environ.get("CHORDSMITH_VST_BRIDGE_PORT", "18002"))
@@ -302,8 +330,8 @@ def main() -> None:
     args = parser.parse_args()
     if not args.token:
         parser.error("--token (or CHORDSMITH_VST_BRIDGE_TOKEN) is required; the bridge runs plugins")
-    if not os.path.isfile(args.host_exe):
-        parser.error(f"vst_host not found at {args.host_exe} (pass --host-exe)")
+    if not args.host_exe or not os.path.isfile(args.host_exe):
+        parser.error("vst_host not found (pass --host-exe or set CHORDSMITH_VST_HOST)")
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
     server.token = args.token
     server.host_exe = args.host_exe

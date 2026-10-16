@@ -211,13 +211,16 @@ metadata; compliant clients then walk the OAuth flow automatically.
 | `CHORDSMITH_PORT` | `8000` | Bind port. |
 | `CHORDSMITH_TRANSPORT` | `stdio` | `streamable-http` for remote use (or pass `--transport`). |
 | `CHORDSMITH_RATE_LIMIT` | `120` | Requests per minute per client on the MCP endpoint (clients are told apart by their token, so the limit works behind the tunnel). `0` disables it. Over-limit requests get `429` with `Retry-After`. |
+| `CHORDSMITH_AUTH_RATE_LIMIT` | `30` | Requests per minute per client across the OAuth endpoints (`/register`, `/authorize`, `/login`, `/token`, one shared budget). `0` disables it. |
+| `CHORDSMITH_TRUST_PROXY` | off | `1` to take rate-limit identities from `CF-Connecting-IP` / `X-Forwarded-For`, so anonymous clients behind a tunnel get per-address buckets. Only enable when nothing but the proxy can reach the port (the headers are spoofable otherwise). |
 
 ## Security notes
 
 - **Use HTTPS.** For anything non-local, ChordSmith refuses to start without an `https://`
   public URL, because OAuth metadata must not travel in the clear.
-- The password is compared in constant time and rate-limited (8 failures per minute per
-  provider). Failed and successful sign-ins are logged (without the password).
+- The password is compared in constant time and rate-limited (8 failures per minute globally;
+  after 20 failures per client key within an hour, that client is locked out for 10 minutes).
+  Failed and successful sign-ins are logged (without the password).
 - Access tokens last 1 hour, refresh tokens 30 days, and refresh tokens rotate on use.
   Authorization codes are single-use and expire after 5 minutes.
 - PKCE with S256 is enforced; the token exchange fails without a matching `code_verifier`.

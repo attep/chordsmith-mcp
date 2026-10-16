@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chordsmith-mcp"
-version = "0.27.0"
+version = "0.30.0"
 description = "MCP server that turns chord progressions into MIDI files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
 diffsinger = ["onnxruntime>=1.17,<2", "onnx>=1.16,<2", "numpy>=1.26", "PyYAML>=6", "cmudict>=1.0"]
 
 [project.scripts]
@@ -36,3 +36,30 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+# Typing is checked where it is already clean; the file list grows as modules get there.
+# The pydantic plugin understands model defaults, so field-less constructions check correctly.
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+files = [
+    "src/chordsmith/analysis.py",
+    "src/chordsmith/audio.py",
+    "src/chordsmith/auth.py",
+    "src/chordsmith/delivery.py",
+    "src/chordsmith/forms.py",
+    "src/chordsmith/grooves.py",
+    "src/chordsmith/harmony.py",
+    "src/chordsmith/midi_writer.py",
+    "src/chordsmith/mixjobs.py",
+    "src/chordsmith/models.py",
+    "src/chordsmith/offload.py",
+    "src/chordsmith/ratelimit.py",
+    "src/chordsmith/renderjobs.py",
+    "src/chordsmith/sections.py",
+    "src/chordsmith/soundfont.py",
+    "src/chordsmith/storage.py",
+    "src/chordsmith/tabs.py",
+    "src/chordsmith/theory.py",
+]

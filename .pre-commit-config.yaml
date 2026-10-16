@@ -1,0 +1,19 @@
+# Fast local checks for contributors. Install once with:
+#   pip install pre-commit && pre-commit install
+# (or run everything by hand with the commands in docs/development.md)
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (curated module set, see pyproject.toml)
+        entry: python -m mypy
+        language: system
+        pass_filenames: false
+        files: ^src/chordsmith/

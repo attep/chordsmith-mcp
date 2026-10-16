@@ -9,6 +9,7 @@ never modified.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -1163,8 +1164,7 @@ def _validate_vst(source: Path, spec: InstrumentSpec) -> None:
     if spec.reverb_send is not None or spec.chorus_send is not None:
         raise RenderError(
             "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; a vst track has "
-            "none — use a VST reverb effect with a dry/wet (e.g. Fame Studio Reverb) or the "
-            "chain's 'reverb' stage."
+            "none — use a VST reverb effect with a dry/wet or the chain's 'reverb' stage."
         )
     if spec.sections:
         resolved = read_sections(source)
@@ -1576,7 +1576,7 @@ def register(mcp: FastMCP, store_provider) -> None:
             except RenderError:
                 resolved[name] = None
         return {
-            "filename": source.name,
+            "filename": store.relative_name(source),
             "path": str(source),
             "tracks": {name: spec.model_dump() for name, spec in specs.items()},
             "resolved": resolved,
@@ -1672,7 +1672,7 @@ def register(mcp: FastMCP, store_provider) -> None:
                 except RenderError:
                     resolved[name] = None
             result["file"] = {
-                "filename": source.name,
+                "filename": store.relative_name(source),
                 "tracks": [names[index] for index in note_tracks(midi)],
                 "specs": {name: spec.model_dump() for name, spec in specs.items()},
                 "resolved": resolved,
@@ -1876,6 +1876,28 @@ def register(mcp: FastMCP, store_provider) -> None:
             "note": note,
         }
 
+    def _states_result(state_store: FileStore) -> results.PluginStatesResult:
+        """The state library in the tool-result shape (shared by list/generate)."""
+        library = _state_library(state_store)
+        entries = [
+            {
+                "name": entry["name"],
+                "path": entry["path"],
+                "plugin": entry["plugin"],
+                "plugin_name": entry["plugin_name"],
+                "saved_at": entry["saved_at"],
+                "default": entry["default"],
+                "size_bytes": entry["size_bytes"],
+            }
+            for entry in sorted(library.values(), key=lambda item: item["name"])
+        ]
+        defaults = {
+            str(entry["plugin_name"]): entry["name"]
+            for entry in library.values()
+            if entry["default"] and entry.get("plugin_name")
+        }
+        return {"directory": str(_states_dir(state_store)), "states": entries, "defaults": defaults}
+
     @mcp.tool(title="List plugin states", annotations=_READ_ONLY)
     def list_plugin_states(
         plugin: Annotated[
@@ -1894,28 +1916,14 @@ def register(mcp: FastMCP, store_provider) -> None:
         size and saved time, plus a plugin-name -> default-state map.
         """
         store: FileStore = store_provider()
-        library = _state_library(store)
-        entries = [
-            {
-                "name": entry["name"],
-                "path": entry["path"],
-                "plugin": entry["plugin"],
-                "plugin_name": entry["plugin_name"],
-                "saved_at": entry["saved_at"],
-                "default": entry["default"],
-                "size_bytes": entry["size_bytes"],
-            }
-            for entry in sorted(library.values(), key=lambda item: item["name"])
-        ]
-        defaults = {
-            str(entry["plugin_name"]): entry["name"]
-            for entry in library.values()
-            if entry["default"] and entry.get("plugin_name")
-        }
         if plugin is not None:
+            result = _states_result(store)
             key = _plugin_key(plugin)
-            entries = [entry for entry in entries if str(entry.get("plugin_name") or "").casefold() == key]
-        return {"directory": str(_states_dir(store)), "states": entries, "defaults": defaults}
+            result["states"] = [
+                entry for entry in result["states"] if str(entry.get("plugin_name") or "").casefold() == key
+            ]
+            return result
+        return _states_result(store)
 
     @mcp.tool(title="Set a plugin's default state", annotations=_CREATES)
     def set_plugin_default_state(
@@ -1958,6 +1966,112 @@ def register(mcp: FastMCP, store_provider) -> None:
             return {"plugin": _basename(target), "default_state": None}
         _write_state_metadata(directory, Path(resolved).stem, target, default=True)
         return {"plugin": _basename(target), "default_state": Path(resolved).stem}
+
+    @mcp.tool(title="Generate plugin states", annotations=_CREATES)
+    def generate_plugin_states(
+        plugin: Annotated[
+            str, Field(description="Plugin path or a name from list_plugins, e.g. 'Surge XT'.")
+        ],
+        parameters: Annotated[
+            dict[str, list[float | str]],
+            Field(
+                description="Parameter grid: names (or numeric indices) mapped to lists of "
+                'values (numbers or choice names), e.g. {"Drive": [0, 6], "Tone": ["Bright", '
+                '"Warm"]}. Every combination becomes one state (max 32 per call).'
+            ),
+        ],
+        base_state: Annotated[
+            str | None,
+            Field(
+                description="State (name or path) every variant starts from, e.g. a captured GUI "
+                "tone that only a few parameters should vary."
+            ),
+        ] = None,
+        name_prefix: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=40,
+                description="State names are '<prefix>_1', '<prefix>_2', … (existing ones are replaced).",
+            ),
+        ] = "sweep",
+        make_default: Annotated[
+            bool, Field(description="Also make the first generated state the plugin's default.")
+        ] = False,
+    ) -> results.PluginStatesResult:
+        """Create named plugin states by sweeping parameters — headless state generation.
+
+        Instead of tweaking a GUI and capturing state after state, name the parameters and the
+        values to try: the host loads the plugin once per combination and each result lands in
+        the state library as '<prefix>_N', ready for plugin_state/state by name. Works for
+        parameter-driven plugins (see list_plugins with detail/parameter_values); GUI-only
+        plugins still need open_plugin_state_editor. The grid is capped at 32 combinations
+        because every one loads the plugin (slow for large sample libraries), and only
+        host-automation parameters can be swept. Returns the state library like
+        list_plugin_states.
+        """
+        store: FileStore = store_provider()
+        resolved = _resolve_plugin(plugin)
+        if resolved is None or not _plugin_exists(resolved):
+            raise ValueError(f"The plugin '{plugin}' does not exist; use list_plugins for names and paths.")
+        host = audio.host_for_plugin(resolved)
+        if host is None:
+            raise ValueError(
+                "Generating states needs the VST host; set CHORDSMITH_VST_HOST, put vst_host on "
+                "PATH, or configure CHORDSMITH_VST_BRIDGE_URL."
+            )
+        if not parameters:
+            raise ValueError("Give at least one parameter to sweep.")
+        keys = list(parameters)
+        for key in keys:
+            if not parameters[key]:
+                raise ValueError(f"Parameter '{key}' has no values to try.")
+        combos = list(itertools.product(*parameters.values()))
+        if len(combos) > 32:
+            raise ValueError(
+                f"The grid has {len(combos)} combinations; the limit is 32 per call (each one "
+                "loads the plugin)."
+            )
+        base: str | None = None
+        if base_state is not None:
+            base = _resolve_state_reference(store, resolved, base_state)
+            if base is None:
+                raise ValueError(f"State '{base_state}' does not exist in the state library.")
+        indices = _parameter_indices(host, resolved)
+        directory = _states_dir(store)
+        directory.mkdir(parents=True, exist_ok=True)
+        generated: list[str] = []
+        for position, combination in enumerate(combos, start=1):
+            name = f"{name_prefix}_{position}"
+            target = directory / f"{name}{STATE_SUFFIX}"
+            sets: list[tuple[int, float | str]] = []
+            for key, value in zip(keys, combination, strict=True):
+                if key.isdigit():
+                    index = int(key)
+                else:
+                    index = indices.get(key)
+                    if index is None:
+                        close = next((option for option in indices if key.lower() in option.lower()), None)
+                        hint = f" Did you mean '{close}'?" if close else ""
+                        raise ValueError(
+                            f"'{_basename(resolved)}' has no parameter named '{key}'.{hint} "
+                            "(list them with list_plugins parameter_search or parameter_values.)"
+                        )
+                sets.append((index, _parameter_value(value)))
+            try:
+                audio.dump_vst_state(host, resolved, target, sets=sets, state=base)
+            except audio.AudioError as exc:
+                raise ValueError(str(exc)) from None
+            if not target.is_file():
+                raise ValueError(
+                    f"The host wrote no state for '{name}'; the plugin exposes none of these "
+                    "parameters to host automation."
+                )
+            _write_state_metadata(directory, name, resolved, default=make_default and position == 1)
+            generated.append(name)
+        result = _states_result(store)
+        result["states"] = [entry for entry in result["states"] if entry["name"] in set(generated)]
+        return result
 
     @mcp.tool(title="Bake instruments into MIDI", annotations=_CREATES)
     def bake_instruments(
@@ -2048,15 +2162,17 @@ def register(mcp: FastMCP, store_provider) -> None:
                     ]
             _rewrite_track(midi.tracks[index], events)
             baked[name] = spec
-        with store.claimed_path(output_filename, f"{source.stem}_instruments", overwrite) as target:
+        with store.claimed_path(
+            output_filename, f"{source.stem}_instruments", overwrite, project=store.project_of(source)
+        ) as target:
             if target == source:
                 raise ValueError("Choose a different output_filename; the original file is never modified.")
             midi.save(target)
         return {
-            "source": source.name,
-            "filename": target.name,
+            "source": store.relative_name(source),
+            "filename": store.relative_name(target),
             "path": str(target),
-            "uri": f"midi://{target.name}",
+            "uri": f"midi://{store.relative_name(target)}",
             "tracks": {name: spec.model_dump() for name, spec in baked.items()},
             "warnings": warnings,
         }

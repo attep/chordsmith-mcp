@@ -20,7 +20,7 @@ from chordsmith import server
 
 pytestmark = pytest.mark.anyio
 
-DESCRIPTION_BUDGET_BYTES = 24 * 1024
+DESCRIPTION_BUDGET_BYTES = 29 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
 # effects, import, sections), 108 KB (v0.16.0: background render jobs), 116 KB (v0.17.0: wet
 # mix + effect sends), 128 KB (v0.18.0: job listings, get_file, import_audio), 136 KB
@@ -35,9 +35,14 @@ DESCRIPTION_BUDGET_BYTES = 24 * 1024
 # and 248 KB (v0.24.9: the state library — list_plugin_states, set_plugin_default_state and
 # the states block on list_plugins detail; descriptions moved 22 -> 23 KB in the same patch)
 # and 24 KB (v0.25.0: import_tab — Guitar Pro/MusicXML conversion via MuseScore or the host
-# worker; one more tool and its description).
+# worker; one more tool and its description) and 272 KB (v0.28.0: project folders, the genre
+# presets and the add_bassline/add_drums/rename_track tools; descriptions moved 24 -> 26 KB in
+# the same patch). v0.29.0 raised only the description budget (26 -> 27 KB: Roman numerals on
+# analyze_midi, explain_progression and export_musicxml). v0.30.0 raised both for the master-bus
+# options on both render tools and generate_plugin_states (payload 272 -> 296 KB, descriptions
+# 27 -> 29 KB in the same patch).
 # The surface grows with capabilities; keep new schemas lean.
-PAYLOAD_CEILING_BYTES = 248 * 1024
+PAYLOAD_CEILING_BYTES = 296 * 1024
 
 
 @pytest.fixture
@@ -51,7 +56,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 39
+    assert len(tools) == 45
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

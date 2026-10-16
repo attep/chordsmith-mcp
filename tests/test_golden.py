@@ -289,11 +289,14 @@ async def test_path_tricks_are_contained(store):
     store.ensure_root()
     outside = store.root.parent / "secret.mid"
     outside.write_bytes(b"x")
-    for bad in ("../secret.mid", "..\\secret.mid", str(outside), "sub/secret.mid"):
+    for bad in ("../secret.mid", "..\\secret.mid", "sub/../secret.mid", str(outside)):
         assert (await _call("get_midi_file", {"filename": bad})).isError
         assert (await _call("delete_midi_file", {"filename": bad})).isError
         assert (await _call("rename_midi_file", {"filename": bad, "new_name": "x"})).isError
     assert outside.read_bytes() == b"x"  # never touched
+    # a project folder is a valid address, but it is still confined to the output folder
+    assert (await _call("get_midi_file", {"filename": "sub/secret.mid"})).isError
+    assert outside.read_bytes() == b"x"
 
 
 async def test_download_route_rejects_traversal(store, monkeypatch):

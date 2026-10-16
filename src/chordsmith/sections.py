@@ -27,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from chordsmith import results
+from chordsmith import forms, results
 from chordsmith.models import SongSection
 from chordsmith.storage import FileStore
 
@@ -57,7 +57,7 @@ class ResolvedSection:
     def total_beats(self) -> float:
         return self.bars * self.beats_per_bar
 
-    def payload(self) -> dict:
+    def payload(self) -> results.SectionEntry:
         return {
             "name": self.name,
             "start_beat": round(self.start_beat, 3),
@@ -248,35 +248,62 @@ def register(mcp: FastMCP, store_provider) -> None:
     def set_song_sections(
         filename: Annotated[str, Field(description="MIDI file in the output folder.")],
         sections: Annotated[
-            list[SongSection],
+            list[SongSection] | None,
             Field(
-                min_length=1,
-                max_length=64,
-                description="Sections in order, e.g. [{'name': 'Intro', 'bars': 8, 'bpm': 140}, "
-                "{'name': 'Chorus', 'bars': 16, 'bpm': 140, 'numerator': 7, 'denominator': 8, "
-                "'grouping': '2+2+3'}].",
+                description="Sections in order (1-64), e.g. [{'name': 'Intro', 'bars': 8, "
+                "'bpm': 140}, {'name': 'Chorus', 'bars': 16, 'bpm': 140, 'numerator': 7, "
+                "'denominator': 8, 'grouping': '2+2+3'}]. Give sections or a form template, not "
+                "both.",
             ),
-        ],
+        ] = None,
+        form: Annotated[
+            forms.Form | None,
+            Field(
+                description="Optional song-form template that lays out sections with bars and "
+                "tempos: pop, rock, ballad, jazz (32-bar AABA), blues (12-bar x3), edm or "
+                "cinematic; see the Song forms table in docs/tools.md.",
+            ),
+        ] = None,
+        bpm: Annotated[
+            float | None,
+            Field(
+                ge=20,
+                le=300,
+                description="With a form: one tempo for every section (overrides the template's own).",
+            ),
+        ] = None,
     ) -> results.SectionsResult:
         """Write the song's section map into the MIDI: tempo, meter and section markers (step 0 of composing).
 
         The file's conductor is updated **in place** (the one tool that edits a file's timing
         map; notes are untouched): each section's start gets a time signature, a tempo and a
         'section: <name>' marker, so renders, exports and the vocal score follow the map, and
-        add_track can place notes with section-relative bar/beat positions. Replaces any existing
-        section map. Tempo is always quarter-note BPM; a section's meter can differ from its
-        neighbours. Returns each section's start beat, the total beats and the duration in
-        seconds integrated over the whole map.
+        add_track can place notes with section-relative bar/beat positions. Give either an
+        explicit section list or a form template (with an optional bpm to flatten its tempos).
+        Replaces any existing section map. Tempo is always quarter-note BPM; a section's meter
+        can differ from its neighbours. Returns each section's start beat, the total beats and
+        the duration in seconds integrated over the whole map.
         """
         store: FileStore = store_provider()
         source = store.existing_path(filename)
+        if sections is not None and form is not None:
+            raise ValueError("Give sections or a form template, not both.")
+        if sections is None and form is None:
+            raise ValueError("Give a section list or a form template.")
+        if form is not None:
+            sections = forms.form_sections(form, bpm)
+        elif bpm is not None:
+            raise ValueError("bpm only applies with a form; give each section's bpm instead.")
+        assert sections is not None
+        if not sections or len(sections) > 64:
+            raise ValueError("Give between 1 and 64 sections.")
         names = [section.name for section in sections]
         if len(set(names)) != len(names):
             duplicates = sorted({name for name in names if names.count(name) > 1})
             raise ValueError(f"Duplicate section names: {', '.join(duplicates)}.")
         resolved = write_sections(source, sections)
         return {
-            "filename": source.name,
+            "filename": store.relative_name(source),
             "path": str(source),
             "sections": [section.payload() for section in resolved],
             "total_beats": round(sum(section.total_beats for section in resolved), 3),

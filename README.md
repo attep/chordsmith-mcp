@@ -67,7 +67,8 @@ Quit it completely, reopen it, and type:
 > Use ChordSmith to make a happy I–V–vi–IV progression in G major, strummed, 110 BPM.
 
 Files are saved in a **ChordSmith** folder in your home folder (`~/ChordSmith`; Docker uses
-`/data`). Open the `.mid` file in your music app and that's it.
+`/data`) — use a project name like `my_song/verse` to keep one song's files together. Open the
+`.mid` file in your music app and that's it.
 
 If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md).
 
@@ -89,23 +90,32 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `create_chord_progression` | Chord names (`["Am","F","C","G"]`) → `.mid` file |
 | `create_progression_from_roman` | Roman numerals (`i–VI–III–VII`) + key → `.mid` file |
 | `add_track` | Adds a note-level track (melody, bass, drums) to a copy of a file |
+| `add_bassline` / `add_drums` | Derives a bass line from the file's chords (root, root-fifth, pulse, octave, walking) or lays a named drum groove (backbeat, four-on-floor, trap, metal, bossa, shuffle, …) |
 | `set_song_sections` | Writes a section map (bars, tempo, meter per section) into the file's conductor |
 | `get_midi_file` | Hands the actual file back (base64 or a signed download link) |
 | `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app (or per-track stems with `stems: true`) |
 | `set_track_instrument` / `list_instruments` / `list_plugins` | Per-track instrument specs (a soundfont, a GM program or drum kit, a sampled `.sfz` instrument, a `.vst3` plugin, trims and VST effect chains per track) and the engines + instrument/plugin catalogs this server can run |
 | `list_chord_types` | Shows every chord type ChordSmith understands (30) |
 | `transpose_midi` | Moves a file up/down, or from one key to another |
-| `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key |
-| `list_generated_files` | Lists the files you've made |
+| `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key — with Roman numerals per chord |
+| `explain_progression` | Deterministic theory for a progression: numerals, functions, cadences, variation ideas |
+| `list_generated_files` | Lists the files you've made, grouped by project folder |
 | `import_midi` | Imports a MIDI file made elsewhere (base64) and reports what it contains |
+| `import_audio` | Imports a vocal take or render made elsewhere (`.wav`/`.mp3`) |
+| `create_empty_file` / `remove_track` | Builds a song from scratch (optionally with a section map) / drops a track in a copy |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |
-| `delete_midi_file` / `rename_midi_file` | Tidies up the output folder |
+| `export_musicxml` | Converts a MIDI file to a MusicXML score for MuseScore/Finale/Sibelius (local MuseScore or the host worker) |
+| `generate_plugin_states` | Sweeps plugin parameters headlessly into named states (no GUI sessions) |
+| `delete_midi_file` / `rename_midi_file` / `rename_track` | Tidies up files and track names |
 | `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or DiffSinger voicebanks — English and exact phonemes; several banks with their own variants, male and female) and mixes it with the backing |
 
 The create tools accept **voicing** options (inversions, open/drop-2, voice leading, bass note),
-**rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), a `lofi`
-preset, a `seed` for reproducible renders, and `midi_type` 0/1 for simple players. Songs can have
-a **section map** with real tempo and meter changes (`set_song_sections`); notes can then be
+**rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), genre
+**presets** (pop, rock, metal, jazz, bossa, classical, cinematic, trap, edm, blues, funk, lofi),
+a `seed` for reproducible renders, and `midi_type` 0/1 for simple players. Songs can have
+a **section map** with real tempo and meter changes (`set_song_sections`) — or start from a
+**song-form template** (pop, rock, ballad, jazz AABA, 12-bar blues, EDM, cinematic) that lays
+out Intro/Verse/Chorus/Bridge sections with bars and tempos in one call. Notes can then be
 placed with section-relative bar/beat positions, and vocals, renders and exports follow the map.
 
 Every tool also carries a human **title** and **behaviour hints** (read-only / creates /
@@ -180,14 +190,10 @@ Contributions are welcome — these are the areas where help is wanted most:
 
 - **Limits & hardening**: quotas (bars/tracks/file size/storage) and a storage TTL cleanup for
   long-running servers (per-client rate limiting shipped in v0.6.0)
-- **More music helpers**: bass-line generation from the chords, drum-pattern presets, genre
-  presets (jazz, pop, bossa, trap), section-based songs (verse/chorus/bridge)
-- **Interchange**: MusicXML export for MuseScore, multi-track naming polish
-- **Analysis**: Roman-numeral analysis relative to the detected key, and an `explain_progression`
-  tool that returns the theory (numerals, function, cadences, variations)
-- **Project hygiene**: CONTRIBUTING/SECURITY docs, pre-commit hooks, stricter typing
 
 The [CHANGELOG](CHANGELOG.md) tracks what has shipped; releases follow semantic versioning.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, checks and guidelines, and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Development
 

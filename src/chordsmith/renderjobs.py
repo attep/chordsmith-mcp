@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import mido
 from mcp.server.fastmcp import FastMCP
@@ -26,7 +26,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from chordsmith import delivery, renderers, results
-from chordsmith.models import ChorusSettings, ReverbSettings
+from chordsmith.models import ChorusSettings, MasterSettings, ReverbSettings
 
 RENDER_JOB_TTL_SECONDS = 24 * 3600
 
@@ -47,7 +47,7 @@ class RenderJob:
     created_at: float
     progress: dict[str, str] = field(default_factory=dict)  # track -> pending/running/done/failed
     errors: dict[str, str] = field(default_factory=dict)
-    result: dict | None = None
+    result: results.RenderAudioResult | None = None
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -135,9 +135,9 @@ def _prune() -> None:
         _persist()
 
 
-def _payload(job: RenderJob) -> dict:
+def _payload(job: RenderJob) -> results.RenderJobResult:
     with job.lock:
-        progress = [
+        progress: list[results.RenderJobTrack] = [
             {"track": track, "state": state, "error": job.errors.get(track)}
             for track, state in job.progress.items()
         ]
@@ -153,7 +153,7 @@ def _payload(job: RenderJob) -> dict:
 def _run(job: RenderJob, runner, args: dict) -> None:
     job.status = "running"
     try:
-        job.result = runner(args, job.set_state)
+        job.result = cast(results.RenderAudioResult, runner(args, job.set_state))
         job.status = "done"
     except Exception as exc:  # the job must never die silently
         job.error = str(exc)
@@ -201,6 +201,14 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
         ] = None,
         chorus: Annotated[
             ChorusSettings | None, Field(description="FluidSynth chorus (off when omitted).")
+        ] = None,
+        master_effects: Annotated[
+            list[renderers.EffectPlugin] | None,
+            Field(description="VST effect chain over the combined mix (mastering), like render_audio."),
+        ] = None,
+        master: Annotated[
+            MasterSettings | None,
+            Field(description="Master stage on the mix (limiter and/or loudness target), like render_audio."),
         ] = None,
         output_filename: Annotated[
             str | None, Field(description="Name for the rendered file (like render_audio).")
@@ -254,6 +262,8 @@ def register(mcp: FastMCP, store_provider, runner) -> None:
             "normalize_peak_db": normalize_peak_db,
             "reverb": reverb,
             "chorus": chorus,
+            "master_effects": master_effects,
+            "master": master,
             "output_filename": output_filename,
             "expires_in": expires_in,
             "overwrite": overwrite,

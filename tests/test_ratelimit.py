@@ -81,7 +81,7 @@ def _scope(method="POST", path="/mcp", headers=None):
 
 async def test_middleware_rejects_with_429_when_empty():
     app = _App()
-    middleware = ratelimit.RateLimitMiddleware(app, ratelimit.TokenBucketLimiter(60, burst=1), "/mcp")
+    middleware = ratelimit.RateLimitMiddleware(app, {"/mcp": ratelimit.TokenBucketLimiter(60, burst=1)})
     first = await _run(middleware, _scope())
     assert first[0]["status"] == 200
     second = await _run(middleware, _scope())
@@ -94,7 +94,7 @@ async def test_middleware_rejects_with_429_when_empty():
 
 async def test_middleware_passes_through_other_requests():
     app = _App()
-    middleware = ratelimit.RateLimitMiddleware(app, ratelimit.TokenBucketLimiter(60, burst=1), "/mcp")
+    middleware = ratelimit.RateLimitMiddleware(app, {"/mcp": ratelimit.TokenBucketLimiter(60, burst=1)})
     for scope in (
         _scope(method="GET"),
         _scope(path="/healthz"),
@@ -108,7 +108,7 @@ async def test_middleware_passes_through_other_requests():
 
 async def test_middleware_limits_per_token():
     app = _App()
-    middleware = ratelimit.RateLimitMiddleware(app, ratelimit.TokenBucketLimiter(60, burst=1), "/mcp")
+    middleware = ratelimit.RateLimitMiddleware(app, {"/mcp": ratelimit.TokenBucketLimiter(60, burst=1)})
     first = _scope(headers=[(b"authorization", b"Bearer one")])
     same = _scope(headers=[(b"authorization", b"Bearer one")])
     other = _scope(headers=[(b"authorization", b"Bearer two")])
@@ -130,3 +130,55 @@ def test_rate_limit_from_env(monkeypatch):
     monkeypatch.setenv("CHORDSMITH_RATE_LIMIT", "-5")
     with pytest.raises(ValueError, match="negative"):
         ratelimit.rate_limit_from_env()
+
+
+async def test_middleware_shares_one_bucket_across_auth_paths():
+    app = _App()
+    auth_limiter = ratelimit.TokenBucketLimiter(60, burst=1)
+    middleware = ratelimit.RateLimitMiddleware(
+        app,
+        {
+            "/register": auth_limiter,
+            "/token": auth_limiter,
+            "/mcp": ratelimit.TokenBucketLimiter(60, burst=5),
+        },
+    )
+    assert (await _run(middleware, _scope(path="/register")))[0]["status"] == 200
+    assert (await _run(middleware, _scope(path="/token")))[0]["status"] == 429  # shared budget
+    assert (await _run(middleware, _scope(path="/register", method="GET")))[0]["status"] == 200
+    assert (await _run(middleware, _scope()))[0]["status"] == 200  # the MCP bucket is separate
+
+
+def test_client_address_uses_proxy_headers_only_when_trusted():
+    forwarded = {"headers": [(b"cf-connecting-ip", b"9.9.9.9")], "client": ("10.0.0.2", 1)}
+    xff = {"headers": [(b"x-forwarded-for", b"8.8.8.8, 10.0.0.2")], "client": ("10.0.0.2", 2)}
+    spoof = {"headers": [(b"cf-connecting-ip", b"not-an-ip")], "client": ("10.0.0.2", 3)}
+    assert ratelimit.client_key(forwarded) == "addr:10.0.0.2"
+    assert ratelimit.client_key(forwarded, trust_proxy=True) == "addr:9.9.9.9"
+    assert ratelimit.client_key(xff, trust_proxy=True) == "addr:8.8.8.8"
+    assert ratelimit.client_key(spoof, trust_proxy=True) == "addr:10.0.0.2"  # bad header falls back
+
+
+def test_client_key_from_request_reads_a_starlette_style_request():
+    import types
+
+    request = types.SimpleNamespace(
+        headers=types.SimpleNamespace(raw=[(b"x-forwarded-for", b"7.7.7.7")]),
+        client=types.SimpleNamespace(host="10.0.0.3"),
+    )
+    assert ratelimit.client_key_from_request(request) == "addr:10.0.0.3"
+    assert ratelimit.client_key_from_request(request, trust_proxy=True) == "addr:7.7.7.7"
+
+
+def test_auth_rate_limit_and_trust_proxy_from_env(monkeypatch):
+    monkeypatch.delenv("CHORDSMITH_AUTH_RATE_LIMIT", raising=False)
+    monkeypatch.delenv("CHORDSMITH_TRUST_PROXY", raising=False)
+    assert ratelimit.auth_rate_limit_from_env() == ratelimit.DEFAULT_AUTH_RATE_LIMIT
+    assert ratelimit.trust_proxy_from_env() is False
+    monkeypatch.setenv("CHORDSMITH_AUTH_RATE_LIMIT", "10")
+    monkeypatch.setenv("CHORDSMITH_TRUST_PROXY", "1")
+    assert ratelimit.auth_rate_limit_from_env() == 10
+    assert ratelimit.trust_proxy_from_env() is True
+    monkeypatch.setenv("CHORDSMITH_AUTH_RATE_LIMIT", "-1")
+    with pytest.raises(ValueError, match="negative"):
+        ratelimit.auth_rate_limit_from_env()

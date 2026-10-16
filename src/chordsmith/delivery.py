@@ -1,9 +1,10 @@
 """Signed, expiring download URLs for generated files.
 
-The ``/files/{filename}`` route serves a file only when the request carries a valid
-``expires``/``token`` pair, where the token is an HMAC of the file name and expiry. The signing
-secret lives in the state directory (``url_secret``) so links survive restarts; if it cannot be
-persisted, a fresh secret is generated and old links stop working.
+The ``/files/{path}`` route serves a file only when the request carries a valid
+``expires``/``token`` pair, where the token is an HMAC of the file's relative name (including a
+project folder when it has one) and expiry. The signing secret lives in the state directory
+(``url_secret``) so links survive restarts; if it cannot be persisted, a fresh secret is
+generated and old links stop working.
 """
 
 from __future__ import annotations
@@ -81,11 +82,17 @@ def verify(filename: str, expires: str | int, token: str, secret: bytes | None =
 def build_url(
     public_url: str, filename: str, ttl: int = DEFAULT_TTL_SECONDS, secret: bytes | None = None
 ) -> tuple[str, int]:
-    """Return (signed URL, expires_at as a Unix timestamp)."""
+    """Return (signed URL, expires_at as a Unix timestamp).
+
+    ``filename`` is the store-relative name ('song.wav' or 'project/song.wav'); the download
+    route takes a path so project folders work with the slashes kept literal.
+    """
     ttl = max(30, min(MAX_TTL_SECONDS, ttl))
     expires = int(time.time()) + ttl
     token = sign(filename, expires, secret)
-    url = f"{public_url.rstrip('/')}{DOWNLOAD_PATH}/{quote(filename)}?expires={expires}&token={token}"
+    url = (
+        f"{public_url.rstrip('/')}{DOWNLOAD_PATH}/{quote(filename, safe='/')}?expires={expires}&token={token}"
+    )
     return url, expires
 
 

@@ -7,10 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre presets
-(jazz/pop/bossa/trap), bass-line and drum-pattern helpers, section-based song building, MusicXML
-export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
-(CONTRIBUTING, SECURITY, pre-commit, mypy).
+Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
+long-running servers.
 
 ### Added
 
@@ -20,6 +18,110 @@ export, Roman-numeral analysis, an `explain_progression` tool, and contributor h
   connected MCP sessions. It needs the same bearer token as `/mcp` when OAuth is on.
 - HTTP transports answer CORS requests from `localhost`/`127.0.0.1` origins (any port);
   `CHORDSMITH_CORS_ORIGINS` adds more.
+
+## [0.30.0] - 2026-10-16
+
+Mastered renders and headless plugin states: a mix can hit a streaming loudness target, and
+parameter-driven plugins turn into a named palette of tones without opening a GUI.
+
+### Added
+
+- **Master bus on `render_audio` and `render_audio_job`**: `master_effects` runs a VST effect
+  chain over the combined mix (bus EQ/glue/saturation with the same preset/state/params as
+  per-track effects; the stems stay dry), and `master` finishes it — a true-peak limiter
+  (0.3 dB under its ceiling) and/or `loudness_target_lufs` (one static EBU R128 gain that
+  supersedes `normalize_peak_db`). The result's `master` block reports the measured loudness
+  (integrated LUFS, range, true peak), the limiter's reduction, the gain applied and warnings;
+  `{"loudness_target_lufs": -14, "limiter": {"enabled": true}}` is the streaming master.
+- **`generate_plugin_states`**: sweeps a parameter grid headlessly — every combination loads
+  the plugin once and lands in the state library as `<prefix>_N` (32-combination cap), with an
+  optional `base_state` to vary a captured GUI tone and `make_default` for the first variant.
+  `vst_host --dump-state` gained `--state`, so a sweep can start from any captured state.
+
+### Changed
+
+- `singing.loudness_report`/`limiter_filter`/`peak_db` are public now (shared with mastering);
+  behaviour is unchanged.
+- Tool count 44 -> 45; payload ceiling 272 -> 296 KB and the description budget 27 -> 29 KB in
+  the same patch (deliberate: the master options and the new tool).
+
+## [0.29.0] - 2026-10-16
+
+Harmonic analysis, notation export and project hygiene: the server can now explain what a
+progression does, hand the song to a notation app, and the repo carries its own contributing
+and security docs.
+
+### Added
+
+- **Roman-numeral analysis**: `analyze_midi` now reports each window's `roman_numerals` in the
+  key it detected from the chords (`key_used`/`key_source`), or in a `key` you pass (e.g.
+  `"A minor"` for the minor reading). Numeral spelling follows the chord letters (bVII, #iv°),
+  case follows the third, and secondary dominants are named (D7 in C = V7/V).
+- **`explain_progression`** (tool): deterministic theory for a chord list — per-chord numeral
+  and function (tonic/subdominant/dominant, borrowed, secondary dominant), cadences (authentic,
+  plagal, half, deceptive, ii-V-I) and a few concrete variation ideas. The MCP prompt of the
+  same name stays the assistant-led path.
+- **`export_musicxml`**: converts a MIDI file to a MusicXML score (`.musicxml` or compressed
+  `.mxl`) with MuseScore — locally (`CHORDSMITH_MUSESCORE`) or through the host worker — so
+  notation apps open real notation instead of a raw MIDI import. The bridge's `/tab` endpoint
+  takes a `target` for score output; notation from MIDI is approximate (quantised rhythms,
+  chord markers as text).
+- **Project hygiene**: CONTRIBUTING.md and SECURITY.md, a `.pre-commit-config.yaml` (ruff +
+  mypy) and a curated mypy module set in `pyproject.toml` (the pydantic plugin understands
+  model defaults; the list grows as modules get clean). `dev` installs now include mypy.
+
+### Changed
+
+- Tool count 42 -> 44; the description budget moved 26 -> 27 KB in the same patch (deliberate).
+- The README roadmap lists only what is still open (quotas and the mastering/plugin-state
+  work); the audit's leftovers are fixed (Hanami-specific test guard and skill default, the
+  stale module lists, the demo-render notes, a plugin name in a reverb hint).
+
+## [0.28.0] - 2026-10-16
+
+Projects, genre presets, groove helpers and song forms: songs become folders, and a whole
+backing can be composed in a few calls.
+
+### Added
+
+- **Project folders**: a file name may name a project (`"my_song/verse"`), so one song's
+  files stay together under `~/ChordSmith/my_song/`. Derived files (renders, stems, mixes,
+  copies, bakes, vocals, exports) default into their source's project; each folder gets a
+  `project.json` manifest; `list_generated_files` gains a `project` filter, a per-file
+  `project` field and a `projects` summary, and `rename_midi_file` can move a file (with its
+  sidecars) between projects. Every tool result now reports the addressable relative name
+  (`my_song/verse.mid`), and signed download URLs serve project paths.
+- **Genre presets** on the create tools: pop, rock, metal, jazz, bossa, classical, cinematic,
+  trap, edm, blues, funk and lofi — each bundles voicing and rhythm.
+- **`add_bassline`**: derives a bass line from the file's chord markers (analysis as fallback)
+  in five styles — root, root_fifth, eighth_pulse, octave and walking — with octave, velocity,
+  gate, swing and humanize options.
+- **`add_drums`**: lays a named groove over the whole song — four_on_floor, backbeat, rock,
+  metal, trap, boom_bap, bossa_nova (two bars), shuffle or waltz (3/4) — honoring the section
+  map's bars and rejecting meter changes it cannot follow.
+- **Song-form templates**: `create_empty_file` and `set_song_sections` take `form` (pop, rock,
+  ballad, jazz 32-bar AABA, 12-bar blues, edm, cinematic) and lay out named sections with the
+  common published bar counts and tempos; `bpm` flattens the map onto one tempo.
+- **`rename_track`**: writes a copy with one track renamed; renaming to an existing name is
+  rejected.
+
+### Changed
+
+- **Track names must be unique**: `add_track`, `add_bassline` and `add_drums` refuse a
+  `track_name` that already exists (the by-name tools match exactly), and `track_name` gains
+  length bounds.
+- **Path tricks are rejected, not munged**: `"../x"`-style names now fail with a clear error
+  instead of being silently sanitized to the last segment.
+- Tool count 39 -> 42; the description budget moved 24 -> 26 KB and the payload ceiling
+  248 -> 272 KB in the same patch (deliberate).
+- The README roadmap drops the shipped items and gains "Mastering & plugin states".
+
+### Fixed
+
+- `import_tab` keeps a project prefix when deriving the imported `.mid` name.
+- The skill's `loop` option example is the real object form and `normalize_peak_db`'s default
+  is documented as `null`; `scripts/vst_bridge.py` no longer defaults `--host-exe` to a
+  machine-specific path; a `ruff` formatting slip in `singing.py` that would fail CI is fixed.
 
 ## [0.27.0] - 2026-10-14
 

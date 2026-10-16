@@ -88,22 +88,62 @@ class AnalyzeResult(TypedDict):
     total_beats: float
     window_beats: float
     key_signature_guess: str | None
+    key_used: str | None
+    key_source: str | None
     progression: list[str]
+    roman_numerals: list[str | None]
     segments: list[SegmentEntry]
+
+
+class ExplainChordEntry(TypedDict):
+    chord: str
+    numeral: str | None
+    function: str
+
+
+class CadenceEntry(TypedDict):
+    kind: str
+    from_chord: str
+    to_chord: str
+    description: str
+
+
+class ExplainProgressionResult(TypedDict):
+    key: str
+    key_source: str
+    chords: list[str]
+    numerals: list[str | None]
+    analysis: list[ExplainChordEntry]
+    cadences: list[CadenceEntry]
+    borrowed: list[str]
+    secondary_dominants: list[str]
+    suggestions: list[str]
 
 
 class FileEntry(TypedDict):
     filename: str
     uri: str
     kind: str
+    project: str | None
     size_bytes: int
     empty: bool
     modified: str
 
 
+class ProjectEntry(TypedDict):
+    name: str
+    files: int
+    midi: int
+    audio: int
+    last_modified: str | None
+    created: str | None
+    title: str | None
+
+
 class ListFilesResult(TypedDict):
     output_dir: str
     total: int
+    projects: list[ProjectEntry]
     files: list[FileEntry]
 
 
@@ -116,6 +156,44 @@ class AddTrackResult(TypedDict):
     channel: int
     copied_from: str | None
     transpose_semitones: int
+    swing: float
+    humanize: Humanize | None
+    notes_added: int
+    automation_events: int
+    total_tracks: int
+    track_index: int
+
+
+class BasslineResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    track_name: str
+    channel: int
+    style: str
+    chord_source: str
+    chords: list[str]
+    octave: int
+    swing: float
+    humanize: Humanize | None
+    notes_added: int
+    automation_events: int
+    total_tracks: int
+    track_index: int
+
+
+class DrumsResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    track_name: str
+    channel: int
+    pattern: str
+    pattern_bars: int
+    repeat: int
+    total_bars: int
     swing: float
     humanize: Humanize | None
     notes_added: int
@@ -139,6 +217,16 @@ class RemoveTrackResult(TypedDict):
     path: str
     uri: str
     removed: str
+    total_tracks: int
+
+
+class RenameTrackResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    renamed_from: str
+    renamed_to: str
     total_tracks: int
 
 
@@ -201,6 +289,16 @@ class FailedTrack(TypedDict):
     error: str
 
 
+class MasterReport(TypedDict, total=False):
+    """The render's master stage: measurements and warnings (mirrors the mix tools)."""
+
+    loudness: LoudnessInfo | None
+    limiter_reduction_db: float | None
+    gain_correction_db: float | None
+    peak_db: float | None
+    warnings: list[str]
+
+
 class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     source: str | None
     duration_seconds: float | None
@@ -210,6 +308,7 @@ class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     effects: EffectsEntry | None
     failed: list[FailedTrack] | None
     stems: list[StemEntry] | None
+    master: MasterReport | None
 
 
 class RenderJobTrack(TypedDict):
@@ -472,6 +571,13 @@ class ImportTabResult(ImportResult):
 
 class GetFileResult(_FileIdentity, DeliveryFields):
     mime_type: str
+
+
+class ExportScoreResult(_FileIdentity, DeliveryFields):
+    mime_type: str
+    converted_from: str
+    converter: str
+    conversion_seconds: float
 
 
 class ImportAudioResult(TypedDict):

@@ -11,8 +11,17 @@ from pathlib import Path
 
 import mido
 
-from chordsmith import sections
-from chordsmith.theory import SCALES, MusicTheoryError, identify_chord, note_name, parse_chord
+from chordsmith import harmony, sections
+from chordsmith.theory import (
+    SCALES,
+    Chord,
+    MusicTheoryError,
+    chord_to_numeral,
+    identify_chord,
+    note_name,
+    parse_chord,
+    parse_key,
+)
 
 _FLAT_MAJOR_TONICS = {1, 3, 5, 6, 8, 10}
 
@@ -164,7 +173,7 @@ def describe_midi(midi: mido.MidiFile) -> dict:
     }
 
 
-def analyze_file(path: Path, window_beats: float | None = None) -> dict:
+def analyze_file(path: Path, window_beats: float | None = None, key: str | None = None) -> dict:
     midi = mido.MidiFile(path)
     notes, info = _collect_notes(midi)
     tpb = midi.ticks_per_beat
@@ -222,13 +231,43 @@ def analyze_file(path: Path, window_beats: float | None = None) -> dict:
     if segments and segments[-1]["chord"] == "N.C.":
         segments.pop()
 
+    segment_chords: list[Chord | None] = []
+    for segment in segments:
+        symbol = segment["chord"]
+        if symbol in ("N.C.", "?"):
+            segment_chords.append(None)
+            continue
+        try:
+            segment_chords.append(parse_chord(symbol))
+        except MusicTheoryError:
+            segment_chords.append(None)
+    if key is not None:
+        key_used = parse_key(key)
+        key_source = "given"
+    elif notes and any(segment_chords):
+        key_used = harmony.detect_key([chord for chord in segment_chords if chord is not None])
+        key_source = "detected"
+    elif notes:
+        key_used = parse_key(f"{note_name(tonic, flats)} major")
+        key_source = "detected"
+    else:
+        key_used = None
+        key_source = None
+    numerals: list[str | None] = [
+        chord_to_numeral(chord, key_used) if (chord is not None and key_used is not None) else None
+        for chord in segment_chords
+    ]
+
     return {
         **info,
         "ticks_per_beat": tpb,
         "total_beats": round(end / tpb, 3),
         "window_beats": window_beats,
         "key_signature_guess": key_guess,
+        "key_used": key_used.name if key_used else None,
+        "key_source": key_source,
         "sections": [section.payload() for section in sections.read_sections(path)],
         "progression": [s["chord"] for s in segments],
+        "roman_numerals": numerals,
         "segments": segments,
     }

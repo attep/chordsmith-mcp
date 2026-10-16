@@ -44,6 +44,8 @@ from pydantic import AnyHttpUrl, ValidationError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from chordsmith.ratelimit import client_key_from_request, trust_proxy_from_env
+
 logger = logging.getLogger(__name__)
 
 SCOPE = "chordsmith"
@@ -53,6 +55,9 @@ REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600
 AUTH_CODE_TTL_SECONDS = 300
 PENDING_REQUEST_TTL_SECONDS = 600
 MAX_FAILED_LOGINS_PER_MINUTE = 8
+MAX_FAILED_LOGINS_PER_HOUR = 20  # per client key; reaching this locks sign-in for that key
+LOGIN_LOCKOUT_SECONDS = 600
+LOGIN_FAILURE_DELAY_SECONDS = 0.5  # slowed responses make guessing expensive
 CIMD_CACHE_TTL_SECONDS = 3600
 CIMD_FETCH_TIMEOUT_SECONDS = 5.0
 CIMD_MAX_DOCUMENT_BYTES = 64 * 1024
@@ -218,6 +223,9 @@ class PasswordOAuthProvider:
         self.token_pairs: dict[str, str] = {}
         self.pending_requests: dict[str, _PendingAuthorization] = {}
         self._failed_logins: list[float] = []
+        self._failure_log: dict[str, list[float]] = {}
+        self._locked_until: dict[str, float] = {}
+        self.trust_proxy = trust_proxy_from_env()
         self._cimd_fetcher = cimd_fetcher
         self._cimd_cache: dict[str, tuple[float, OAuthClientInformationFull]] = {}
         self._load_state()
@@ -316,21 +324,35 @@ class PasswordOAuthProvider:
             return None
         return pending
 
-    async def complete_login(self, request_id: str, password: str) -> str:
+    async def complete_login(self, request_id: str, password: str, client_key: str | None = None) -> str:
         """Check the password, create an authorization code and return the client redirect URL."""
         pending = self.pending_request(request_id)
         if pending is None:
             raise LoginFailed(
                 "This sign-in link has expired. Start the connection again from your AI app.", 400
             )
+        key = client_key or "unknown"
+        now = time.time()
+        locked_until = self._locked_until.get(key, 0.0)
+        if locked_until > now:
+            raise LoginFailed(
+                f"Too many failed attempts. Try again in {int(locked_until - now) + 1} seconds.", 429
+            )
         if self._recent_failures() >= MAX_FAILED_LOGINS_PER_MINUTE:
             raise LoginFailed("Too many failed attempts. Wait a minute and try again.", 429)
         if not hmac.compare_digest(password.encode(), self.config.password.encode()):
-            self._failed_logins.append(time.time())
+            self._failed_logins.append(now)
+            recent = [t for t in self._failure_log.get(key, []) if t >= now - 3600]
+            recent.append(now)
+            self._failure_log[key] = recent
+            if len(recent) >= MAX_FAILED_LOGINS_PER_HOUR:
+                self._locked_until[key] = now + LOGIN_LOCKOUT_SECONDS
             logger.warning("Failed sign-in attempt (client %s)", pending.client.client_id)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(LOGIN_FAILURE_DELAY_SECONDS)
             raise LoginFailed("Wrong password. Try again.", 401)
         self._failed_logins.clear()
+        self._failure_log.pop(key, None)
+        self._locked_until.pop(key, None)
         del self.pending_requests[request_id]
         code = secrets.token_urlsafe(32)
         params = pending.params
@@ -610,8 +632,9 @@ def enable_auth(mcp: FastMCP, config: AuthConfig, cimd_fetcher=None) -> Password
             form = await request.form()
             request_id = str(form.get("request_id") or request.query_params.get("request_id") or "")
             password = str(form.get("password") or "")
+            key = client_key_from_request(request, provider.trust_proxy)
             try:
-                redirect_url = await provider.complete_login(request_id, password)
+                redirect_url = await provider.complete_login(request_id, password, client_key=key)
             except LoginFailed as exc:
                 page = _login_page(request_id or None, exc.message)
                 return HTMLResponse(page, status_code=exc.status_code)

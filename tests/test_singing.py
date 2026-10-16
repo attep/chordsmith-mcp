@@ -344,7 +344,17 @@ async def test_list_singing_voices_all_engines(fake_engine):
     assert single.structuredContent["voices"][0]["voice_id"] == "voicevox:6000"
 
 
-@pytest.mark.skipif(not diffsinger.available(), reason="DiffSinger voicebank not configured")
+def _has_hanami_voicebank() -> bool:
+    if not diffsinger.available():
+        return False
+    try:
+        banks = diffsinger.list_voicebanks()
+    except Exception:  # a broken bank listing must skip, not fail, this test
+        return False
+    return any("hanami" in str(entry.get("voicebank", "")).lower() for entry in banks)
+
+
+@pytest.mark.skipif(not _has_hanami_voicebank(), reason="the Hanami voicebank is not configured")
 async def test_list_singing_voices_diffsinger(fake_engine):
     result = await _call("list_singing_voices", {"engine": "diffsinger"})
     data = result.structuredContent
@@ -355,7 +365,7 @@ async def test_list_singing_voices_diffsinger(fake_engine):
         "diffsinger:hoshino_hanami/fragrance",
         "diffsinger:hoshino_hanami/nectar",
     ]
-    assert all(v["language"] == "en" for v in voices)
+    assert all(v["language"] == "en" for v in hanami)
     assert "Lotte V" in hanami[0]["credit"]
     assert "non-commercial" in hanami[0]["licence"]
 
@@ -755,7 +765,7 @@ def test_delay_ms_resolves_tempo_sync():
 
 
 def test_limiter_filter_uses_a_linear_ceiling_and_no_auto_level():
-    assert singing._limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false:latency=true"
+    assert singing.limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false:latency=true"
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")

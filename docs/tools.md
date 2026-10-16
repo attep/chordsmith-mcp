@@ -7,14 +7,21 @@ for something specific ("use drop2 voicing") or understand a result.
 - [create_progression_from_roman](#create_progression_from_roman)
 - [Voicing options](#voicing-options)
 - [Rhythm options](#rhythm-options)
+- [Genre presets](#genre-presets)
 - [add_track](#add_track)
+- [add_bassline](#add_bassline)
+- [add_drums](#add_drums)
 - [create_empty_file](#create_empty_file)
 - [remove_track](#remove_track)
+- [rename_track](#rename_track)
 - [set_song_sections](#set_song_sections)
+- [Song forms](#song-forms)
 - [bake_instruments](#bake_instruments)
 - [get_midi_file](#get_midi_file)
 - [get_file](#get_file)
 - [import_midi](#import_midi)
+- [import_tab](#import_tab)
+- [export_musicxml](#export_musicxml)
 - [import_audio](#import_audio)
 - [render_audio](#render_audio)
 - [render_audio_job and get_render_job](#render_audio_job-and-get_render_job)
@@ -22,6 +29,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [list_chord_types](#list_chord_types)
 - [transpose_midi](#transpose_midi)
 - [analyze_midi](#analyze_midi)
+- [explain_progression](#explain_progression)
 - [list_generated_files](#list_generated_files)
 - [delete_midi_file and rename_midi_file](#delete_midi_file-and-rename_midi_file)
 - [Resources](#resources)
@@ -32,6 +40,16 @@ Files are always saved in the output folder (default `~/ChordSmith`, see
 [Settings](getting-started.md#settings)). File names are cleaned up automatically
 (`"my song"` becomes `my_song.mid`), and an existing file is never replaced unless you set
 `overwrite: true`. Otherwise the new file gets a number, e.g. `my_song_2.mid`.
+
+### Project folders
+
+A file name may name a **project folder**, so every song's files stay together:
+`"my_song/verse"` writes `~/ChordSmith/my_song/verse.mid`, and later calls address it as
+`my_song/verse.mid`. Renders, stems, mix files and copies follow their source file's project
+unless you give an `output_filename` with another project. Each folder gets a small
+`project.json` manifest (name, creation date) so several tools or people can find the song they
+are working on; `list_generated_files` reports the projects and their files. Files saved without
+a project sit directly in the output folder, exactly as before.
 
 ## How tools appear to MCP clients
 
@@ -82,7 +100,7 @@ Turns chord symbols into a MIDI file.
 | `instrument` | 0–127 | `0` | General MIDI sound: 0 piano, 4 electric piano, 24 nylon guitar, 25 steel guitar, 48 strings, 88 pad |
 | `voicing` | object | close, root position | See [Voicing options](#voicing-options) |
 | `rhythm` | object | block chords | See [Rhythm options](#rhythm-options) |
-| `preset` | text | none | `"lofi"`: voice leading on, soft swung repeated chord hits (pulse pattern) and light humanization |
+| `preset` | text | none | A genre preset bundling voicing and rhythm (see [Genre presets](#genre-presets)) |
 | `seed` | number | none | Fix the humanization randomness so the same call writes identical bytes (used with a preset or a `rhythm.humanize`; overrides its `seed`) |
 | `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard; the first track carries the file's title, tempo and chord-name markers). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
 | `overwrite` | true/false | `false` | Replace a file with the same name |
@@ -173,6 +191,28 @@ Pass these inside `"rhythm": {...}`. All are optional.
 With arpeggio and Alberti patterns, a bass note (from `add_bass` or a slash chord) is held under
 the moving notes.
 
+## Genre presets
+
+`create_chord_progression` and `create_progression_from_roman` take a `preset` that bundles a
+voicing and a rhythm, so one word sets the feel. Explicit `voicing`/`rhythm` options replace the
+preset's parts. The companion tools ([add_bassline](#add_bassline) and
+[add_drums](#add_drums)) name matching bass styles and drum grooves per genre.
+
+| Preset | Feel | Voicing / rhythm |
+|---|---|---|
+| `pop` | modern pop comping | voice leading; eighth-note chord pulses |
+| `rock` | downstroke eighth chords | root doubled an octave below; eighth pulses, strong hits |
+| `metal` | palm-muted chugs | root doubled; sixteenth pulses, short gates |
+| `jazz` | swung comping | drop-2 voicings, voice leading; swung quarter-note hits |
+| `bossa` | nylon-guitar comping | drop-2 voicings; syncopated hits `[0, 0.75, 1.5, 3]` |
+| `classical` | Alberti piano | voice leading; sixteenth-note Alberti figure |
+| `cinematic` | slow wide arpeggios | open voicings, voice leading, root below; quarter-note up-arpeggios |
+| `trap` | sparse dark stabs | voice leading; spaced quarter-note hits, long gates |
+| `edm` | off-beat house stabs | voice leading; hits on the “and” of every beat `[0.5, 1.5, 2.5, 3.5]` |
+| `blues` | shuffle | voice leading; swung eighth-note pulses |
+| `funk` | syncopated stabs | voice leading; short sixteenth-placed stabs `[0, 0.75, 1.5, 2.5, 3.25]` |
+| `lofi` | soft, swung, humanized | voice leading; soft swung pulses with seeded humanization |
+
 ## add_track
 
 Adds a note-level track (melody, bass, drums, …) to a **copy** of an existing MIDI file. The
@@ -227,29 +267,94 @@ company an octave up. With `copy_from` the layers take one call each:
 3. Trim both with `gain_db` and keep the original sine under them; the mix's balance
    measurement ends up carrying the low end on any speaker.
 
-## create_empty_file
+## add_bassline
 
-Creates a **blank MIDI file** (a conductor track only) to build a song on from scratch — for
-songs that should not start from a chord progression. With `sections`, the tempo/meter map is
-written immediately, so [add_track](#add_track) can use `section` + `bar` + `beat` positions.
+Derives a **bass line from the file's chords** and adds it as a new track — no note writing.
+The chords come from the chord-name markers the create tools write; a file without them is
+analyzed note by note instead (`chord_source` in the result says which was used). Creates a
+copy like [add_track](#add_track) and stays in the source's project.
 
 | Option | Description |
 |---|---|
-| `filename` (required) | Name for the new file, e.g. `"abyss"` (`.mid` is added) |
+| `filename` (required) | Existing MIDI file whose chords drive the bass |
+| `track_name` | Name of the new track (default `"Bass"`) |
+| `style` | `root` = one held root per chord · `root_fifth` = root and fifth alternating (default) · `eighth_pulse` = root on every subdivision · `octave` = root alternating an octave up · `walking` = quarter-note walk: root, fifth, third, chromatically into the next root |
+| `octave` | Octave of the bass root (default `2` ≈ A2) |
+| `subdivision` | Step length in beats for the pulsing styles (default `0.5` = eighths) |
+| `instrument` | GM program (default `33` electric bass finger) |
+| `channel` | MIDI channel (default 1) |
+| `velocity`, `gate`, `swing`, `humanize` | Like [add_track](#add_track); `swing` uses `subdivision` as the step |
+| `output_filename`, `overwrite` | Default: `<name>_<track_name>.mid` |
+
+## add_drums
+
+Lays a **named drum groove** over the whole song on channel 10. The groove repeats from the
+song's start to its end; with a section map the length follows its bars, and a file whose
+sections change meter is rejected (add drums per section with `add_track` patterns instead).
+The pattern's meter must match the song's.
+
+| Pattern | Meter | Groove |
+|---|---|---|
+| `four_on_floor` | 4/4 | House kick on every beat, off-beat open hats, clap on 2 and 4 |
+| `backbeat` | 4/4 | Pop/rock: kick on 1 and 3, snare on 2 and 4, eighth hats (default) |
+| `rock` | 4/4 | Driving kick pickups into 3, accented hats |
+| `metal` | 4/4 | Double-kick eighths under a 2-and-4 snare and ride |
+| `trap` | 4/4 | Sparse 808 kick, half-time clap, sixteenth hats with rolls |
+| `boom_bap` | 4/4 | Syncopated kick, lazy backbeat (try `swing: 0.2`) |
+| `bossa_nova` | 4/4 | Two-bar bossa: bass drum on 1 and 3, side-stick, shaker |
+| `shuffle` | 4/4 | Backbeat with a walking kick (set `swing: 0.33`) |
+| `waltz` | 3/4 | Kick on 1, snare on 2, a hat for each beat |
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing MIDI file to add the drums to |
+| `track_name` | Name of the new track (default `"Drums"`) |
+| `pattern` | Groove name (default `"backbeat"`) |
+| `gate` | Fraction of each step a hit sounds (default `0.5` = crisp) |
+| `swing`, `humanize` | Seeded feel options, as on [add_track](#add_track) |
+| `output_filename`, `overwrite` | Default: `<name>_<track_name>.mid` |
+
+## create_empty_file
+
+Creates a **blank MIDI file** (a conductor track only) to build a song on from scratch — for
+songs that should not start from a chord progression. With `sections` or a `form` template, the
+tempo/meter map is written immediately, so [add_track](#add_track) can use `section` + `bar` +
+`beat` positions.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Name for the new file, e.g. `"my_song"` (`.mid` is added) |
 | `sections` | Optional section map, like [set_song_sections](#set_song_sections) |
+| `form` | Optional [song-form template](#song-forms) (`"pop"`, `"rock"`, `"ballad"`, `"jazz"`, `"blues"`, `"edm"`, `"cinematic"`) |
+| `bpm` | With a form: one tempo for every section |
 | `output_filename`, `overwrite` | As above |
 
 ## remove_track
 
 Writes a **copy** of a file without one track (the original is kept). The track is found by name
-(names must be unique; rename first if not). The per-track instrument sidecar belongs to the
-original, so the copy starts without specs.
+(names must be unique; rename with [rename_track](#rename_track) first if not). The per-track
+instrument sidecar belongs to the original, so the copy starts without specs.
 
 | Option | Description |
 |---|---|
 | `filename` (required) | Existing file in the output folder |
 | `track_name` (required) | Track to leave out, e.g. `"Chords"` |
 | `output_filename` | Default: `<name>_no_<track_name>` |
+| `overwrite` | Replace an existing copy |
+
+## rename_track
+
+Writes a **copy** of a file with one track renamed (the original is kept). Track names must stay
+unique — the by-name tools need it — so renaming to an existing name is rejected. The copy
+starts without the original's per-track instrument specs; set them again with
+[set_track_instrument](#set_track_instrument).
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing file in the output folder |
+| `track_name` (required) | Current name of the track, e.g. `"Melody"` |
+| `new_name` (required) | New name, e.g. `"Lead Guitar"` |
+| `output_filename` | Default: `<name>_<new_name>` |
 | `overwrite` | Replace an existing copy |
 
 ## set_song_sections
@@ -262,7 +367,9 @@ touched. Call it before [add_track](#add_track) to place notes with section-rela
 | Option | Description |
 |---|---|
 | `filename` (required) | MIDI file in the output folder |
-| `sections` (required) | Sections in order, up to 64 |
+| `sections` | Sections in order, up to 64 (give `sections` or `form`, not both) |
+| `form` | A [song-form template](#song-forms) instead of a hand-written section list |
+| `bpm` | With a form: one tempo for every section (overrides the template's own tempos) |
 
 Each section has:
 
@@ -287,6 +394,47 @@ The result reports each section's `start_beat`, the total beats and the `duratio
 integrated over the whole map (not the initial BPM applied to the song). Replaces any existing
 section map; the sidecar (`<name>.sections.json`) follows the file through rename and delete.
 Old single-tempo songs simply have no sections and keep working unchanged.
+
+## Song forms
+
+A **form template** lays out a whole song structure in one call — sections in order with their
+bars and tempos — instead of hand-writing the list. Pass it as `form` to
+[create_empty_file](#create_empty_file) or [set_song_sections](#set_song_sections); `bpm`
+flattens every section onto one tempo. The section names are meant to be reused:
+[add_track](#add_track) positions notes inside them (`section: "Chorus 1"`),
+[add_bassline](#add_bassline) and [add_drums](#add_drums) follow the map, and
+[set_track_instrument](#set_track_instrument) section overrides can switch programs or trim
+levels per section.
+
+What the section names mean:
+
+| Section | Role |
+|---|---|
+| Intro | sets the key, groove and mood; often instrumental, low energy |
+| Verse | tells the story; lower energy, the words carry it |
+| Pre-Chorus | builds tension into the chorus (rising line, quicker rhythm) |
+| Chorus | the payoff: highest energy, the hook, the fullest arrangement |
+| Bridge | contrast after the second chorus: new chords or feel, quieter or stranger |
+| Solo | an instrumental chorus (guitar/organ) over the verse or chorus chords |
+| Break / Build | EDM: strips back, then rises with risers and rolls into the drop |
+| Drop | EDM: the loudest, fullest section (the chorus equivalent) |
+| Outro | winds down; fade, tag or a final cadence |
+
+| Form | Sections (bars) | Tempo |
+|---|---|---|
+| `pop` | Intro 4 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Bridge 8 · Chorus 8 · Outro 4 | 110 |
+| `rock` | Intro 4 · Verse 8 · Chorus 8 · Verse 8 · Chorus 8 · Solo 8 · Chorus 8 · Outro 4 | 130 |
+| `ballad` | Intro 4 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Verse 8 · Chorus 8 · Bridge 8 · Chorus 8 · Outro 4 | 70 |
+| `jazz` | A1 8 · A2 8 · B 8 · A3 8 (32-bar AABA) | 132 |
+| `blues` | Blues 1 12 · Blues 2 12 · Blues 3 12 | 100 |
+| `edm` | Intro 16 · Build 8 · Drop 16 · Break 8 · Build 8 · Drop 16 · Outro 16 | 128 |
+| `cinematic` | Intro 8 · Theme A 16 · Theme B 16 · Build 8 · Climax 16 · Outro 8 | 60 → 120 → 60 |
+
+The bar counts are the common published defaults (verse/chorus and AABA: Wikipedia *Song
+structure* and Open Music Theory; 12-bar blues: *Twelve-bar blues*; the EDM phrase grid:
+*Drop* and production guides; cinematic has no single standard, so the arc follows the usual
+trailer/production shape). Treat them as starting points — pass an explicit `sections` list
+instead when the structure should differ.
 
 ## bake_instruments
 
@@ -369,6 +517,27 @@ kept. MuseScore writes the tab's own tempo automation into the MIDI — a tab ma
 tempo shifts (check `tempo_changes`; smooth them if they wobble). See
 [guitarpro.md](guitarpro.md) for the full grounding recipe.
 
+## export_musicxml
+
+The reverse direction: converts a MIDI file to a **MusicXML score** with MuseScore, so a
+notation app (MuseScore, Finale, Sibelius, Dorico) opens it as real notation instead of
+quantising a raw MIDI import. The same converter setups as [import_tab](#import_tab) apply
+(`CHORDSMITH_MUSESCORE`, or the host worker with `--musescore`); with neither configured the
+error explains both.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | MIDI file in the output folder |
+| `format` | `"musicxml"` (plain XML, the default) or `"mxl"` (compressed MusicXML) |
+| `output_filename` | Default: `<name>.musicxml` / `<name>.mxl`, written in the source's project |
+| `return_as`, `expires_in` | Deliver like [get_file](#get_file): base64 bytes or a signed, expiring link |
+| `overwrite` | Replace an existing score of that name |
+
+The result carries the usual delivery fields plus `converted_from`, `converter` and
+`conversion_seconds`. Notation from MIDI is approximate: rhythms are quantised to the grid,
+and the chord-name markers arrive as text, not engraved chord symbols (add them in the notation
+app once and save the score).
+
 ## import_audio
 
 Imports an audio file (`.wav` or `.mp3`) into the output folder — a vocal take, a render made
@@ -402,6 +571,8 @@ on `PATH`.
 | `normalize_peak_db` | Gain the rendered mix so its peak hits this level in dBFS (set `-1.0` for a listening-ready file). Default `null` keeps FluidSynth's raw level; **stems stay raw either way**, so their balance sums back to the unnormalized mix |
 | `reverb` | FluidSynth's built-in reverb (off when omitted): `{"room_size": 0.5, "damping": 0.3, "width": 0.8, "level": 0.7}` — those are the engine's own defaults, ranges are the engine's accepted values (room 0–1.2, damping 0–1, width 0–100, level 0–1). `{}` turns it on with the engine defaults |
 | `chorus` | FluidSynth's built-in chorus (off when omitted): `{"voices": 3, "level": 0.6, "speed": 0.2, "depth": 4.25}` — again the engine's defaults and accepted ranges (voices 0–99, level 0–10, speed 0.1–5 Hz, depth 0–21 ms; this engine build has no waveform setting) |
+| `master_effects` | A VST effect chain over the **combined mix** (mastering), e.g. `[{"plugin": "T-RackS ..."}]` with the same `preset`/`state`/`params` as per-track effects. Runs after the stems combine; the stems themselves stay dry. Needs the VST host |
+| `master` | The master stage on the mix: `{"loudness_target_lufs": -14, "limiter": {"enabled": true}}` is the streaming master. The loudness target is one static gain from an EBU R128 measurement (supersedes `normalize_peak_db`); the limiter runs 0.3 dB under its ceiling (−1 dBFS default) so true peaks stay inside it |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
@@ -411,6 +582,13 @@ effective `effects` (reverb/chorus settings or nulls). Every stem entry carries 
 `peak_db`. Raw renders intentionally keep headroom (a busy arrangement can peak around
 −10 dBFS) — pass `normalize_peak_db: -1.0` when the file is for listening rather than for
 balancing.
+
+**Mastering (`master_effects` + `master`)** turns a render into a distribution-ready file: the
+VST chain shapes the mix (bus EQ, glue compressor, saturation), then the master stage hits the
+loudness target and tames peaks. The result's `master` block reports the measured `loudness`
+(integrated LUFS, range, true peak), the limiter's reduction and warnings (target missed,
+ceiling exceeded, clipping). Stems are never touched by either — their balance must sum back to
+the mix.
 
 **Instrumental effects (`reverb`/`chorus`) are off by default**, so renders stay byte-identical
 until you opt in; with them on, the engine's natural tail past the last note is kept (about
@@ -433,8 +611,8 @@ For renders that may outrun a client's tool timeout — a three-minute, nine-tra
 writes hundreds of megabytes and can take minutes — start the work in the background and poll it.
 
 `render_audio_job` takes the same options as [render_audio](#render_audio) (`format`,
-`return_as`, `soundfont`, `stems`, `normalize_peak_db`, `reverb`, `chorus`, `output_filename`,
-`expires_in`, `overwrite`) plus:
+`return_as`, `soundfont`, `stems`, `normalize_peak_db`, `reverb`, `chorus`, `master_effects`,
+`master`, `output_filename`, `expires_in`, `overwrite`) plus:
 
 | Option | Description |
 |---|---|
@@ -625,6 +803,25 @@ or a path); pass `null` (or `"none"`) to clear. Marks the state as the plugin's 
 whenever a spec names the plugin but gives no state. Returns the plugin and the state now used
 by default. See [open_plugin_state_editor](#open_plugin_state_editor).
 
+## generate_plugin_states
+
+Creates named plugin states by **sweeping parameters headlessly** — the alternative to
+capturing states one GUI session at a time for parameter-driven plugins.
+
+| Option | Description |
+|---|---|
+| `plugin` (required) | Plugin path or a name from `list_plugins` |
+| `parameters` (required) | The grid: parameter names (or indices) → lists of values (numbers or choice names), e.g. `{"Drive": [0, 6], "Tone": ["Bright", "Warm"]}`. Every combination becomes one state; max 32 per call |
+| `base_state` | Optional state (name or path) each variant starts from — e.g. a captured GUI tone that only a few parameters should vary |
+| `name_prefix` | State names are `<prefix>_1`, `<prefix>_2`, … (default `"sweep"`; existing ones are replaced) |
+| `make_default` | Also make the first generated state the plugin's default |
+
+Each combination loads the plugin once in the VST host (slow for large sample libraries) and
+the snapshot is written into the state library, ready to reference by name from
+`plugin_state`/effect `state`. Only parameters exposed to host automation can be swept —
+GUI-only plugins still need [open_plugin_state_editor](#open_plugin_state_editor). Returns the
+state library like [list_plugin_states](#list_plugin_states).
+
 ## list_chord_types
 
 No options. Returns every chord quality: its name, the symbols you can type, intervals, the notes
@@ -648,18 +845,20 @@ Drum notes (MIDI channel 10) are not changed. The chord-name markers are renamed
 
 ## analyze_midi
 
-Reads a MIDI file and guesses the chord in each bar.
+Reads a MIDI file and guesses the chord in each bar, with its Roman numeral.
 
 | Option | Description |
 |---|---|
 | `filename` (required) | A file in the output folder |
 | `window_beats` | Size of each analysis window in beats. Default: one bar. Use `2` if chords change every half bar. |
+| `key` | Key for the Roman numerals, e.g. `"A minor"`. Default: the key detected from the chords (`key_used` reports it; `key_source` is `given` or `detected`) |
 
 Returns `tempo_bpm` and `time_signature` (the values the file *starts* with), the full
 `tempo_changes` and `time_signature_changes` lists (beat + value), the `sections` map
 ([set_song_sections](#set_song_sections)), `markers`, `key_signature_guess` (e.g.
-`"C major / A minor"`), `progression` (e.g. `["Am", "F", "C", "G"]`) and `segments` with
-start beat, length and notes of each chord.
+`"C major / A minor"`), `progression` (e.g. `["Am", "F", "C", "G"]`), `roman_numerals`
+(one per segment, e.g. `["i", "VI", "III", "VII"]`; `null` for `N.C.`/unknown windows) and
+`segments` with start beat, length and notes of each chord.
 
 If the file carries chord-name markers (ChordSmith files do), those names are used for a window
 whenever their notes match the sound, so inversions, voice leading and added melody notes don't
@@ -669,25 +868,52 @@ change the reported chords.
 files ChordSmith made. Without chord-name markers, melodies, drums or fast chord changes can
 make it return `?` (unknown) or wrong chords. `N.C.` means no notes are sounding.
 
+## explain_progression
+
+Explains a chord progression with deterministic theory — no AI call, same answer every time.
+Use it to check or teach a progression's function; to analyse a file, use
+[analyze_midi](#analyze_midi); to write numerals as music, use
+[create_progression_from_roman](#create_progression_from_roman).
+
+| Option | Description |
+|---|---|
+| `chords` (required) | Chord symbols in order: `"Am F C G"` or `["Am", "F", "C", "G"]`; slash chords fine |
+| `key` | Key for the numerals, e.g. `"A minor"`. Default: the best-fitting key of the chords (`key_source` says which) |
+
+Returns, per chord, its `numeral` (case, accidentals like `bVII`, and secondary dominants like
+`V7/V` included) and `function` (`tonic`, `subdominant`, `dominant`, `borrowed` or
+`secondary dominant`); the progression's `cadences` (authentic, plagal, half, deceptive and
+ii–V–I, each with a plain-language description); the `borrowed` and `secondary_dominants`
+lists; and a few concrete `suggestions` (e.g. insert `Dm7` before the `G7`, or try `Bb` as a
+bVII lift).
+
+Example: `explain_progression(chords="Am F C G", key="A minor")` → numerals `i VI III VII`,
+functions tonic/subdominant/tonic/dominant.
+
 ## list_generated_files
 
-Returns the output folder path, a `total` count and its files (newest first), each with size,
-date, a `kind` (`midi`/`wav`/`mp3`), an `empty` flag (0-byte crash leftovers) and a link
-scheme (`midi://` or `audio://`). Rendered audio is listed too, so you can confirm a render,
-stem or mix actually landed on disk.
+Returns the output folder path, a `total` count, a `projects` summary (each song folder with
+file counts, newest activity and the manifest's title/creation date) and its files (newest
+first), each with size, date, a `kind` (`midi`/`wav`/`mp3`), its `project` (null for files
+directly in the output folder), an `empty` flag (0-byte crash leftovers) and a link scheme
+(`midi://` or `audio://`). Rendered audio is listed too, so you can confirm a render, stem or
+mix actually landed on disk.
 
 | Option | Description |
 |---|---|
 | `name_contains` | Only files whose name contains this text (case-insensitive) |
 | `kind` | Only `"midi"`, `"wav"` or `"mp3"` files |
+| `project` | Only files of one project folder; `"."` lists files that are not in a project. Omit for everything |
 | `limit` | Most files to return, newest first (default 200) |
 
 ## delete_midi_file and rename_midi_file
 
-Tidy up the output folder. Both stay inside the folder; path tricks are cleaned up or rejected.
+Tidy up the output folder. Both stay inside the folder; path tricks are rejected.
 
-- `delete_midi_file(filename)` removes a file.
-- `rename_midi_file(filename, new_name)` renames a file and refuses to overwrite an existing one.
+- `delete_midi_file(filename)` removes a file (and its instrument/section sidecars).
+- `rename_midi_file(filename, new_name)` renames a file and refuses to overwrite an existing
+  one. `new_name` may name another project (`"other_song/chorus"`), which moves the file and
+  its sidecars there; a bare name keeps the file's folder.
 
 ---
 

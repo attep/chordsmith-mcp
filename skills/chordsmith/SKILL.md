@@ -8,8 +8,9 @@ license: This skill is MIT (matching ChordSmith). Voicebanks and engines have th
 
 ChordSmith is an MCP server that makes music files: it writes `.mid` files, renders them to
 `.wav`/`.mp3` with a soundfont, and sings melodies with VOICEVOX (Japanese kana or a wordless hum)
-or DiffSinger (English lyrics with a user-supplied voicebank). Everything lands in one output
-folder (`~/ChordSmith`; Docker uses `/data`).
+or DiffSinger (English lyrics with a user-supplied voicebank). Everything lands in the output
+folder (`~/ChordSmith`; Docker uses `/data`), directly or in a project folder per song —
+address files as `"my_song/verse.mid"` and derived files stay in the same project.
 
 If the `chordsmith` tools are not in the tool list, the server is not connected. Tell the user how
 to add it, then retry:
@@ -31,12 +32,17 @@ say so.
    - Notes: `{"pitch": "E6" or 76, "start_beat": 0, "beats": 0.5, "velocity": 80}` — place with
      `start_beat` (absolute) or with `section`+`bar`+`beat` once a section map exists.
    - Patterns: `{"pitch": 36, "steps": "x---x---"}` with `step_beats` (0.25 = sixteenth) — `x`
-     hits, `X` accents, `-`/`.` rests; `loop: true` repeats a short groove across the song
-     (write a one-bar drum or bass pattern once).
+     hits, `X` accents, `-`/`.` rests; `loop: {"length_beats": 4, "times": 36}` repeats a short
+     groove across the song (write a one-bar drum or bass pattern once).
+   - Bass and drums without writing notes: `add_bassline` (styles `root`, `root_fifth`,
+     `eighth_pulse`, `octave`, `walking`; chords come from the file's markers or analysis) and
+     `add_drums` (grooves `four_on_floor`, `backbeat`, `rock`, `metal`, `trap`, `boom_bap`,
+     `bossa_nova`, `shuffle`, `waltz`). Both write a copy and stay in the file's project.
    - `automation`: linear CC ramps, e.g. CC11 expression or CC7 fade.
    - `instrument`: a GM program number (e.g. 48 strings); `channel` 10 for drums.
 3. **Sections** (verse/chorus songs): `set_song_sections` writes names, bars, quarter-note BPM and
-   meter into the conductor; tempo/meter changes become real. Later notes can use section-relative
+   meter into the conductor; a `form` template (`pop`, `rock`, `ballad`, `jazz`, `blues`, `edm`,
+   `cinematic`) lays out a whole structure in one call. Later notes can use section-relative
    positions.
 4. **Instruments**: `set_track_instrument` for soundfont/GM program/bank, `gain_db`, `mute`,
    effect sends (CC91/CC93) and per-section overrides; `list_instruments` shows each track's
@@ -44,8 +50,11 @@ say so.
    MIDI itself.
 5. **Render**: `render_audio` for short pieces, or `render_audio_job` for long songs (poll
    `get_render_job`; per-track progress, retry). `stems: true` renders per-track files;
-   `normalize_peak_db` (default −1) sets the export peak; `reverb`/`chorus` switch the engine's
-   effects on.
+   `normalize_peak_db` (default `null` = raw engine level; set −1 for a listening-ready peak)
+   sets the export peak; `reverb`/`chorus` switch the engine's effects on. For a
+   distribution-ready mix: `master_effects` (VST bus chain, e.g. EQ → glue → saturation) then
+   `master` (`{"loudness_target_lufs": -14, "limiter": {"enabled": true}}` is the streaming
+   master; it supersedes `normalize_peak_db`).
 6. **Verify**: `analyze_midi` reports key, chords, tempo changes, sections and duration.
 
 ## Workflow 2 — a sung song (the flagship)
@@ -71,23 +80,29 @@ say so.
 ## Tool map
 
 - **Files**: `list_generated_files`, `get_midi_file`, `get_file`, `rename_midi_file`,
-  `delete_midi_file`, `create_empty_file`, `remove_track`, `import_midi`, `import_audio`,
-  `import_tab`
+  `delete_midi_file`, `create_empty_file`, `remove_track`, `rename_track`, `import_midi`,
+  `import_audio`, `import_tab`, `export_musicxml`
 - **Compose**: `create_chord_progression`, `create_progression_from_roman`, `add_track`,
-  `transpose_midi`, `set_song_sections`, `list_chord_types`
+  `add_bassline`, `add_drums`, `transpose_midi`, `set_song_sections`, `list_chord_types`
 - **Instruments & render**: `set_track_instrument`, `list_instruments`, `bake_instruments`,
-  `render_audio`, `render_audio_job`, `get_render_job`, `list_render_jobs`
+  `render_audio`, `render_audio_job`, `get_render_job`, `list_render_jobs`,
+  `generate_plugin_states`
 - **Singing**: `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`,
   `render_singing`, `get_singing_job`, `list_singing_jobs`, `mix_song_with_vocals`,
   `export_vocal_song`
-- **Analysis**: `analyze_midi`
+- **Analysis**: `analyze_midi` (chords, key and Roman numerals per bar), `explain_progression`
+  (deterministic numerals/functions/cadences/suggestions for a chord list)
 
 ## Conventions and gotchas
 
 - **Files**: default names come from the source (`<name>_mix`, `<name>_backing`); pass
   `overwrite: true` to replace an existing file, and `output_filename` to name a result.
-- **Copy tools**: `add_track`, `remove_track`, `transpose_midi` and `bake_instruments` never
-  touch their source — `output_filename` must differ from it, even with `overwrite: true`.
+- **Copy tools**: `add_track`, `remove_track`, `rename_track`, `transpose_midi` and
+  `bake_instruments` never touch their source — `output_filename` must differ from it, even
+  with `overwrite: true`.
+- **Track names**: unique and exact; `add_track` rejects a name that already exists and
+  by-name tools (`set_track_instrument`, `copy_from`, `remove_track`) match exactly. Rename a
+  track with `rename_track` (a copy; set the copy's instrument specs again).
 - **DAW handoff**: `export_vocal_song` ships the untouched MIDI; call `bake_instruments` first
   so another player hears the intended programs (a MIDI cannot carry a soundfont or samples).
   Standard MIDI has 15 melodic channels, so large scores share channels — `list_instruments`
@@ -119,8 +134,10 @@ say so.
   `effects`. **GUI-only plugins** (TONEX tones, Guitar Rig rigs, SampleTank/Syntronik patches)
   need a one-time **state capture**: `open_plugin_state_editor` opens their UI on a desktop
   server; loading the sound and closing the window saves a state file to pass as `plugin_state`
-  (instrument) or effect `state` — renders then load it headless, and TONEX/Guitar Rig captures
-  are verified working (they ignore their standalone apps when hosted). A server can also run
+   (instrument) or effect `state` — renders then load it headless, and TONEX/Guitar Rig captures
+   are verified working (they ignore their standalone apps when hosted). Parameter-driven plugins
+   can skip the GUI entirely: `generate_plugin_states` sweeps a grid of parameter values into
+   named states (`<prefix>_1`…, max 32 combinations; each loads the plugin). A server can also run
   **without** the plugins: with the Windows bridge worker (`scripts/vst_bridge.py` +
   `CHORDSMITH_VST_BRIDGE_URL`) one endpoint lists and renders them over the network. AmpliTube
   CS demo gear adds white-noise bursts — prefer licensed T-RackS v6 modules or a built-in
@@ -164,7 +181,8 @@ say so.
 
 - Verse/chorus songs: 8-bar sections, a rest at phrase ends (breaths), cymbals kept out from under
   the vocal (or `ducking: true`).
-- Soft singing: `diffsinger:hanami/nectar`, `gender: 0`, `seed` fixed for fair A/B comparisons.
+- Soft singing: the softest variant of the configured voicebank (e.g. Hanami's `nectar` when
+  `diffsinger:hanami/*` is installed), `gender: 0`, `seed` fixed for fair A/B comparisons.
 - For a lullaby-quiet mix: `loudness_target_lufs` around −18 and a reverb `returns` room of a few
   seconds; keep `vocal_level_db` modest (0–3) instead of pushing the voice forward.
 

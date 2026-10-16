@@ -560,9 +560,16 @@ def dump_vst_state(
     target: Path,
     sets: list[tuple[int, float | str]] | None = None,
     preset: str | None = None,
+    state: str | None = None,
 ) -> dict:
-    """Write the plugin's state snapshot to a file with no GUI (parameter-driven plugins)."""
+    """Write the plugin's state snapshot to a file with no GUI (parameter-driven plugins).
+
+    ``state`` loads an existing state first, so a sweep can start from a captured GUI tone and
+    vary a few parameters from there.
+    """
     args = ["--dump-state", str(target), "--plugin", plugin]
+    if state:
+        args += ["--state", state]
     if preset:
         args += ["--preset", preset]
     args += _set_arguments(sets)

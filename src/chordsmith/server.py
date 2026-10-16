@@ -31,7 +31,11 @@ from chordsmith import (
     __version__,
     audio,
     delivery,
+    forms,
+    grooves,
+    harmony,
     manager,
+    mastering,
     mixjobs,
     renderers,
     renderjobs,
@@ -51,6 +55,7 @@ from chordsmith.models import (
     ChorusSettings,
     Humanize,
     LoopSpec,
+    MasterSettings,
     NoteInput,
     NumeralEvent,
     PatternRow,
@@ -78,8 +83,11 @@ INSTRUCTIONS = """ChordSmith turns musical choices into MIDI and audio files on 
 
 Workflow:
 1. Create: create_chord_progression (chord symbols) or create_progression_from_roman
-   (numerals + key). Read scales://{key} first to see the diatonic chords of a key.
-2. Extend: add_track adds a melody/bass/drum track to a copy of a file.
+   (numerals + key). Read scales://{key} first to see the diatonic chords of a key; genre
+   presets (pop, rock, metal, jazz, bossa, classical, cinematic, trap, edm, blues, funk, lofi)
+   set the feel in one word.
+2. Extend: add_track adds a custom note track to a copy of a file; add_bassline derives a bass
+   line from the file's chords; add_drums lays a named groove across the song.
 3. Listen: render_audio renders a file to wav/mp3 without a music app.
 4. Sing: prepare_vocal_score -> map_vocal_lyrics -> render_singing -> get_singing_job ->
    mix_song_with_vocals -> export_vocal_song (VOICEVOX for hums/kana, DiffSinger for English).
@@ -90,9 +98,12 @@ Workflow:
    them; list_instruments shows the engines this server can run.
 
 Conventions:
-- Files live in the output folder (see list_generated_files); '.mid'/'.wav'/'.mp3' is added to
-  names automatically, and an existing name is never replaced unless overwrite=true (otherwise
-  a '_2' suffix is used).
+- Files live in the output folder, either directly or in a project folder (one per song):
+  address them as 'my_song/verse.mid'. New files land in the project you name; renders, stems
+  and mixes stay in their source file's project unless output_filename says otherwise.
+  '.mid'/'.wav'/'.mp3' is added to names automatically, and an existing name is never replaced
+  unless overwrite=true (otherwise a '_2' suffix is used). list_generated_files shows the
+  projects and their files.
 - Everything is deterministic for the same input and settings; create tools accept 'seed' for
   reproducible humanized renders, and render_singing accepts 'seed' to fix DiffSinger noise.
 - Errors are tool results with isError=true and a readable message that names the problem and
@@ -120,6 +131,50 @@ MAX_TILED_NOTES = 20000  # cap after a loop pattern is tiled, so one call cannot
 MAX_IMPORT_BYTES = 5 * 1024 * 1024  # import_midi: keep one base64 tool call to a sane size
 
 PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
+    "pop": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=0.5, velocity=85, gate=0.8),
+    ),
+    "rock": (
+        Voicing(add_bass=True),
+        Rhythm(pattern="pulse", subdivision=0.5, velocity=100, gate=0.9),
+    ),
+    "metal": (
+        Voicing(add_bass=True),
+        Rhythm(pattern="pulse", subdivision=0.25, velocity=110, gate=0.5),
+    ),
+    "jazz": (
+        Voicing(style="drop2", voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=1.0, velocity=75, gate=0.85, swing=0.33),
+    ),
+    "bossa": (
+        Voicing(style="drop2", voice_leading=True),
+        Rhythm(pattern="pulse", velocity=70, gate=1.0, hits=[0.0, 0.75, 1.5, 3.0]),
+    ),
+    "classical": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="alberti", subdivision=0.25, velocity=75, gate=0.9),
+    ),
+    "cinematic": (
+        Voicing(style="open", voice_leading=True, add_bass=True),
+        Rhythm(pattern="arpeggio_up", subdivision=1.0, velocity=60, gate=1.0),
+    ),
+    "trap": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=1.0, velocity=70, gate=0.95),
+    ),
+    "edm": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", velocity=90, gate=0.6, hits=[0.5, 1.5, 2.5, 3.5]),
+    ),
+    "blues": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=0.5, velocity=85, gate=0.7, swing=0.33),
+    ),
+    "funk": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", velocity=95, gate=0.45, hits=[0.0, 0.75, 1.5, 2.5, 3.25]),
+    ),
     "lofi": (
         Voicing(voice_leading=True),
         Rhythm(
@@ -133,10 +188,25 @@ PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
     ),
 }
 Preset = Annotated[
-    Literal["lofi"] | None,
+    Literal[
+        "pop",
+        "rock",
+        "metal",
+        "jazz",
+        "bossa",
+        "classical",
+        "cinematic",
+        "trap",
+        "edm",
+        "blues",
+        "funk",
+        "lofi",
+    ]
+    | None,
     Field(
-        description="Optional style preset. 'lofi' turns on voice leading and gives a soft, "
-        "swung, slightly humanized feel. Explicit voicing/rhythm objects replace the preset's."
+        description="Optional genre preset bundling voicing and rhythm (pop, rock, metal, jazz, "
+        "bossa, classical, cinematic, trap, edm, blues, funk, lofi). Explicit voicing/rhythm "
+        "objects replace the preset's."
     ),
 ]
 MidiType = Annotated[
@@ -178,10 +248,10 @@ async def health_check(_request: Request) -> Response:
     return JSONResponse(manager.health_payload())
 
 
-@mcp.custom_route("/files/{filename}", methods=["GET"])
+@mcp.custom_route("/files/{path:path}", methods=["GET"])
 async def download_file(request: Request) -> Response:
     """Serve a generated file for a signed, expiring URL from get_midi_file/render_audio."""
-    filename = request.path_params["filename"]
+    filename = request.path_params["path"]
     if not delivery.verify(
         filename, request.query_params.get("expires", ""), request.query_params.get("token", "")
     ):
@@ -210,7 +280,10 @@ ChordList = Annotated[
 ]
 FileName = Annotated[
     str | None,
-    Field(description="Output file name, e.g. 'sad_song'. '.mid' is added. Default: built from the chords."),
+    Field(
+        description="Output file name, e.g. 'sad_song' or 'my_song/verse' (project folder + "
+        "name). '.mid' is added. Default: built from the chords."
+    ),
 ]
 Tempo = Annotated[float, Field(ge=20, le=300, description="Tempo in beats per minute.")]
 TimeSignature = Annotated[str, Field(description="Time signature such as '4/4', '3/4', '6/8'.")]
@@ -289,9 +362,9 @@ def _render(
             midi_type=midi_type,
         )
     return {
-        "filename": path.name,
+        "filename": store.relative_name(path),
         "path": str(path),
-        "uri": f"midi://{path.name}",
+        "uri": f"midi://{store.relative_name(path)}",
         "tempo": tempo,
         "time_signature": f"{time_signature[0]}/{time_signature[1]}",
         **result,
@@ -442,13 +515,28 @@ def _chord_type_rows() -> list[dict]:
 
 @mcp.tool(title="Create empty file", annotations=CREATES)
 def create_empty_file(
-    filename: Annotated[str, Field(description="Name for the new file, e.g. 'abyss'. '.mid' is added.")],
+    filename: Annotated[str, Field(description="Name for the new file, e.g. 'my_song'. '.mid' is added.")],
     sections: Annotated[
         list[SongSection] | None,
         Field(
-            max_length=64,
             description="Optional section map to write straight into the conductor (like "
             "set_song_sections), so add_track can use section+bar+beat positions.",
+        ),
+    ] = None,
+    form: Annotated[
+        forms.Form | None,
+        Field(
+            description="Optional song-form template that lays out sections with bars and tempos "
+            "(pop, rock, ballad, jazz 32-bar AABA, 12-bar blues, edm, cinematic); see the Song "
+            "forms table in docs/tools.md. Give sections or form, not both.",
+        ),
+    ] = None,
+    bpm: Annotated[
+        float | None,
+        Field(
+            ge=20,
+            le=300,
+            description="With a form: one tempo for every section (overrides the template's own).",
         ),
     ] = None,
     output_filename: FileName = None,
@@ -457,25 +545,41 @@ def create_empty_file(
     """Create a blank MIDI file (a conductor track only) to build a song on from scratch.
 
     Use it when a song should not start from a chord progression: create the empty file, then
-    add_track each part onto it. With ``sections`` the tempo/meter map is written immediately.
-    Returns the file's name/path and the section map it carries.
+    add_track each part onto it. With ``sections`` or a ``form`` template the tempo/meter map is
+    written immediately (give one or the other). Returns the file's name/path and the section
+    map it carries.
     """
+    if sections is not None and form is not None:
+        raise ValueError("Give sections or a form template, not both.")
+    if bpm is not None and form is None:
+        raise ValueError("bpm only applies with a form; give each section's bpm instead.")
+    chosen = forms.form_sections(form, bpm) if form is not None else sections
     with store.claimed_path(output_filename or filename, f"{filename}_empty", overwrite) as target:
         info = write_empty(target, target.stem)
         resolved: list[dict] = []
-        if sections:
-            names = [section.name for section in sections]
+        if chosen:
+            names = [section.name for section in chosen]
             if len(set(names)) != len(names):
                 duplicates = sorted({name for name in names if names.count(name) > 1})
                 raise ValueError(f"Duplicate section names: {', '.join(duplicates)}.")
-            resolved = [section.payload() for section in sections_module.write_sections(target, sections)]
+            resolved = [section.payload() for section in sections_module.write_sections(target, chosen)]
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         **info,
         "sections": resolved,
     }
+
+
+def _reject_duplicate_track(source: Path, track_name: str) -> None:
+    """Track names must stay unique: the by-name tools (specs, copy_from, remove) need it."""
+    names = renderers.track_names(mido.MidiFile(source))
+    if track_name in names:
+        raise ValueError(
+            f"A track named '{track_name}' already exists; pick another track_name or rename "
+            "the existing track with rename_track first."
+        )
 
 
 @mcp.tool(title="Remove track", annotations=CREATES)
@@ -500,17 +604,75 @@ def remove_track(
         raise ValueError(f"No track named '{track_name}'. Tracks: {available}.")
     if len(matches) > 1:
         raise ValueError(f"Several tracks are named '{track_name}'; rename them first.")
-    with store.claimed_path(output_filename, f"{source.stem}_no_{track_name}", overwrite) as target:
+    with store.claimed_path(
+        output_filename, f"{source.stem}_no_{track_name}", overwrite, project=store.project_of(source)
+    ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
         del midi.tracks[matches[0]]
         midi.save(target)
     return {
-        "source": source.name,
-        "filename": target.name,
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "removed": track_name,
+        "total_tracks": len(midi.tracks),
+    }
+
+
+@mcp.tool(title="Rename track", annotations=CREATES)
+def rename_track(
+    filename: Annotated[str, Field(description="Existing file whose track to rename.")],
+    track_name: Annotated[str, Field(description="Current name of the track, e.g. 'Melody'.")],
+    new_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="New track name, e.g. 'Lead Guitar'.")
+    ],
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.RenameTrackResult:
+    """Write a copy of the file with one track renamed; the original is kept.
+
+    Track names must stay unique — the by-name tools (instrument specs, copy_from, remove_track)
+    depend on it — so renaming to an existing name is rejected and lookups match exactly.
+    Creates a new file like add_track (output_filename must differ from the source) and returns
+    the old and new names. The copy starts without the original's per-track instrument specs;
+    set them again with set_track_instrument.
+    """
+    source = store.existing_path(filename)
+    project = store.project_of(source)
+    midi = mido.MidiFile(source)
+    names = renderers.track_names(midi)
+    matches = [index for index, name in enumerate(names) if name == track_name]
+    if not matches:
+        available = ", ".join(name for name in names if name) or "(none)"
+        raise ValueError(f"No track named '{track_name}'. Tracks: {available}.")
+    if len(matches) > 1:
+        raise ValueError(f"Several tracks are named '{track_name}'; rename them first.")
+    if new_name != track_name and new_name in names:
+        raise ValueError(f"A track named '{new_name}' already exists; pick another name.")
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{new_name}", overwrite, project=project
+    ) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        track = midi.tracks[matches[0]]
+        renamed = False
+        for index, message in enumerate(track):
+            if message.type == "track_name":
+                track[index] = message.copy(name=new_name)
+                renamed = True
+                break
+        if not renamed:
+            track.insert(0, mido.MetaMessage("track_name", name=new_name, time=0))
+        midi.save(target)
+    return {
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+        "renamed_from": track_name,
+        "renamed_to": new_name,
         "total_tracks": len(midi.tracks),
     }
 
@@ -553,15 +715,17 @@ def transpose_midi(
         shift = (parse_key(to_key).tonic - parse_key(from_key).tonic) % 12
         semitones = shift - 12 if shift > 6 else shift
     direction = f"up{semitones}" if semitones >= 0 else f"down{-semitones}"
-    with store.claimed_path(output_filename, f"{source.stem}_{direction}", overwrite) as target:
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{direction}", overwrite, project=store.project_of(source)
+    ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never replaced.")
         info = transpose_file(source, target, semitones)
     return {
-        "source": source.name,
-        "filename": target.name,
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "semitones": semitones,
         **info,
     }
@@ -574,15 +738,73 @@ def analyze_midi(
         float | None,
         Field(gt=0, le=64, description="Analysis window in beats. Default: one bar."),
     ] = None,
+    key: Annotated[
+        str | None,
+        Field(
+            description="Key for the Roman numerals, e.g. 'A minor'; default: the detected "
+            "key's major reading."
+        ),
+    ] = None,
 ) -> results.AnalyzeResult:
     """Guess the chords, tempo and key of a MIDI file, window by window.
 
     Read-only; useful to check what a file (or a transposed copy) actually contains. Chord-name
     markers written by ChordSmith are used when their notes match the window, so inversions and
-    added melody notes still read back as the original chords. Works best with one chord per
-    window; with fast changes it may return '?' or 'N.C.'.
+    added melody notes still read back as the original chords. Each window's chord also gets a
+    Roman numeral in the key (key_used/key_source report which key was used; give 'key' for the
+    minor reading or a better fit). Works best with one chord per window; with fast changes it
+    may return '?' or 'N.C.'.
     """
-    return analyze_file(store.existing_path(filename), window_beats)
+    return analyze_file(store.existing_path(filename), window_beats, key)
+
+
+@mcp.tool(title="Explain progression", annotations=READ_ONLY)
+def explain_progression(
+    chords: Annotated[
+        str | list[str],
+        Field(
+            description="Chord symbols in order: a string ('Am F C G') or a list (['Am', 'F', "
+            "'C', 'G']); slash chords (C/E) are fine."
+        ),
+    ],
+    key: Annotated[
+        str | None,
+        Field(
+            description="Key for the numerals, e.g. 'A minor'; default: the best-fitting key of the chords."
+        ),
+    ] = None,
+) -> results.ExplainProgressionResult:
+    """Explain a chord progression deterministically: numerals, functions, cadences, ideas.
+
+    Read-only theory with no AI call: every chord gets its Roman numeral in the key (case,
+    accidentals and secondary dominants included), its harmonic function (tonic / subdominant /
+    dominant / borrowed / secondary dominant), the progression's cadences (authentic, plagal,
+    half, deceptive, ii-V-I) and a few concrete variation ideas. The key may be given ('A
+    minor'); without one the best-fitting major/minor key is chosen (key_source reports which).
+    For Roman numerals as input use create_progression_from_roman; to analyse a file use
+    analyze_midi (which returns numerals per window).
+    """
+    if isinstance(chords, str):
+        items = chords.replace(",", " ").split()
+    else:
+        items = [item.strip() for item in chords if item.strip()]
+    if not items:
+        raise ValueError("Give at least one chord symbol.")
+    if len(items) > 256:
+        raise ValueError("At most 256 chords.")
+    parsed: list[Chord] = []
+    for item in items:
+        try:
+            parsed.append(parse_chord(item))
+        except MusicTheoryError as exc:
+            raise ValueError(str(exc)) from None
+    if key is not None:
+        key_used = parse_key(key)
+        key_source = "given"
+    else:
+        key_used = harmony.detect_key(parsed)
+        key_source = "detected"
+    return harmony.explain(parsed, key_used, key_source)
 
 
 @mcp.tool(title="List generated files", annotations=READ_ONLY)
@@ -593,27 +815,41 @@ def list_generated_files(
     kind: Annotated[
         Literal["midi", "wav", "mp3"] | None, Field(description="Only files of this kind.")
     ] = None,
+    project: Annotated[
+        str | None,
+        Field(
+            description="Only this project folder's files; '.' lists files that are not in a "
+            "project. Omit to list everything."
+        ),
+    ] = None,
     limit: Annotated[
         int, Field(ge=1, le=2000, description="Most files to return, newest first (default 200).")
     ] = 200,
 ) -> results.ListFilesResult:
     """Return the files in the output folder (MIDI and rendered audio, newest first).
 
-    Read-only; each entry has a kind (midi/wav/mp3), a size and an ``empty`` flag, so you can
-    confirm a render landed and spot 0-byte leftovers. Filter with ``name_contains`` and
-    ``kind`` and cap the reply with ``limit``; ``total`` says how many files matched before the
-    cap. Use it to find file names for get_midi_file, get_file, analyze_midi, transpose_midi or
-    the singing tools.
+    Read-only; each entry has a kind (midi/wav/mp3), a size, an ``empty`` flag and its project
+    (null for files directly in the output folder), so you can confirm a render landed, spot
+    0-byte leftovers and see which song a file belongs to. ``projects`` summarizes the song
+    folders (file counts, newest activity, manifest title). Filter with ``name_contains``,
+    ``kind`` and ``project``, and cap the reply with ``limit``; ``total`` says how many files
+    matched before the cap. Use it to find file names for get_midi_file, get_file, analyze_midi,
+    transpose_midi or the singing tools.
     """
     root = store.ensure_root()
-    files = store.list_files()
+    files = store.list_files(project)
     if name_contains:
         needle = name_contains.lower()
         files = [entry for entry in files if needle in entry["filename"].lower()]
     if kind:
         files = [entry for entry in files if entry["kind"] == kind]
     total = len(files)
-    return {"output_dir": str(root), "total": total, "files": files[:limit]}
+    return {
+        "output_dir": str(root),
+        "total": total,
+        "projects": store.list_projects(),
+        "files": files[:limit],
+    }
 
 
 ReturnAs = delivery.ReturnAs
@@ -636,7 +872,7 @@ def get_midi_file(
     """
     path = store.existing_path(filename)
     data = path.read_bytes()
-    result = delivery.deliver_file(path.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(path), data, return_as, expires_in)
     result["mime_type"] = "audio/midi"
     return result
 
@@ -657,7 +893,7 @@ def get_file(
     """
     path = store.existing_media_path(filename)
     data = path.read_bytes()
-    result = delivery.deliver_file(path.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(path), data, return_as, expires_in)
     suffix = path.suffix.lower()
     result["mime_type"] = {".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(suffix, "audio/midi")
     return result
@@ -705,9 +941,9 @@ def import_audio(
         except (OSError, wave.Error):
             peak_db = None
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"audio://{target.name}",
+        "uri": f"audio://{store.relative_name(target)}",
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "mime_type": "audio/wav" if suffix == ".wav" else "audio/mpeg",
@@ -746,9 +982,9 @@ def import_midi(
     with store.claimed_path(filename, "imported", overwrite) as target:
         target.write_bytes(data)
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "mime_type": "audio/midi",
@@ -793,12 +1029,12 @@ def import_tab(
     except tabs.TabError as exc:
         raise ValueError(str(exc)) from None
     midi = mido.MidiFile(file=io.BytesIO(midi_bytes))
-    with store.claimed_path(Path(filename).stem + ".mid", "imported", overwrite) as target:
+    with store.claimed_path(str(Path(filename).with_suffix(".mid")), "imported", overwrite) as target:
         target.write_bytes(midi_bytes)
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "size_bytes": len(midi_bytes),
         "sha256": hashlib.sha256(midi_bytes).hexdigest(),
         "mime_type": "audio/midi",
@@ -808,6 +1044,59 @@ def import_tab(
         "conversion_seconds": round(time.monotonic() - started, 2),
         **describe_midi(midi),
     }
+
+
+@mcp.tool(title="Export MusicXML", annotations=CREATES)
+def export_musicxml(
+    filename: Annotated[str, Field(description="MIDI file in the output folder to export as notation.")],
+    format: Annotated[
+        Literal["musicxml", "mxl"],
+        Field(description="'musicxml' (plain XML, opens everywhere) or 'mxl' (compressed MusicXML)."),
+    ] = "musicxml",
+    output_filename: FileName = None,
+    return_as: ReturnAs = "base64",
+    expires_in: Annotated[
+        int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
+    ] = delivery.DEFAULT_TTL_SECONDS,
+    overwrite: Overwrite = False,
+) -> results.ExportScoreResult:
+    """Convert a MIDI file to a MusicXML score with MuseScore so a notation app shows real notes.
+
+    Opens in MuseScore, Finale, Sibelius, Dorico and any app that imports MusicXML — far better
+    than importing raw MIDI, which most notation apps quantise badly. The conversion runs
+    locally (set CHORDSMITH_MUSESCORE to the executable) or on the host worker
+    (scripts/vst_bridge.py started with --musescore, reached through CHORDSMITH_VST_BRIDGE_URL);
+    with neither configured the error explains both setups. Writes the score next to the source
+    (in its project) as '<name>.musicxml' ('.mxl' when compressed) and returns it like get_file
+    — base64 bytes or a signed, expiring link — plus the converter, size and sha256. Notation
+    from MIDI is approximate: rhythms are quantised to the grid and chord-name markers arrive as
+    text, not engraved chord symbols.
+    """
+    suffix = ".musicxml" if format == "musicxml" else ".mxl"
+    source = store.existing_path(filename)
+    started = time.monotonic()
+    try:
+        score_bytes, converter = tabs.convert_midi_to_score(source.read_bytes(), suffix)
+    except tabs.TabError as exc:
+        raise ValueError(str(exc)) from None
+    with store.claimed_path(
+        output_filename or source.stem,
+        f"{source.stem}_score",
+        overwrite,
+        suffix,
+        project=store.project_of(source),
+    ) as target:
+        target.write_bytes(score_bytes)
+    result = delivery.deliver_file(store.relative_name(target), score_bytes, return_as, expires_in)
+    result["mime_type"] = (
+        "application/vnd.recordare.musicxml+xml"
+        if format == "musicxml"
+        else "application/vnd.recordare.musicxml"
+    )
+    result["converted_from"] = store.relative_name(source)
+    result["converter"] = converter
+    result["conversion_seconds"] = round(time.monotonic() - started, 2)
+    return result
 
 
 def _copy_track_notes(
@@ -884,10 +1173,138 @@ def _bpm_lookup(source: Path, resolved: list[sections.ResolvedSection] | None) -
     return lambda beat: bpm
 
 
+def _pattern_rows_to_notes(
+    rows: list[PatternRow], step_beats: float, offset: float = 0.0
+) -> list[tuple[int, float, float, int]]:
+    """Compact step grids as (pitch, start_beat, beats, velocity) tuples."""
+    notes: list[tuple[int, float, float, int]] = []
+    for row in rows:
+        try:
+            row_pitch = parse_pitch(row.pitch)
+        except MusicTheoryError as exc:
+            raise ValueError(str(exc)) from None
+        step = 0
+        for char in row.steps:
+            if char in "| \t":  # bar lines are separators; they do not consume a step
+                continue
+            if char in "-._":
+                step += 1
+                continue
+            if char not in "xXoO":
+                raise ValueError(
+                    f"Unknown step '{char}' in the pattern for {row.pitch!r}; use 'x' for "
+                    "a hit, 'X' for an accent, '-' or '.' for a rest, '|' as a bar line."
+                )
+            velocity = min(127, row.velocity + 25) if char in "XO" else row.velocity
+            notes.append((row_pitch, offset + step * step_beats, step_beats, velocity))
+            step += 1
+    return notes
+
+
+def _tile_notes(
+    notes: list[tuple[int, float, float, int]], length_beats: float, times: int
+) -> list[tuple[int, float, float, int]]:
+    """Repeat a pattern window back to back, with the loop-fit and note-count guards."""
+    for _, start, beats, _ in notes:
+        if start >= length_beats:
+            raise ValueError(
+                f"A loop note starts at beat {start:g}, but the pattern is only {length_beats:g} beats long."
+            )
+        if start + beats > length_beats + 1e-9:
+            raise ValueError(
+                f"A loop note ends at {start + beats:g}, past the pattern length {length_beats:g}."
+            )
+    total = len(notes) * times
+    if total > MAX_TILED_NOTES:
+        raise ValueError(
+            f"The loop would produce {total} notes (limit {MAX_TILED_NOTES}); "
+            "reduce the pattern or the repeat count."
+        )
+    return [
+        (pitch, start + repeat * length_beats, beats, velocity)
+        for repeat in range(times)
+        for pitch, start, beats, velocity in notes
+    ]
+
+
+def _file_end_beat(source: Path) -> float:
+    """The last event of the file in quarter-note beats (the conductor's end included)."""
+    midi = mido.MidiFile(source)
+    end = 0
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+        end = max(end, tick)
+    return end / midi.ticks_per_beat
+
+
+def _chord_windows(source: Path) -> tuple[list[tuple[float, float, Chord]], str, list[str]]:
+    """Chord spans as (start_beat, length_beats, chord), their source, and the symbol list.
+
+    Chord-name markers (written by the create tools) win; a file without them falls back to
+    the analysis of the sounding notes. Raises when neither yields any chord.
+    """
+    midi = mido.MidiFile(source)
+    markers: list[tuple[float, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type != "marker" or message.text.startswith(sections.SECTION_MARKER_PREFIX):
+                continue
+            try:
+                parse_chord(message.text)
+            except MusicTheoryError:
+                continue
+            if (tick, message.text) not in seen:
+                seen.add((tick, message.text))
+                markers.append((tick / midi.ticks_per_beat, message.text))
+    end_beat = _file_end_beat(source)
+    if markers:
+        markers.sort()
+        windows: list[tuple[float, float, Chord]] = []
+        for index, (start, symbol) in enumerate(markers):
+            stop = markers[index + 1][0] if index + 1 < len(markers) else end_beat
+            if stop - start <= 0:
+                continue
+            windows.append((start, stop - start, parse_chord(symbol)))
+        if windows:
+            return windows, "markers", [item[2].symbol for item in windows]
+    analyzed = analyze_file(source)
+    windows = []
+    for segment in analyzed["segments"]:
+        if segment["chord"] in ("N.C.", "?") or segment["beats"] <= 0:
+            continue
+        try:
+            chord = parse_chord(segment["chord"])
+        except MusicTheoryError:
+            continue
+        windows.append((segment["start_beat"], segment["beats"], chord))
+    if not windows:
+        raise ValueError(
+            f"No chords found in '{source.name}'. Create the file from a chord progression or "
+            "add chord-name markers, then try again."
+        )
+    return windows, "analysis", [item[2].symbol for item in windows]
+
+
+def _initial_time_signature(source: Path) -> tuple[int, int]:
+    """The file's first time signature; 4/4 when it has none."""
+    for track in mido.MidiFile(source).tracks:
+        for message in track:
+            if message.type == "time_signature":
+                return message.numerator, message.denominator
+    return 4, 4
+
+
 @mcp.tool(title="Add track", annotations=CREATES)
 def add_track(
     filename: Annotated[str, Field(description="Existing file to copy and extend.")],
-    track_name: Annotated[str, Field(description="Name of the new track, e.g. 'Melody'.")],
+    track_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="Name of the new track, e.g. 'Melody'.")
+    ],
     notes: Annotated[
         list[NoteInput] | None,
         Field(
@@ -980,7 +1397,11 @@ def add_track(
     adds seeded timing/velocity variation after the tiling, so repeated loops breathe.
     """
     source = store.existing_path(filename)
-    with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
+    project = store.project_of(source)
+    _reject_duplicate_track(source, track_name)
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{track_name}", overwrite, project=project
+    ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
         if copy_from is not None:
@@ -994,26 +1415,7 @@ def add_track(
         parsed: list[tuple[int, float, float, int]] = []
         if copy_from is not None:
             parsed = _copy_track_notes(source, copy_from, transpose_semitones, ticks_per_beat)
-        for row in patterns or []:
-            try:
-                row_pitch = parse_pitch(row.pitch)
-            except MusicTheoryError as exc:
-                raise ValueError(str(exc)) from None
-            step = 0
-            for char in row.steps:
-                if char in "| \t":  # bar lines are separators; they do not consume a step
-                    continue
-                if char in "-._":
-                    step += 1
-                    continue
-                if char not in "xXoO":
-                    raise ValueError(
-                        f"Unknown step '{char}' in the pattern for {row.pitch!r}; use 'x' for "
-                        "a hit, 'X' for an accent, '-' or '.' for a rest, '|' as a bar line."
-                    )
-                velocity = min(127, row.velocity + 25) if char in "XO" else row.velocity
-                parsed.append((row_pitch, step * step_beats, step_beats, velocity))
-                step += 1
+        parsed += _pattern_rows_to_notes(patterns or [], step_beats)
         resolved_sections: list[sections.ResolvedSection] | None = None
         for note in notes or []:
             try:
@@ -1052,28 +1454,7 @@ def add_track(
                 start = start_tick / ticks_per_beat
             parsed.append((pitch, start, note.beats, note.velocity))
         if loop is not None:
-            for _, start, beats, _ in parsed:
-                if start >= loop.length_beats:
-                    raise ValueError(
-                        f"A loop note starts at beat {start:g}, but the pattern is only "
-                        f"{loop.length_beats:g} beats long."
-                    )
-                if start + beats > loop.length_beats + 1e-9:
-                    raise ValueError(
-                        f"A loop note ends at beat {start + beats:g}, past the pattern length "
-                        f"{loop.length_beats:g}."
-                    )
-            total = len(parsed) * loop.times
-            if total > MAX_TILED_NOTES:
-                raise ValueError(
-                    f"The loop would produce {total} notes (limit {MAX_TILED_NOTES}); "
-                    "reduce the pattern or the repeat count."
-                )
-            parsed = [
-                (pitch, start + repeat * loop.length_beats, beats, velocity)
-                for repeat in range(loop.times)
-                for pitch, start, beats, velocity in parsed
-            ]
+            parsed = _tile_notes(parsed, loop.length_beats, loop.times)
         parsed = swing_notes(parsed, swing, step_beats)
         if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
             if resolved_sections is None:
@@ -1093,14 +1474,210 @@ def add_track(
             automation=ramps,
         )
     return {
-        "source": source.name,
-        "filename": target.name,
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "track_name": track_name,
         "channel": channel,
         "copied_from": copy_from,
         "transpose_semitones": transpose_semitones if copy_from is not None else 0,
+        "swing": swing,
+        "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
+        **info,
+    }
+
+
+@mcp.tool(title="Add bass line", annotations=CREATES)
+def add_bassline(
+    filename: Annotated[str, Field(description="Existing MIDI file whose chords drive the bass line.")],
+    track_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="Name of the new bass track, e.g. 'Bass'.")
+    ] = "Bass",
+    style: Annotated[
+        Literal["root", "root_fifth", "eighth_pulse", "octave", "walking"],
+        Field(
+            description="Bass feel: root = one held root per chord; root_fifth = root and fifth "
+            "alternating; eighth_pulse = root on every subdivision; octave = root alternating an "
+            "octave up; walking = a quarter-note walk (root, fifth, third, approach to next chord)."
+        ),
+    ] = "root_fifth",
+    octave: Annotated[int, Field(ge=1, le=4, description="Octave of the bass root (2 = around A2).")] = 2,
+    subdivision: Annotated[
+        float,
+        Field(gt=0, le=4, description="Step length in beats for the pulsing styles (0.5 = eighths)."),
+    ] = 0.5,
+    instrument: Instrument = 33,
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
+    velocity: Annotated[int, Field(ge=1, le=127, description="Loudness of each bass note.")] = 90,
+    gate: Annotated[float, Field(gt=0, le=1, description="Fraction of each step the note sounds.")] = 0.9,
+    swing: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=0.75,
+            description="Delay notes on offbeat steps of the grid by this fraction of a step: "
+            "0.33 = triplet feel.",
+        ),
+    ] = 0,
+    humanize: Annotated[
+        Humanize | None, Field(description="Seeded timing/velocity variation, applied after generation.")
+    ] = None,
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.BasslineResult:
+    """Derive a bass line from the file's chords and add it as a new track.
+
+    The chords come from the chord-name markers the create tools write; a file without them is
+    analyzed note by note instead — ``chord_source`` in the result says which was used. Five
+    styles cover the common roles (root, root_fifth, eighth_pulse, octave, walking). Creates a
+    new file in the source's project (the original is kept; output_filename must differ) and
+    honors the section map's tempo for swing/humanize. Returns the style, the chords used, the
+    bass octave and the same file details as add_track.
+    """
+    source = store.existing_path(filename)
+    project = store.project_of(source)
+    _reject_duplicate_track(source, track_name)
+    windows, chord_source, symbols = _chord_windows(source)
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{track_name}", overwrite, project=project
+    ) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        parsed = grooves.bassline_notes(
+            style, windows, octave=octave, subdivision=subdivision, gate=gate, velocity=velocity
+        )
+        parsed = swing_notes(parsed, swing, subdivision)
+        if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
+            parsed = humanize_notes(parsed, humanize, _bpm_lookup(source, sections.read_sections(source)))
+        info = add_track_midi(
+            source, target, track_name=track_name, program=instrument, channel=channel - 1, notes=parsed
+        )
+    return {
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+        "track_name": track_name,
+        "channel": channel,
+        "style": style,
+        "chord_source": chord_source,
+        "chords": symbols,
+        "octave": octave,
+        "swing": swing,
+        "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
+        **info,
+    }
+
+
+@mcp.tool(title="Add drums", annotations=CREATES)
+def add_drums(
+    filename: Annotated[str, Field(description="Existing MIDI file to add the drum track to.")],
+    track_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="Name of the new drum track.")
+    ] = "Drums",
+    pattern: Annotated[
+        Literal[
+            "four_on_floor",
+            "backbeat",
+            "rock",
+            "metal",
+            "trap",
+            "boom_bap",
+            "bossa_nova",
+            "shuffle",
+            "waltz",
+        ],
+        Field(
+            description="Named groove: four_on_floor (house), backbeat (pop/rock), rock, metal, "
+            "trap, boom_bap (try swing 0.2), bossa_nova (two bars), shuffle (set swing 0.33), "
+            "waltz (3/4)."
+        ),
+    ] = "backbeat",
+    gate: Annotated[
+        float, Field(gt=0, le=1, description="Fraction of each step a hit sounds (0.5 = crisp).")
+    ] = 0.5,
+    swing: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=0.75,
+            description="Delay hits on offbeat steps by this fraction of a step: 0.33 = triplet "
+            "shuffle, 0.2 = a lazy hip-hop pull.",
+        ),
+    ] = 0,
+    humanize: Annotated[
+        Humanize | None, Field(description="Seeded timing/velocity variation, applied after generation.")
+    ] = None,
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.DrumsResult:
+    """Lay a named drum groove over the whole song on the drum channel (10).
+
+    The groove repeats from the song's start to its end; the pattern's meter must match the
+    song's (the 4/4 grooves, the two-bar bossa_nova, or the 3/4 waltz). With a section map the
+    song length follows its bars; a file whose sections change meter is rejected (add drums
+    per section with add_track patterns instead). Creates a new file in the source's project
+    like add_track and returns the pattern, the repeat count, the total bars and the file
+    details.
+    """
+    source = store.existing_path(filename)
+    project = store.project_of(source)
+    _reject_duplicate_track(source, track_name)
+    drum_pattern = grooves.DRUM_PATTERNS[pattern]
+    resolved = sections.read_sections(source)
+    if resolved:
+        bar_beats = resolved[0].beats_per_bar
+        if any(abs(section.beats_per_bar - bar_beats) > 1e-9 for section in resolved):
+            raise ValueError(
+                "add_drums writes one meter, but this file's sections change meter. Add drums "
+                "per section with add_track patterns instead."
+            )
+        total_beats = sum(section.total_beats for section in resolved)
+    else:
+        numerator, denominator = _initial_time_signature(source)
+        bar_beats = numerator * 4 / denominator
+        total_beats = _file_end_beat(source)
+    if abs(bar_beats - drum_pattern.numerator) > 1e-9:
+        compatible = sorted(
+            name for name, item in grooves.DRUM_PATTERNS.items() if item.numerator == bar_beats
+        )
+        hint = ", ".join(compatible) or "none"
+        raise ValueError(
+            f"The song's bar is {bar_beats:g} beats, but '{pattern}' is written in "
+            f"{drum_pattern.numerator}/4. Patterns for this meter: {hint}."
+        )
+    total_bars = int(total_beats / bar_beats + 1e-9)
+    times = total_bars // drum_pattern.bars
+    if times < 1:
+        raise ValueError(
+            f"The song is {total_bars} bar(s) long; '{pattern}' needs at least {drum_pattern.bars} bar(s)."
+        )
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{track_name}", overwrite, project=project
+    ) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        base = [
+            (pitch, start, max(0.05, beats * gate), velocity)
+            for pitch, start, beats, velocity in grooves.drum_notes(drum_pattern)
+        ]
+        parsed = _tile_notes(base, drum_pattern.beats, times)
+        parsed = swing_notes(parsed, swing, grooves.DRUM_STEP_BEATS)
+        if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
+            parsed = humanize_notes(parsed, humanize, _bpm_lookup(source, sections.read_sections(source)))
+        info = add_track_midi(source, target, track_name=track_name, program=0, channel=9, notes=parsed)
+    return {
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+        "track_name": track_name,
+        "channel": 10,
+        "pattern": pattern,
+        "pattern_bars": drum_pattern.bars,
+        "repeat": times,
+        "total_bars": total_bars,
         "swing": swing,
         "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
         **info,
@@ -1120,7 +1697,7 @@ def delete_midi_file(
     path = store.remove(filename)
     renderers.specs_path(path).unlink(missing_ok=True)
     sections.sections_sidecar_path(path).unlink(missing_ok=True)
-    return {"deleted": path.name}
+    return {"deleted": store.relative_name(path)}
 
 
 @mcp.tool(title="Rename MIDI file", annotations=DESTRUCTIVE)
@@ -1140,7 +1717,11 @@ def rename_midi_file(
         sidecar = sidecar_path(source)
         if sidecar.is_file():
             sidecar.replace(sidecar_path(target))
-    return {"filename": target.name, "path": str(target), "uri": f"midi://{target.name}"}
+    return {
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+    }
 
 
 @mcp.tool(title="Render audio", annotations=CREATES)
@@ -1190,6 +1771,22 @@ def render_audio(
             "speed, depth. Engine-wide for the render instance, not per track."
         ),
     ] = None,
+    master_effects: Annotated[
+        list[renderers.EffectPlugin] | None,
+        Field(
+            description="VST effect chain for the whole mix (mastering): runs over the combined "
+            "stem mix (or the single-pass render) after the tracks. Needs the VST host, like "
+            "per-track effects; states/params work the same. The stems themselves stay dry."
+        ),
+    ] = None,
+    master: Annotated[
+        MasterSettings | None,
+        Field(
+            description="Optional master stage on the mix: a true-peak limiter and/or an EBU "
+            "R128 loudness target (one static gain; supersedes normalize_peak_db). The streaming "
+            "master is {'loudness_target_lufs': -14, 'limiter': {'enabled': true}}."
+        ),
+    ] = None,
     output_filename: FileName = None,
     expires_in: Annotated[
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
@@ -1209,8 +1806,11 @@ def render_audio(
     only the combined mix follows normalize_peak_db. Reverb/chorus are off by default (renders
     stay byte-identical); with them on the engine's tail past the last note is kept, and note
     that they are engine-wide per render instance — with stems every stem is rendered wet, so
-    summing wet stems is not identical to one wet pass. On failure a clear error explains what
-    is missing and no file is left behind.
+    summing wet stems is not identical to one wet pass. ``master_effects`` runs a VST chain over
+    the combined mix (mastering), and ``master`` finishes it: a true-peak limiter and/or an
+    EBU R128 loudness target (one static gain; supersedes normalize_peak_db); the result's
+    ``master`` block reports the measurements and warnings. On failure a clear error explains
+    what is missing and no file is left behind.
     """
     source = store.existing_path(filename)
     if not stems:
@@ -1231,6 +1831,8 @@ def render_audio(
             soundfont,
             normalize_peak_db,
             effects,
+            master_effects=master_effects,
+            master=master,
         )
         result["effects"] = effects_echo
         return result
@@ -1245,6 +1847,8 @@ def render_audio(
         normalize_peak_db,
         effects,
         effects_echo,
+        master_effects=master_effects,
+        master=master,
     )
 
 
@@ -1270,21 +1874,47 @@ def _render_single(
     normalize_peak_db: float | None,
     effects: dict[str, float | int] | None,
     effects_echo: dict[str, Any],
+    master_effects: list[renderers.EffectPlugin] | None = None,
+    master: MasterSettings | None = None,
 ) -> dict[str, Any]:
     """One FluidSynth pass over the whole file, delivered like get_midi_file."""
+    master_report: dict | None = None
     with store.claimed_path(
-        output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
+        output_filename or source.stem,
+        f"{source.stem}_{audio_format}",
+        overwrite,
+        f".{audio_format}",
+        project=store.project_of(source),
     ) as target:
         try:
-            correction = audio.render(source, target, audio_format, soundfont, normalize_peak_db, effects)
-        except audio.AudioError as exc:
+            if master_effects or master is not None:
+                with tempfile.TemporaryDirectory() as render_scratch:
+                    working = Path(render_scratch) / "render.wav"
+                    audio.render(source, working, "wav", soundfont, None, effects)
+                    correction = 0.0
+                    if master_effects:
+                        renderers.apply_stem_effects(working, master_effects)
+                    if master is not None:
+                        master_report = mastering.apply_master(working, master)
+                    if normalize_peak_db is not None and (
+                        master is None or master.loudness_target_lufs is None
+                    ):
+                        correction = audio.normalize_wav(working, normalize_peak_db)
+                    if audio_format == "mp3":
+                        singing.to_mp3(working, target)
+                    else:
+                        shutil.copyfile(working, target)
+            else:
+                correction = audio.render(source, target, audio_format, soundfont, normalize_peak_db, effects)
+        except (audio.AudioError, renderers.RenderError) as exc:
             raise ValueError(str(exc)) from None
     data = target.read_bytes()
-    result = delivery.deliver_file(target.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(target), data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
-    result["source"] = source.name
+    result["source"] = store.relative_name(source)
     result["gain_correction_db"] = correction
     result["effects"] = effects_echo
+    result["master"] = master_report
     if audio_format == "wav":
         peak = audio.wav_peak_db(target)
         result["peak_db"] = round(peak, 2)
@@ -1321,6 +1951,8 @@ def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
             only_tracks=only_tracks,
             progress=set_state,
             continue_on_error=True,
+            master_effects=args.get("master_effects"),
+            master=args.get("master"),
         )
         result["effects"] = effects_echo
         return result
@@ -1335,6 +1967,8 @@ def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
         args.get("normalize_peak_db"),
         effects,
         effects_echo,
+        master_effects=args.get("master_effects"),
+        master=args.get("master"),
     )
 
 
@@ -1351,6 +1985,8 @@ def _render_stems(
     only_tracks: list[str] | None = None,
     progress=None,
     continue_on_error: bool = False,
+    master_effects: list[renderers.EffectPlugin] | None = None,
+    master: MasterSettings | None = None,
 ) -> dict[str, Any]:
     """Render every note track on its own and combine the stems into the mix.
 
@@ -1376,6 +2012,7 @@ def _render_stems(
         tracks = [index for index in tracks if names[index] not in muted]
     if not tracks:
         raise ValueError("This file has no unmuted note tracks to render.")
+    project = store.project_of(source)
     with tempfile.TemporaryDirectory() as scratch:
 
         def render_track(index: int):
@@ -1394,14 +2031,18 @@ def _render_stems(
                 # big sample library.
                 renderer.render(stem_midi, spec, working, effects)
                 if spec.chain or spec.effects:
-                    with store.claimed_path(None, f"{source.stem}_{name}_raw", extension=".wav") as raw_wav:
+                    with store.claimed_path(
+                        None, f"{source.stem}_{name}_raw", extension=".wav", project=project
+                    ) as raw_wav:
                         shutil.copyfile(working, raw_wav)
                 windows = renderers.section_gain_windows(spec, section_timeline)
                 if windows:
                     renderers.apply_section_gains(working, windows, spec.gain_db)
                 singing.apply_stem_chain(working, spec.chain)
                 renderers.apply_stem_effects(working, spec.effects)
-                with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
+                with store.claimed_path(
+                    None, f"{source.stem}_{name}", extension=".wav", project=project
+                ) as stem_wav:
                     shutil.copyfile(working, stem_wav)
             except renderers.RenderError as exc:
                 message = f"Track '{name}': {exc}"
@@ -1423,13 +2064,22 @@ def _render_stems(
             detail = failures[0]["error"] if failures else "unknown error"
             raise ValueError(f"Every track failed to render: {detail}")
         correction = 0.0
+        master_report: dict | None = None
         with store.claimed_path(
-            output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
+            output_filename or source.stem,
+            f"{source.stem}_{audio_format}",
+            overwrite,
+            f".{audio_format}",
+            project=project,
         ) as target:
             combined = target if audio_format == "wav" else Path(scratch) / "mix.wav"
             try:
                 renderers.combine_stems(stems, combined)
-                if normalize_peak_db is not None:
+                if master_effects:
+                    renderers.apply_stem_effects(combined, master_effects)
+                if master is not None:
+                    master_report = mastering.apply_master(combined, master)
+                if normalize_peak_db is not None and (master is None or master.loudness_target_lufs is None):
                     correction = audio.normalize_wav(combined, normalize_peak_db)
                 if audio_format == "mp3":
                     singing.to_mp3(combined, target)
@@ -1438,10 +2088,11 @@ def _render_stems(
             except audio.AudioError as exc:
                 raise ValueError(str(exc)) from None
     data = target.read_bytes()
-    result = delivery.deliver_file(target.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(target), data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
-    result["source"] = source.name
+    result["source"] = store.relative_name(source)
     result["gain_correction_db"] = correction
+    result["master"] = master_report
     result["failed"] = failures or None
     if audio_format == "wav":
         peak = audio.wav_peak_db(target)
@@ -1457,7 +2108,9 @@ def _render_stems(
     stem_return = "url" if delivery.public_url() else return_as
     result["stems"] = [
         {
-            **delivery.deliver_file(stem.path.name, stem.path.read_bytes(), stem_return, expires_in),
+            **delivery.deliver_file(
+                store.relative_name(stem.path), stem.path.read_bytes(), stem_return, expires_in
+            ),
             "mime_type": "audio/wav",
             "track": stem.track,
             "gain_db": stem.gain_db,
@@ -1551,9 +2204,9 @@ Steps:
 4. Reply with the chord names, the file path, and one idea for a variation."""
 
 
-@mcp.prompt()
-def explain_progression(chords: str, key: str = "") -> str:
-    """Ask the assistant to explain how a chord progression works."""
+@mcp.prompt(name="explain_progression")
+def explain_progression_prompt(chords: str, key: str = "") -> str:
+    """Ask the assistant to explain how a chord progression works (or use the tool for the theory)."""
     key_line = f"in the key of {key}" if key else "(work out the most likely key first)"
     return f"""Explain the chord progression {chords} {key_line}.
 
@@ -1590,14 +2243,24 @@ mixjobs.register(mcp, lambda: store, singing.run_mix)
 manager.register(mcp, lambda: store)
 
 
-def build_http_app(rate_limit: int = 0):
-    """The streamable-HTTP ASGI app: MCP endpoint and routes, rate limit, sessions, CORS."""
-    from chordsmith.ratelimit import RateLimitMiddleware, TokenBucketLimiter
+def build_http_app(rate_limit: int = 0, auth_limit: int = 0, trust_proxy: bool = False):
+    """The streamable-HTTP ASGI app: MCP endpoint and routes, rate limits, sessions, CORS."""
+    from chordsmith.ratelimit import AUTH_ENDPOINT_PATHS, RateLimitMiddleware, TokenBucketLimiter
 
     app = mcp.streamable_http_app()
+    limiters: dict[str, TokenBucketLimiter] = {}
     if rate_limit > 0:
         logger.info("Rate limit: %d requests per minute per client.", rate_limit)
-        app = RateLimitMiddleware(app, TokenBucketLimiter(rate_limit), mcp.settings.streamable_http_path)
+        limiters[mcp.settings.streamable_http_path] = TokenBucketLimiter(rate_limit)
+    if auth_limit > 0:
+        logger.info("OAuth endpoint rate limit: %d requests per minute per client.", auth_limit)
+        auth_limiter = TokenBucketLimiter(auth_limit)
+        for path in AUTH_ENDPOINT_PATHS:
+            limiters[path] = auth_limiter
+    if trust_proxy:
+        logger.info("Trusting proxy client-IP headers for rate-limit keys (CHORDSMITH_TRUST_PROXY).")
+    if limiters:
+        app = RateLimitMiddleware(app, limiters, trust_proxy=trust_proxy)
     return manager.wrap_http_app(app, mcp.settings.streamable_http_path, manager.cors_origins_from_env())
 
 
@@ -1634,13 +2297,14 @@ def main() -> None:
     if args.transport == "streamable-http":
         import uvicorn
 
-        from chordsmith.ratelimit import rate_limit_from_env
+        from chordsmith.ratelimit import auth_rate_limit_from_env, rate_limit_from_env, trust_proxy_from_env
 
         try:
             limit = rate_limit_from_env()
+            auth_limit = auth_rate_limit_from_env()
         except ValueError as exc:
             parser.error(str(exc))
-        app = build_http_app(limit)
+        app = build_http_app(limit, auth_limit, trust_proxy_from_env())
         uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
         return
     mcp.run(transport=args.transport)

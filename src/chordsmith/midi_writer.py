@@ -76,6 +76,7 @@ def voice_progression(chords: list[Chord], voicing: Voicing) -> list[tuple[int |
     center = 12 * (voicing.octave + 1) + 6
     for chord in chords:
         if voicing.voice_leading and previous is not None:
+            previous_notes = previous
             candidates = [
                 _shape(chord, octave, inv, voicing.style)
                 for octave in (voicing.octave - 1, voicing.octave, voicing.octave + 1)
@@ -83,7 +84,7 @@ def voice_progression(chords: list[Chord], voicing: Voicing) -> list[tuple[int |
             ]
             upper = min(
                 candidates,
-                key=lambda c: _distance(c, previous) + 0.5 * abs(sum(c) / len(c) - center),
+                key=lambda c: _distance(c, previous_notes) + 0.5 * abs(sum(c) / len(c) - center),
             )
         else:
             upper = _shape(chord, voicing.octave, voicing.inversion, voicing.style)
@@ -262,14 +263,15 @@ def write_progression(
     note_events: list[NoteEvent] = []
     markers: list[tuple[int, str]] = []
     summary = []
-    humanize_rng = random.Random(rhythm.humanize.seed) if rhythm.humanize else None
+    humanize_settings = rhythm.humanize
+    humanize_rng = random.Random(humanize_settings.seed) if humanize_settings else None
     tick = 0
     for (chord, beats), (bass, upper) in zip(sequence, voiced, strict=True):
         length = round(beats * TICKS_PER_BEAT)
         markers.append((tick, chord.symbol))
         chord_events = render_pattern(bass, upper, tick, length, rhythm, tempo_bpm)
-        if humanize_rng is not None:
-            _humanize_events(chord_events, rhythm.humanize, tempo_bpm, humanize_rng, tick, tick + length)
+        if humanize_rng is not None and humanize_settings is not None:
+            _humanize_events(chord_events, humanize_settings, tempo_bpm, humanize_rng, tick, tick + length)
         note_events += chord_events
         summary.append(
             {

@@ -467,9 +467,10 @@ def build_score(path: Path, track: str | int | None, transpose: int, legato: flo
         )
         note_id += 1
         cursor_tick = end
+    store = _get_store()
     return VocalScore(
         score_id=f"score_{uuid.uuid4().hex[:10]}",
-        source=path.name,
+        source=store.relative_name(path) if store is not None else path.name,
         track_index=track_index,
         track_name=track_name,
         tempo_bpm=round(tempo, 3),
@@ -1140,7 +1141,12 @@ def _run_job(
         # claim the name up front: overlapping jobs must never share a file (and the placeholder
         # is removed again if the render fails); the audio itself lands via a .part file and a
         # rename, so a crash can never leave a half-written (or 0-byte) result
-        with store.claimed_path(None, f"{Path(score.source).stem}_vocal", extension=".wav") as path:
+        with store.claimed_path(
+            None,
+            f"{Path(score.source).stem}_vocal",
+            extension=".wav",
+            project=store.project_of_name(score.source),
+        ) as path:
             if engine == "voicevox":
                 assert speakers is not None
                 result = _run_voicevox(job, mapping, score, *speakers)
@@ -1153,9 +1159,9 @@ def _run_job(
             duration = handle.getnframes() / handle.getframerate()
             sample_rate = handle.getframerate()
         job.result = {
-            "filename": path.name,
+            "filename": store.relative_name(path),
             "path": str(path),
-            "uri": f"midi://{path.name}",
+            "uri": f"midi://{store.relative_name(path)}",
             "mime_type": "audio/wav",
             "sample_rate": sample_rate,
             "duration_seconds": round(duration, 3),
@@ -1207,7 +1213,7 @@ def start_job(
         settings=settings,
         cache_key=cache_key,
         created_at=time.time(),
-        source=Path(score.source).name,
+        source=score.source,
         echo_settings=echo_settings if echo_settings is not None else dict(settings),
     )
     with _registry.lock:
@@ -1252,7 +1258,7 @@ def _ffmpeg(args: list[str], timeout: float = 600) -> subprocess.CompletedProces
     return result
 
 
-def _peak_db(path: Path) -> float:
+def peak_db(path: Path) -> float:
     result = _ffmpeg(["-i", str(path), "-af", "volumedetect", "-f", "null", "-"])
     match = re.search(r"max_volume:\s*(-?[\d.]+) dB", result.stderr)
     if not match:
@@ -1831,7 +1837,7 @@ def _apply_gain(source: Path, gain_db: float, target: Path) -> None:
     _ffmpeg(["-y", "-loglevel", "error", "-i", str(source), "-af", f"volume={gain_db:g}dB", str(target)])
 
 
-def _limiter_filter(ceiling_db: float) -> str:
+def limiter_filter(ceiling_db: float) -> str:
     """alimiter with a dB ceiling; level=false keeps the output at the ceiling (no auto level).
 
     ``latency=true`` compensates the lookahead: the default would push the output ~5 ms late
@@ -1987,7 +1993,7 @@ def _render_processed_vocals(
                 "-i",
                 str(bus_current),
                 "-af",
-                _limiter_filter(vocal_bus.limiter.ceiling_db),
+                limiter_filter(vocal_bus.limiter.ceiling_db),
                 str(limited),
             ]
         )
@@ -2023,7 +2029,7 @@ def _render_processed_vocals(
     )
 
 
-def _loudness_report(path: Path, raw_f32: bool = False) -> dict:
+def loudness_report(path: Path, raw_f32: bool = False) -> dict:
     """Integrated LUFS, loudness range, true peak and short-term max via ebur128.
 
     With ``raw_f32`` the input is the uncorrected float mix probe (headerless f32le stereo at
@@ -2326,7 +2332,7 @@ def _mix_tracks_at_mix_rate(
                 graph += f";[{label}]volume={output_gain_db:.2f}dB[g]"
                 label = "g"
             if limiter_on:
-                graph += f";[{label}]{_limiter_filter(master.limiter.ceiling_db - LIMITER_MARGIN_DB)}[ml]"
+                graph += f";[{label}]{limiter_filter(master.limiter.ceiling_db - LIMITER_MARGIN_DB)}[ml]"
                 label = "ml"
             command += ["-filter_complex", graph, "-map", f"[{label}]", "-ar", "44100"]
         if float_output:
@@ -2343,7 +2349,7 @@ def _mix_tracks_at_mix_rate(
     loudness_target = master.loudness_target_lufs if master is not None else None
     if loudness_target is not None:
         # loudness scales with gain, so the correction to hit the target is read off the probe
-        probe_loudness = _loudness_report(probe, raw_f32=True)
+        probe_loudness = loudness_report(probe, raw_f32=True)
         integrated = probe_loudness["integrated_lufs"]
         correction = round(loudness_target - integrated, 2) if integrated is not None else 0.0
     elif normalize_peak_db is not None:
@@ -2353,13 +2359,13 @@ def _mix_tracks_at_mix_rate(
     else:
         correction = 0.0
     render(correction, target)
-    peak = _peak_db(target)
+    peak = peak_db(target)
 
     loudness: dict | None = None
     limiter_reduction: float | None = None
     master_warnings: list[str] = []
     if master is not None:
-        loudness = _loudness_report(target)
+        loudness = loudness_report(target)
         if loudness_target is not None and loudness["integrated_lufs"] is not None:
             if abs(loudness["integrated_lufs"] - loudness_target) > 1.0:
                 master_warnings.append(
@@ -2605,13 +2611,20 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
         "reverb": reverb.model_dump() if reverb is not None else None,
         "chorus": chorus.model_dump() if chorus is not None else None,
     }
+    project = store.project_of(source_path)
     with (
         # The backing is an internal intermediate: always claim a unique name, even when the
         # mix itself is overwritten, so two concurrent mixes can never share (and clobber)
         # the same backing file.
-        store.claimed_path(None, f"{source_path.stem}_backing", extension=".wav") as backing_wav,
-        store.claimed_path(None, f"{source_path.stem}_vocals", extension=".wav") as vocals_wav,
-        store.claimed_path(output_filename, f"{source_path.stem}_mix", overwrite, ".wav") as target,
+        store.claimed_path(
+            None, f"{source_path.stem}_backing", extension=".wav", project=project
+        ) as backing_wav,
+        store.claimed_path(
+            None, f"{source_path.stem}_vocals", extension=".wav", project=project
+        ) as vocals_wav,
+        store.claimed_path(
+            output_filename, f"{source_path.stem}_mix", overwrite, ".wav", project=project
+        ) as target,
     ):
         if voice_list is None and resolved_segments:
             # several vocal pieces (takes, or a vocal rendered in chunks): place each at its
@@ -2624,7 +2637,9 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
         if not use_stems:
             if progress is not None:
                 progress("backing", "running")
-            with store.claimed_path(None, f"{source_path.stem}_backing", extension=".mid") as backing_midi:
+            with store.claimed_path(
+                None, f"{source_path.stem}_backing", extension=".mid", project=project
+            ) as backing_midi:
                 remove_track(source_path, backing_midi, track_index)
                 audio.render(backing_midi, backing_wav, "wav", effects=effects)
             if progress is not None:
@@ -2648,7 +2663,10 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
                         renderer.render(stem_midi, spec, stem_wav, effects)
                         if spec.chain or spec.effects:
                             with store.claimed_path(
-                                None, f"{source_path.stem}_{name}_raw", extension=".wav"
+                                None,
+                                f"{source_path.stem}_{name}_raw",
+                                extension=".wav",
+                                project=project,
                             ) as raw_wav:
                                 shutil.copyfile(stem_wav, raw_wav)
                         windows = renderers.section_gain_windows(spec, section_timeline)
@@ -2727,13 +2745,17 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
     if progress is not None:
         progress("mix", "done")
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "mime_type": "audio/wav",
-        "source": source_path.name,
-        "vocal": vocal_path.name if vocal_path is not None else f"{len(resolved_segments)} vocal segments",
-        "backing": backing_wav.name,
+        "source": store.relative_name(source_path),
+        "vocal": (
+            store.relative_name(vocal_path)
+            if vocal_path is not None
+            else f"{len(resolved_segments)} vocal segments"
+        ),
+        "backing": store.relative_name(backing_wav),
         "levels": {
             "vocal_level_db": vocal_level_db,
             "backing_volume": backing_volume,
@@ -3310,7 +3332,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         mix_path = store.existing_media_path(mix)
         vocal_path = store.existing_media_path(vocal)
         source_path = store.existing_path(source)
-        with store.claimed_path(None, mix_path.stem, extension=".mp3") as mp3_path:
+        with store.claimed_path(
+            None, mix_path.stem, extension=".mp3", project=store.project_of(mix_path)
+        ) as mp3_path:
             to_mp3(mix_path, mp3_path)
         items = {
             "mix": (mix_path, "audio/wav"),
@@ -3320,7 +3344,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         }
         result: dict[str, Any] = {}
         for key, (path, mime) in items.items():
-            entry = delivery.deliver_file(path.name, path.read_bytes(), return_as, expires_in)
+            entry = delivery.deliver_file(store.relative_name(path), path.read_bytes(), return_as, expires_in)
             entry["mime_type"] = mime
             result[key] = entry
         return result

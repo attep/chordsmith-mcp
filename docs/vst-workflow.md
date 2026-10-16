@@ -118,6 +118,8 @@ parameter *name* fails the render and lists the options.
 
 ## Worked examples
 
+Rendered locally during development (the audio is not shipped with the repo):
+
 - `metal_demo.wav` — 32 bars: MODO DRUM, MODO BASS 2, TONEX rhythm, GR7 solo.
 - `vst_flow_demo.wav` — one song with every branch at once:
 
