@@ -63,7 +63,11 @@ export function Assistant() {
     localStorage.setItem(TOOLS_KEY, JSON.stringify(allowed));
   }, [allowed]);
 
-  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [items]);
+  useEffect(() => {
+    // scrollIntoView's value must not be returned: React treats any return as a cleanup
+    // function and crashes with "destroy is not a function" (React 19 dev double-invoke).
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [items]);
 
   const enabledTools = useMemo(
     () => (allowed.restrict ? tools.filter((tool) => allowed.names.includes(tool.name)) : tools),
