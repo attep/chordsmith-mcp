@@ -1043,6 +1043,59 @@ def import_tab(
     }
 
 
+@mcp.tool(title="Export MusicXML", annotations=CREATES)
+def export_musicxml(
+    filename: Annotated[str, Field(description="MIDI file in the output folder to export as notation.")],
+    format: Annotated[
+        Literal["musicxml", "mxl"],
+        Field(description="'musicxml' (plain XML, opens everywhere) or 'mxl' (compressed MusicXML)."),
+    ] = "musicxml",
+    output_filename: FileName = None,
+    return_as: ReturnAs = "base64",
+    expires_in: Annotated[
+        int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
+    ] = delivery.DEFAULT_TTL_SECONDS,
+    overwrite: Overwrite = False,
+) -> results.ExportScoreResult:
+    """Convert a MIDI file to a MusicXML score with MuseScore so a notation app shows real notes.
+
+    Opens in MuseScore, Finale, Sibelius, Dorico and any app that imports MusicXML — far better
+    than importing raw MIDI, which most notation apps quantise badly. The conversion runs
+    locally (set CHORDSMITH_MUSESCORE to the executable) or on the host worker
+    (scripts/vst_bridge.py started with --musescore, reached through CHORDSMITH_VST_BRIDGE_URL);
+    with neither configured the error explains both setups. Writes the score next to the source
+    (in its project) as '<name>.musicxml' ('.mxl' when compressed) and returns it like get_file
+    — base64 bytes or a signed, expiring link — plus the converter, size and sha256. Notation
+    from MIDI is approximate: rhythms are quantised to the grid and chord-name markers arrive as
+    text, not engraved chord symbols.
+    """
+    suffix = ".musicxml" if format == "musicxml" else ".mxl"
+    source = store.existing_path(filename)
+    started = time.monotonic()
+    try:
+        score_bytes, converter = tabs.convert_midi_to_score(source.read_bytes(), suffix)
+    except tabs.TabError as exc:
+        raise ValueError(str(exc)) from None
+    with store.claimed_path(
+        output_filename or source.stem,
+        f"{source.stem}_score",
+        overwrite,
+        suffix,
+        project=store.project_of(source),
+    ) as target:
+        target.write_bytes(score_bytes)
+    result = delivery.deliver_file(store.relative_name(target), score_bytes, return_as, expires_in)
+    result["mime_type"] = (
+        "application/vnd.recordare.musicxml+xml"
+        if format == "musicxml"
+        else "application/vnd.recordare.musicxml"
+    )
+    result["converted_from"] = store.relative_name(source)
+    result["converter"] = converter
+    result["conversion_seconds"] = round(time.monotonic() - started, 2)
+    return result
+
+
 def _copy_track_notes(
     source: Path, name: str, transpose: int, ticks_per_beat: int
 ) -> list[tuple[int, float, float, int]]:

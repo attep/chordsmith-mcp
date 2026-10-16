@@ -78,7 +78,7 @@ say so.
 
 - **Files**: `list_generated_files`, `get_midi_file`, `get_file`, `rename_midi_file`,
   `delete_midi_file`, `create_empty_file`, `remove_track`, `rename_track`, `import_midi`,
-  `import_audio`, `import_tab`
+  `import_audio`, `import_tab`, `export_musicxml`
 - **Compose**: `create_chord_progression`, `create_progression_from_roman`, `add_track`,
   `add_bassline`, `add_drums`, `transpose_midi`, `set_song_sections`, `list_chord_types`
 - **Instruments & render**: `set_track_instrument`, `list_instruments`, `bake_instruments`,

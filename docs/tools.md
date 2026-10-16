@@ -20,6 +20,8 @@ for something specific ("use drop2 voicing") or understand a result.
 - [get_midi_file](#get_midi_file)
 - [get_file](#get_file)
 - [import_midi](#import_midi)
+- [import_tab](#import_tab)
+- [export_musicxml](#export_musicxml)
 - [import_audio](#import_audio)
 - [render_audio](#render_audio)
 - [render_audio_job and get_render_job](#render_audio_job-and-get_render_job)
@@ -514,6 +516,27 @@ The result is the [import_midi](#import_midi) report plus `converted_from`,
 kept. MuseScore writes the tab's own tempo automation into the MIDI — a tab may carry stepped
 tempo shifts (check `tempo_changes`; smooth them if they wobble). See
 [guitarpro.md](guitarpro.md) for the full grounding recipe.
+
+## export_musicxml
+
+The reverse direction: converts a MIDI file to a **MusicXML score** with MuseScore, so a
+notation app (MuseScore, Finale, Sibelius, Dorico) opens it as real notation instead of
+quantising a raw MIDI import. The same converter setups as [import_tab](#import_tab) apply
+(`CHORDSMITH_MUSESCORE`, or the host worker with `--musescore`); with neither configured the
+error explains both.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | MIDI file in the output folder |
+| `format` | `"musicxml"` (plain XML, the default) or `"mxl"` (compressed MusicXML) |
+| `output_filename` | Default: `<name>.musicxml` / `<name>.mxl`, written in the source's project |
+| `return_as`, `expires_in` | Deliver like [get_file](#get_file): base64 bytes or a signed, expiring link |
+| `overwrite` | Replace an existing score of that name |
+
+The result carries the usual delivery fields plus `converted_from`, `converter` and
+`conversion_seconds`. Notation from MIDI is approximate: rhythms are quantised to the grid,
+and the chord-name markers arrive as text, not engraved chord symbols (add them in the notation
+app once and save the score).
 
 ## import_audio
 

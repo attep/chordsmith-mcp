@@ -102,6 +102,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `list_generated_files` | Lists the files you've made |
 | `import_midi` | Imports a MIDI file made elsewhere (base64) and reports what it contains |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |
+| `export_musicxml` | Converts a MIDI file to a MusicXML score for MuseScore/Finale/Sibelius (local MuseScore or the host worker) |
 | `delete_midi_file` / `rename_midi_file` / `rename_track` | Tidies up files and track names |
 | `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or DiffSinger voicebanks — English and exact phonemes; several banks with their own variants, male and female) and mixes it with the backing |
 

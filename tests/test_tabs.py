@@ -38,6 +38,10 @@ def _fixture_midi() -> bytes:
 
 FIXTURE = _fixture_midi()
 
+FIXTURE_SCORE = (
+    b'<?xml version="1.0" encoding="UTF-8"?>\n<score-partwise version="4.0"><part-list/></score-partwise>\n'
+)
+
 
 @pytest.fixture
 def anyio_backend():
@@ -149,6 +153,17 @@ class _FakeTabBridge(BaseHTTPRequestHandler):
         if self.path == "/tab":
             if payload.get("name") == "input.gpx":
                 self._json(200, {"exit": -1, "midi": None, "error": "no MuseScore configured on this bridge"})
+            elif payload.get("target") == ".musicxml":
+                self._json(
+                    200,
+                    {
+                        "exit": 0,
+                        "output": base64.b64encode(FIXTURE_SCORE).decode(),
+                        "format": ".musicxml",
+                        "stdout": "",
+                        "stderr": "",
+                    },
+                )
             else:
                 self._json(
                     200,
@@ -198,3 +213,74 @@ def test_tab_suffixes_are_the_documented_set():
     assert {".gp", ".gp3", ".gp4", ".gp5", ".gpx"} <= tabs.TAB_SUFFIXES
     assert {".musicxml", ".xml", ".mxl", ".mscz"} <= tabs.TAB_SUFFIXES
     assert ".mid" not in tabs.TAB_SUFFIXES
+
+
+# ------------------------------------------------------------------ export_musicxml
+
+
+async def test_export_musicxml_locally(store, monkeypatch, tmp_path):
+    import io
+    import zipfile
+
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("score.xml", FIXTURE_SCORE)
+    fixture_mxl = archive_buffer.getvalue()
+
+    (tmp_path / "fixture.musicxml").write_bytes(FIXTURE_SCORE)
+    (tmp_path / "fixture.mxl").write_bytes(fixture_mxl)
+    stub = _write_stub(
+        tmp_path,
+        "score-stub",
+        'ext="${2##*.}"; cp "$(dirname "$0")/fixture.$ext" "$2"',
+        'for %%F in ("%~2") do copy /y "%~dp0fixture%%~xF" "%~2" >nul',
+    )
+    monkeypatch.setenv("CHORDSMITH_MUSESCORE", stub)
+    monkeypatch.delenv("CHORDSMITH_VST_BRIDGE_URL", raising=False)
+    await _call("create_chord_progression", {"chords": ["Am", "F"], "filename": "song/melody"})
+
+    result = await _call("export_musicxml", {"filename": "song/melody.mid"})
+    assert not result.isError, result.content[0].text
+    payload = result.structuredContent
+    assert payload["filename"] == "song/melody.musicxml"
+    assert payload["converted_from"] == "song/melody.mid"
+    assert payload["converter"].startswith("local MuseScore")
+    assert payload["mime_type"] == "application/vnd.recordare.musicxml+xml"
+    assert base64.b64decode(payload["data_base64"]) == FIXTURE_SCORE
+    assert (store.root / "song" / "melody.musicxml").is_file()
+
+    compressed = await _call("export_musicxml", {"filename": "song/melody.mid", "format": "mxl"})
+    assert not compressed.isError, compressed.content[0].text
+    assert compressed.structuredContent["filename"] == "song/melody.mxl"
+    assert base64.b64decode(compressed.structuredContent["data_base64"]) == fixture_mxl
+
+
+async def test_export_musicxml_rejects_non_xml_output(store, monkeypatch, tmp_path):
+    stub = _write_stub(
+        tmp_path,
+        "bad-stub",
+        'printf "not xml" > "$2"',
+        'echo not xml > "%~2"',
+    )
+    monkeypatch.setenv("CHORDSMITH_MUSESCORE", stub)
+    monkeypatch.delenv("CHORDSMITH_VST_BRIDGE_URL", raising=False)
+    await _call("create_chord_progression", {"chords": ["C"], "filename": "song"})
+    result = await _call("export_musicxml", {"filename": "song.mid"})
+    assert result.isError and "not a readable MusicXML file" in result.content[0].text
+
+
+async def test_export_musicxml_via_the_bridge(store, fake_tab_bridge):
+    await _call("create_chord_progression", {"chords": ["C"], "filename": "song"})
+    result = await _call("export_musicxml", {"filename": "song.mid"})
+    assert not result.isError, result.content[0].text
+    payload = result.structuredContent
+    assert payload["converter"] == "host bridge"
+    assert base64.b64decode(payload["data_base64"]) == FIXTURE_SCORE
+
+
+async def test_export_musicxml_without_converter_explains_setup(store, no_converter):
+    await _call("create_chord_progression", {"chords": ["C"], "filename": "song"})
+    result = await _call("export_musicxml", {"filename": "song.mid"})
+    assert result.isError
+    text = result.content[0].text
+    assert "CHORDSMITH_MUSESCORE" in text and "vst_bridge" in text

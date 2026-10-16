@@ -38,7 +38,7 @@ DESCRIPTION_BUDGET_BYTES = 27 * 1024
 # worker; one more tool and its description) and 272 KB (v0.28.0: project folders, the genre
 # presets and the add_bassline/add_drums/rename_track tools; descriptions moved 24 -> 26 KB in
 # the same patch). v0.29.0 raised only the description budget (26 -> 27 KB: Roman numerals on
-# analyze_midi and the explain_progression tool); the payload ceiling stands.
+# analyze_midi, explain_progression and export_musicxml); the payload ceiling stands.
 # The surface grows with capabilities; keep new schemas lean.
 PAYLOAD_CEILING_BYTES = 272 * 1024
 
@@ -54,7 +54,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 43
+    assert len(tools) == 44
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

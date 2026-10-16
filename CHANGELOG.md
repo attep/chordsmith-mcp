@@ -17,10 +17,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and function (tonic/subdominant/dominant, borrowed, secondary dominant), cadences (authentic,
   plagal, half, deceptive, ii-V-I) and a few concrete variation ideas. The MCP prompt of the
   same name stays the assistant-led path.
+- **`export_musicxml`**: converts a MIDI file to a MusicXML score (`.musicxml` or compressed
+  `.mxl`) with MuseScore — locally (`CHORDSMITH_MUSESCORE`) or through the host worker — so
+  notation apps open real notation instead of a raw MIDI import. The bridge's `/tab` endpoint
+  takes a `target` for score output; notation from MIDI is approximate (quantised rhythms,
+  chord markers as text).
 
-Planned: MusicXML export, a master-bus plugin chain with plugin-state generation, quotas
-(bars, tracks, file size, storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY,
-pre-commit, mypy).
+Planned: a master-bus plugin chain with plugin-state generation, quotas (bars, tracks, file
+size, storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
 ## [0.28.0] - 2026-10-16
 

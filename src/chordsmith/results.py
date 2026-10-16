@@ -562,6 +562,13 @@ class GetFileResult(_FileIdentity, DeliveryFields):
     mime_type: str
 
 
+class ExportScoreResult(_FileIdentity, DeliveryFields):
+    mime_type: str
+    converted_from: str
+    converter: str
+    conversion_seconds: float
+
+
 class ImportAudioResult(TypedDict):
     filename: str
     path: str
