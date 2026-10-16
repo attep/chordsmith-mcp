@@ -189,18 +189,72 @@ function harvestContainer(
   return null;
 }
 
-function describeField(name: string, schema: JsonSchema | undefined, root: JsonSchema): string {
-  const resolved = resolve(schema ?? {}, root);
-  const { options } = variants(resolved, root);
-  const option = options[0];
-  const type = primaryType(option ?? {});
-  if (option?.enum) return `${name} (one of: ${option.enum.map(String).join(", ")})`;
-  if (type === "array") {
-    const itemType = primaryType(option?.items ? resolve(option.items, root) : {});
-    return `${name} (array${itemType ? ` of ${itemType === "string" ? "strings" : itemType}` : ""}, e.g. ["Am", "F", "C", "G"])`;
+function levenshtein(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  let previous = Array.from({ length: cols }, (_, index) => index);
+  for (let row = 1; row < rows; row++) {
+    const current = [row];
+    for (let col = 1; col < cols; col++) {
+      const cost = a[row - 1] === b[col - 1] ? 0 : 1;
+      current[col] = Math.min(current[col - 1] + 1, previous[col] + 1, previous[col - 1] + cost);
+    }
+    previous = current;
   }
-  return `${name} (${type ?? "value"})`;
+  return previous[cols - 1];
 }
+
+/** Lower is closer: 0 exact, 1 prefix either way, 2 contains, 3+levenshtein. */
+function nameScore(name: string, candidate: string): number {
+  const needle = name.toLowerCase();
+  const hay = candidate.toLowerCase();
+  if (hay === needle) return 0;
+  if (hay.startsWith(needle) || needle.startsWith(hay)) return 1;
+  if (hay.includes(needle)) return 2;
+  return 3 + levenshtein(needle, hay);
+}
+
+/** The accepted property an invented name probably meant ('file' -> 'filename'). */
+export function closestName(name: string, candidates: string[]): string | undefined {
+  let best: string | undefined;
+  let bestScore = Infinity;
+  for (const candidate of candidates) {
+    const score = nameScore(name, candidate);
+    if (score < bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  return bestScore <= 5 ? best : undefined;
+}
+
+/** Strong enough to rename silently: a prefix/contains match or one typo away (levenshtein ≤ 1). */
+function isStrongMatch(score: number): boolean {
+  return score <= 4;
+}
+
+function describeField(name: string, schema: JsonSchema | undefined, root: JsonSchema): string {
+  const { options } = variants(resolve(schema ?? {}, root), root);
+  if (!options.length) return `${name} (value)`;
+  const described = options.map((option) => {
+    if (option.enum) return `one of: ${option.enum.map(String).join(", ")}`;
+    const type = primaryType(option);
+    if (type === "array") {
+      const itemType = primaryType(option.items ? resolve(option.items, root) : {});
+      const items =
+        itemType === "string" ? " of strings" : itemType === "object" ? " of objects" : itemType ? ` of ${itemType}s` : "";
+      return `array${items}`;
+    }
+    if (type === "integer") return "number";
+    return type ?? "value";
+  });
+  const unique = [...new Set(described)];
+  const example = unique.some((entry) => entry.startsWith("array")) ? ', e.g. ["Am", "F", "C", "G"]' : "";
+  return `${name} (${unique.join(" or ")}${example})`;
+}
+
+/** Common ways models name the input file; "filename" is that property in most tools. */
+const FILENAME_ALIASES = new Set(["file", "source", "path", "file_name", "filename", "midi_file"]);
 
 /**
  * Parse and repair a tool call's arguments against the tool's input schema.
@@ -232,8 +286,26 @@ export function prepareToolArguments(
   const resolved = resolve(root, root);
   const properties = resolved.properties ?? {};
   const required = resolved.required ?? [];
-  const args: Record<string, unknown> = { ...parsed };
+  const args: Record<string, unknown> = {};
   const repaired: string[] = [];
+
+  // unambiguous near-miss keys are renamed first ('file'/'source' -> 'filename'), so small-model
+  // calls that are otherwise complete just work; weak matches stay unknown and get a suggestion
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key in properties) {
+      args[key] = value;
+      continue;
+    }
+    const lower = key.toLowerCase();
+    const alias = "filename" in properties && lower !== "filename" && FILENAME_ALIASES.has(lower) ? "filename" : undefined;
+    const guess = alias ?? closestName(key, Object.keys(properties));
+    if (guess && guess !== key && (alias !== undefined || isStrongMatch(nameScore(key, guess))) && !(guess in parsed)) {
+      args[guess] = value;
+      repaired.push(`${key}→${guess}`);
+    } else {
+      args[key] = value;
+    }
+  }
 
   for (const [key, value] of Object.entries(args)) {
     const schema = properties[key];
@@ -249,16 +321,20 @@ export function prepareToolArguments(
     if (args[name] !== undefined && args[name] !== null) continue;
     const schema = properties[name];
     if (!schema) continue;
-    const type = primaryType(resolve(schema, root));
-    if (type !== "array" && type !== "object") continue;
-    const found = harvestContainer(args, type, root, schema);
+    // unions count too: "chords: str | list" can hold the list the model hid elsewhere
+    const { options } = variants(resolve(schema, root), root);
+    const kind = (["array", "object"] as const).find((candidate) =>
+      options.some((option) => primaryType(option) === candidate),
+    );
+    if (!kind) continue;
+    const found = harvestContainer(args, kind, root, schema);
     if (!found) continue;
     args[name] = found.value;
     repaired.push(name);
     // clean the host string so e.g. the filename no longer carries the chord list
     const source = args[found.source];
     if (typeof source === "string") {
-      const block = findBalanced(source, type === "array" ? "[" : "{", type === "array" ? "]" : "}");
+      const block = findBalanced(source, kind === "array" ? "[" : "{", kind === "array" ? "]" : "}");
       if (block) {
         const cleaned = source.replace(block, "").replace(/\s{2,}/g, " ").trim();
         if (cleaned) {
@@ -271,12 +347,27 @@ export function prepareToolArguments(
 
   const missing = required.filter((name) => args[name] === undefined || args[name] === null);
   if (missing.length) {
-    const sent = Object.keys(parsed).length ? Object.keys(parsed).join(", ") : "(no fields)";
+    const sentKeys = Object.keys(parsed);
+    const sent = sentKeys.length ? sentKeys.join(", ") : "(no fields)";
+    const acceptedNames = Object.keys(properties);
+    const unknown = Object.keys(args)
+      .filter((key) => !(key in properties))
+      .map((key) => {
+        const guess = closestName(key, acceptedNames);
+        return guess && guess !== key ? `${key} (did you mean ${guess}?)` : key;
+      });
     const fields = missing.map((name) => describeField(name, properties[name], root)).join("; ");
+    const accepted = acceptedNames.slice(0, 12).join(", ") + (acceptedNames.length > 12 ? ", …" : "");
     return {
       args,
       repaired,
-      error: `${tool.name} needs ${missing.join(", ")}; this call sent: ${sent}. Send every required field as its own property: ${fields}.`,
+      error: [
+        `${tool.name} was NOT executed and is still available — it needs ${missing.join(", ")}.`,
+        `This call sent: ${sent}${unknown.length ? ` (unknown here: ${unknown.join(", ")})` : ""}.`,
+        `Required: ${fields}.`,
+        `Accepted fields: ${accepted}.`,
+        "Call it again with each field as its own separate property.",
+      ].join(" "),
     };
   }
 

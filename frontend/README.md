@@ -16,8 +16,10 @@ A small web app for looking inside a running ChordSmith server and driving it by
 - **Assistant**: chat with a local [Ollama](https://ollama.com) model that can call
   ChordSmith tools. You choose which tools it may use. Every tool call and its result appear in
   the chat; small models sometimes emit valid JSON with the wrong shape, so calls are repaired
-  against the tool's schema first (the chat shows `repaired: <fields>`), and an unsalvageable
-  call gets a precise retry message instead of a server validation dump.
+  against the tool's schema first (stringified lists, numbers as text, `file`/`source` renamed
+  to `filename`; the chat shows `repaired: <fields>`), and an unsalvageable call gets a precise
+  retry message instead of a server validation dump. `scripts/assistant_rehearsal.py` replays a
+  whole song request through your server and Ollama and reports every call.
 
 It's a separate app with its own `package.json`. It doesn't change how the Python package
 is built or installed.
@@ -143,6 +145,10 @@ npm run typecheck   # TypeScript
 npm test            # unit tests (Vitest)
 npm run build       # production build in dist/
 ```
+
+`src/lib/toolSchemas.fixture.ts` is generated from a running server's `tools/list` and drives
+the all-tools repair sweep in `arguments.tools.test.ts` — regenerate it whenever tools or their
+schemas change.
 
 `GET /api/status` (server side, in `src/chordsmith/manager.py`) returns the version, every
 job in the render/mix/singing registries with its progress, and the connected MCP sessions.

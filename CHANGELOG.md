@@ -36,10 +36,14 @@ missing.
   states like per-track effects; mixes without `master_effects` stay byte-identical.
 - **Assistant tool-call repair**: small models (qwen3.6 and friends) emit valid JSON with the
   wrong shape — a required list merged into another string (`{"filename": "song [\"Am\",\"Dm\"]"}`),
-  stringified arrays, numbers as text. The manager repairs the call against the tool's own
-  schema (recovering the embedded list and cleaning the host string), notes `repaired: <fields>`
-  in the chat, and turns an unsalvageable call into a precise retry message for the model
-  instead of a pydantic dump. The MCP server's validation stays strict for every client.
+  stringified arrays, numbers as text, or invented field names (`file`, `source`). The manager
+  repairs the call against the tool's own schema: values are coerced, an embedded list is
+  recovered (and the host string cleaned), unambiguous near-miss keys are renamed
+  (`file`/`source` → `filename`, one typo away), weak matches get a "did you mean" suggestion,
+  and an unsalvageable call becomes a precise retry message for the model instead of a pydantic
+  dump. Guards: a test sweeps all 45 of the server's tool schemas through the repair layer, and
+  `scripts/assistant_rehearsal.py` replays a whole song request through a live server and Ollama
+  and reports every call. The MCP server's validation stays strict for every client.
 
 ## [0.31.0] - 2026-10-16
 

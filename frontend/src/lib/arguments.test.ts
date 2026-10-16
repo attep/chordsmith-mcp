@@ -68,4 +68,33 @@ describe("prepareToolArguments", () => {
     expect(prepared.error).toMatch(/array of strings/);
     expect(prepared.error).toMatch(/sent: tempo, filename/);
   });
+
+  it("tells the model the tool is still available and flags invented fields", () => {
+    const prepared = prepareToolArguments(tool, { key: "A minor", rhythm: {}, duration_bars: 8 });
+    expect(prepared.error).toBeDefined();
+    expect(prepared.error).toMatch(/was NOT executed and is still available/);
+    expect(prepared.error).toMatch(/unknown here: key, duration_bars/);
+    expect(prepared.error).toMatch(/Accepted fields: chords, filename, tempo, rhythm/);
+    expect(prepared.error).toMatch(/Call it again/);
+  });
+
+  it("suggests the accepted field for a weak near-miss name", () => {
+    const prepared = prepareToolArguments(tool, { filnam: "song", tempo: 100 });
+    expect(prepared.error).toMatch(/filnam \(did you mean filename\?\)/);
+  });
+
+  it("renames an unambiguous near-miss field and proceeds", () => {
+    const prepared = prepareToolArguments(tool, { file: "song", chords: ["Am"] });
+    expect(prepared.error).toBeUndefined();
+    expect(prepared.args.filename).toBe("song");
+    expect(prepared.args.file).toBeUndefined();
+    expect(prepared.repaired).toContain("file→filename");
+  });
+
+  it("treats 'source' as the input filename (the mix tools' name for it)", () => {
+    const prepared = prepareToolArguments(tool, { source: "song.mid", chords: ["Am"] });
+    expect(prepared.error).toBeUndefined();
+    expect(prepared.args.filename).toBe("song.mid");
+    expect(prepared.repaired).toContain("source→filename");
+  });
 });
