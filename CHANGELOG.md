@@ -12,6 +12,15 @@ Planned: rate limits and quotas (bars, tracks, file size, storage, TTL), genre p
 export, Roman-numeral analysis, an `explain_progression` tool, and contributor hygiene
 (CONTRIBUTING, SECURITY, pre-commit, mypy).
 
+### Added
+
+- `frontend/`: a standalone Vite + React manager UI (dashboard, tool runner, files, Ollama
+  assistant). See [frontend/README.md](frontend/README.md).
+- `GET /api/status` lists render, mix and singing jobs with their per-track progress, plus the
+  connected MCP sessions. It needs the same bearer token as `/mcp` when OAuth is on.
+- HTTP transports answer CORS requests from `localhost`/`127.0.0.1` origins (any port);
+  `CHORDSMITH_CORS_ORIGINS` adds more.
+
 ## [0.27.0] - 2026-10-14
 
 ### Added

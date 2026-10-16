@@ -2647,7 +2647,9 @@ def run_mix(args: dict, progress: Callable[[str, str, str | None], None] | None 
                     try:
                         renderer.render(stem_midi, spec, stem_wav, effects)
                         if spec.chain or spec.effects:
-                            with store.claimed_path(None, f"{source_path.stem}_{name}_raw", extension=".wav") as raw_wav:
+                            with store.claimed_path(
+                                None, f"{source_path.stem}_{name}_raw", extension=".wav"
+                            ) as raw_wav:
                                 shutil.copyfile(stem_wav, raw_wav)
                         windows = renderers.section_gain_windows(spec, section_timeline)
                         if windows:

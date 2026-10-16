@@ -31,6 +31,7 @@ from chordsmith import (
     __version__,
     audio,
     delivery,
+    manager,
     mixjobs,
     renderers,
     renderjobs,
@@ -174,7 +175,7 @@ RhythmOption = Annotated[
 @mcp.custom_route("/healthz", methods=["GET"])
 async def health_check(_request: Request) -> Response:
     """Liveness probe for container platforms (includes the running version)."""
-    return JSONResponse({"status": "ok", "version": __version__})
+    return JSONResponse(manager.health_payload())
 
 
 @mcp.custom_route("/files/{filename}", methods=["GET"])
@@ -1586,6 +1587,18 @@ renderers.register(mcp, lambda: store)
 sections.register(mcp, lambda: store)
 renderjobs.register(mcp, lambda: store, _run_audio_job)
 mixjobs.register(mcp, lambda: store, singing.run_mix)
+manager.register(mcp, lambda: store)
+
+
+def build_http_app(rate_limit: int = 0):
+    """The streamable-HTTP ASGI app: MCP endpoint and routes, rate limit, sessions, CORS."""
+    from chordsmith.ratelimit import RateLimitMiddleware, TokenBucketLimiter
+
+    app = mcp.streamable_http_app()
+    if rate_limit > 0:
+        logger.info("Rate limit: %d requests per minute per client.", rate_limit)
+        app = RateLimitMiddleware(app, TokenBucketLimiter(rate_limit), mcp.settings.streamable_http_path)
+    return manager.wrap_http_app(app, mcp.settings.streamable_http_path, manager.cors_origins_from_env())
 
 
 def main() -> None:
@@ -1621,16 +1634,13 @@ def main() -> None:
     if args.transport == "streamable-http":
         import uvicorn
 
-        from chordsmith.ratelimit import RateLimitMiddleware, TokenBucketLimiter, rate_limit_from_env
+        from chordsmith.ratelimit import rate_limit_from_env
 
         try:
             limit = rate_limit_from_env()
         except ValueError as exc:
             parser.error(str(exc))
-        app = mcp.streamable_http_app()
-        if limit > 0:
-            logger.info("Rate limit: %d requests per minute per client.", limit)
-            app = RateLimitMiddleware(app, TokenBucketLimiter(limit), mcp.settings.streamable_http_path)
+        app = build_http_app(limit)
         uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
         return
     mcp.run(transport=args.transport)
