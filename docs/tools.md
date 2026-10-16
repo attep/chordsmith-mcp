@@ -14,6 +14,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [create_empty_file](#create_empty_file)
 - [remove_track](#remove_track)
 - [set_song_sections](#set_song_sections)
+- [Song forms](#song-forms)
 - [bake_instruments](#bake_instruments)
 - [get_midi_file](#get_midi_file)
 - [get_file](#get_file)
@@ -312,13 +313,16 @@ The pattern's meter must match the song's.
 ## create_empty_file
 
 Creates a **blank MIDI file** (a conductor track only) to build a song on from scratch — for
-songs that should not start from a chord progression. With `sections`, the tempo/meter map is
-written immediately, so [add_track](#add_track) can use `section` + `bar` + `beat` positions.
+songs that should not start from a chord progression. With `sections` or a `form` template, the
+tempo/meter map is written immediately, so [add_track](#add_track) can use `section` + `bar` +
+`beat` positions.
 
 | Option | Description |
 |---|---|
 | `filename` (required) | Name for the new file, e.g. `"my_song"` (`.mid` is added) |
 | `sections` | Optional section map, like [set_song_sections](#set_song_sections) |
+| `form` | Optional [song-form template](#song-forms) (`"pop"`, `"rock"`, `"ballad"`, `"jazz"`, `"blues"`, `"edm"`, `"cinematic"`) |
+| `bpm` | With a form: one tempo for every section |
 | `output_filename`, `overwrite` | As above |
 
 ## remove_track
@@ -344,7 +348,9 @@ touched. Call it before [add_track](#add_track) to place notes with section-rela
 | Option | Description |
 |---|---|
 | `filename` (required) | MIDI file in the output folder |
-| `sections` (required) | Sections in order, up to 64 |
+| `sections` | Sections in order, up to 64 (give `sections` or `form`, not both) |
+| `form` | A [song-form template](#song-forms) instead of a hand-written section list |
+| `bpm` | With a form: one tempo for every section (overrides the template's own tempos) |
 
 Each section has:
 
@@ -369,6 +375,47 @@ The result reports each section's `start_beat`, the total beats and the `duratio
 integrated over the whole map (not the initial BPM applied to the song). Replaces any existing
 section map; the sidecar (`<name>.sections.json`) follows the file through rename and delete.
 Old single-tempo songs simply have no sections and keep working unchanged.
+
+## Song forms
+
+A **form template** lays out a whole song structure in one call — sections in order with their
+bars and tempos — instead of hand-writing the list. Pass it as `form` to
+[create_empty_file](#create_empty_file) or [set_song_sections](#set_song_sections); `bpm`
+flattens every section onto one tempo. The section names are meant to be reused:
+[add_track](#add_track) positions notes inside them (`section: "Chorus 1"`),
+[add_bassline](#add_bassline) and [add_drums](#add_drums) follow the map, and
+[set_track_instrument](#set_track_instrument) section overrides can switch programs or trim
+levels per section.
+
+What the section names mean:
+
+| Section | Role |
+|---|---|
+| Intro | sets the key, groove and mood; often instrumental, low energy |
+| Verse | tells the story; lower energy, the words carry it |
+| Pre-Chorus | builds tension into the chorus (rising line, quicker rhythm) |
+| Chorus | the payoff: highest energy, the hook, the fullest arrangement |
+| Bridge | contrast after the second chorus: new chords or feel, quieter or stranger |
+| Solo | an instrumental chorus (guitar/organ) over the verse or chorus chords |
+| Break / Build | EDM: strips back, then rises with risers and rolls into the drop |
+| Drop | EDM: the loudest, fullest section (the chorus equivalent) |
+| Outro | winds down; fade, tag or a final cadence |
+
+| Form | Sections (bars) | Tempo |
+|---|---|---|
+| `pop` | Intro 4 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Bridge 8 · Chorus 8 · Outro 4 | 110 |
+| `rock` | Intro 4 · Verse 8 · Chorus 8 · Verse 8 · Chorus 8 · Solo 8 · Chorus 8 · Outro 4 | 130 |
+| `ballad` | Intro 4 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Verse 8 · Chorus 8 · Bridge 8 · Chorus 8 · Outro 4 | 70 |
+| `jazz` | A1 8 · A2 8 · B 8 · A3 8 (32-bar AABA) | 132 |
+| `blues` | Blues 1 12 · Blues 2 12 · Blues 3 12 | 100 |
+| `edm` | Intro 16 · Build 8 · Drop 16 · Break 8 · Build 8 · Drop 16 · Outro 16 | 128 |
+| `cinematic` | Intro 8 · Theme A 16 · Theme B 16 · Build 8 · Climax 16 · Outro 8 | 60 → 120 → 60 |
+
+The bar counts are the common published defaults (verse/chorus and AABA: Wikipedia *Song
+structure* and Open Music Theory; 12-bar blues: *Twelve-bar blues*; the EDM phrase grid:
+*Drop* and production guides; cinematic has no single standard, so the arc follows the usual
+trailer/production shape). Treat them as starting points — pass an explicit `sections` list
+instead when the structure should differ.
 
 ## bake_instruments
 

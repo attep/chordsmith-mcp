@@ -108,7 +108,9 @@ The create tools accept **voicing** options (inversions, open/drop-2, voice lead
 **rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), genre
 **presets** (pop, rock, metal, jazz, bossa, classical, cinematic, trap, edm, blues, funk, lofi),
 a `seed` for reproducible renders, and `midi_type` 0/1 for simple players. Songs can have
-a **section map** with real tempo and meter changes (`set_song_sections`); notes can then be
+a **section map** with real tempo and meter changes (`set_song_sections`) — or start from a
+**song-form template** (pop, rock, ballad, jazz AABA, 12-bar blues, EDM, cinematic) that lays
+out Intro/Verse/Chorus/Bridge sections with bars and tempos in one call. Notes can then be
 placed with section-relative bar/beat positions, and vocals, renders and exports follow the map.
 
 Every tool also carries a human **title** and **behaviour hints** (read-only / creates /

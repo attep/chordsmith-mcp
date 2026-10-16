@@ -41,7 +41,8 @@ say so.
    - `automation`: linear CC ramps, e.g. CC11 expression or CC7 fade.
    - `instrument`: a GM program number (e.g. 48 strings); `channel` 10 for drums.
 3. **Sections** (verse/chorus songs): `set_song_sections` writes names, bars, quarter-note BPM and
-   meter into the conductor; tempo/meter changes become real. Later notes can use section-relative
+   meter into the conductor; a `form` template (`pop`, `rock`, `ballad`, `jazz`, `blues`, `edm`,
+   `cinematic`) lays out a whole structure in one call. Later notes can use section-relative
    positions.
 4. **Instruments**: `set_track_instrument` for soundfont/GM program/bank, `gain_db`, `mute`,
    effect sends (CC91/CC93) and per-section overrides; `list_instruments` shows each track's

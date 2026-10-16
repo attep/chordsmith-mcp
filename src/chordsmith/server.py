@@ -31,6 +31,7 @@ from chordsmith import (
     __version__,
     audio,
     delivery,
+    forms,
     grooves,
     mixjobs,
     renderers,
@@ -514,9 +515,24 @@ def create_empty_file(
     sections: Annotated[
         list[SongSection] | None,
         Field(
-            max_length=64,
             description="Optional section map to write straight into the conductor (like "
             "set_song_sections), so add_track can use section+bar+beat positions.",
+        ),
+    ] = None,
+    form: Annotated[
+        forms.Form | None,
+        Field(
+            description="Optional song-form template that lays out sections with bars and tempos "
+            "(pop, rock, ballad, jazz 32-bar AABA, 12-bar blues, edm, cinematic); see the Song "
+            "forms table in docs/tools.md. Give sections or form, not both.",
+        ),
+    ] = None,
+    bpm: Annotated[
+        float | None,
+        Field(
+            ge=20,
+            le=300,
+            description="With a form: one tempo for every section (overrides the template's own).",
         ),
     ] = None,
     output_filename: FileName = None,
@@ -525,18 +541,24 @@ def create_empty_file(
     """Create a blank MIDI file (a conductor track only) to build a song on from scratch.
 
     Use it when a song should not start from a chord progression: create the empty file, then
-    add_track each part onto it. With ``sections`` the tempo/meter map is written immediately.
-    Returns the file's name/path and the section map it carries.
+    add_track each part onto it. With ``sections`` or a ``form`` template the tempo/meter map is
+    written immediately (give one or the other). Returns the file's name/path and the section
+    map it carries.
     """
+    if sections is not None and form is not None:
+        raise ValueError("Give sections or a form template, not both.")
+    if bpm is not None and form is None:
+        raise ValueError("bpm only applies with a form; give each section's bpm instead.")
+    chosen = forms.form_sections(form, bpm) if form is not None else sections
     with store.claimed_path(output_filename or filename, f"{filename}_empty", overwrite) as target:
         info = write_empty(target, target.stem)
         resolved: list[dict] = []
-        if sections:
-            names = [section.name for section in sections]
+        if chosen:
+            names = [section.name for section in chosen]
             if len(set(names)) != len(names):
                 duplicates = sorted({name for name in names if names.count(name) > 1})
                 raise ValueError(f"Duplicate section names: {', '.join(duplicates)}.")
-            resolved = [section.payload() for section in sections_module.write_sections(target, sections)]
+            resolved = [section.payload() for section in sections_module.write_sections(target, chosen)]
     return {
         "filename": store.relative_name(target),
         "path": str(target),
