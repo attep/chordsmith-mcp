@@ -77,10 +77,10 @@ say so.
 ## Tool map
 
 - **Files**: `list_generated_files`, `get_midi_file`, `get_file`, `rename_midi_file`,
-  `delete_midi_file`, `create_empty_file`, `remove_track`, `import_midi`, `import_audio`,
-  `import_tab`
+  `delete_midi_file`, `create_empty_file`, `remove_track`, `rename_track`, `import_midi`,
+  `import_audio`, `import_tab`
 - **Compose**: `create_chord_progression`, `create_progression_from_roman`, `add_track`,
-  `transpose_midi`, `set_song_sections`, `list_chord_types`
+  `add_bassline`, `add_drums`, `transpose_midi`, `set_song_sections`, `list_chord_types`
 - **Instruments & render**: `set_track_instrument`, `list_instruments`, `bake_instruments`,
   `render_audio`, `render_audio_job`, `get_render_job`, `list_render_jobs`
 - **Singing**: `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`,
@@ -92,8 +92,12 @@ say so.
 
 - **Files**: default names come from the source (`<name>_mix`, `<name>_backing`); pass
   `overwrite: true` to replace an existing file, and `output_filename` to name a result.
-- **Copy tools**: `add_track`, `remove_track`, `transpose_midi` and `bake_instruments` never
-  touch their source — `output_filename` must differ from it, even with `overwrite: true`.
+- **Copy tools**: `add_track`, `remove_track`, `rename_track`, `transpose_midi` and
+  `bake_instruments` never touch their source — `output_filename` must differ from it, even
+  with `overwrite: true`.
+- **Track names**: unique and exact; `add_track` rejects a name that already exists and
+  by-name tools (`set_track_instrument`, `copy_from`, `remove_track`) match exactly. Rename a
+  track with `rename_track` (a copy; set the copy's instrument specs again).
 - **DAW handoff**: `export_vocal_song` ships the untouched MIDI; call `bake_instruments` first
   so another player hears the intended programs (a MIDI cannot carry a soundfont or samples).
   Standard MIDI has 15 melodic channels, so large scores share channels — `list_instruments`

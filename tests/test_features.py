@@ -14,7 +14,7 @@ import mido
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from chordsmith import audio, delivery, server
+from chordsmith import audio, delivery, renderers, server
 from chordsmith.analysis import analyze_file
 from chordsmith.midi_writer import write_progression
 from chordsmith.models import Humanize, Rhythm, Voicing
@@ -504,6 +504,47 @@ async def test_delete_and_rename(store):
     assert deleted.structuredContent["deleted"] == "new_song.mid"
     assert not (store.root / "new_song.mid").exists()
     assert (await _call("delete_midi_file", {"filename": "new_song.mid"})).isError
+
+
+async def test_rename_track_and_unique_names(store):
+    await _call("create_chord_progression", {"chords": ["C", "G"], "filename": "song"})
+    added = await _call(
+        "add_track",
+        {
+            "filename": "song.mid",
+            "track_name": "Melody",
+            "notes": [{"pitch": "C5", "start_beat": 0, "beats": 1.0}],
+        },
+    )
+    source = added.structuredContent["filename"]
+
+    duplicate = await _call(
+        "add_track",
+        {
+            "filename": source,
+            "track_name": "Melody",
+            "notes": [{"pitch": "E5", "start_beat": 0, "beats": 1.0}],
+        },
+    )
+    assert duplicate.isError and "already exists" in duplicate.content[0].text
+
+    renamed = await _call("rename_track", {"filename": source, "track_name": "Melody", "new_name": "Lead"})
+    assert not renamed.isError, renamed.content[0].text
+    data = renamed.structuredContent
+    assert data["renamed_from"] == "Melody" and data["renamed_to"] == "Lead"
+    assert "Lead" in renderers.track_names(mido.MidiFile(store.root / data["filename"]))
+    assert "Melody" in renderers.track_names(mido.MidiFile(store.root / source))  # original kept
+
+    names = [name for name in renderers.track_names(mido.MidiFile(store.root / data["filename"])) if name]
+    other = next(name for name in names if name != "Lead")
+    to_existing = await _call(
+        "rename_track", {"filename": data["filename"], "track_name": "Lead", "new_name": other}
+    )
+    assert to_existing.isError and "already exists" in to_existing.content[0].text
+    missing = await _call(
+        "rename_track", {"filename": data["filename"], "track_name": "Nope", "new_name": "X"}
+    )
+    assert missing.isError and "No track named" in missing.content[0].text
 
 
 # ------------------------------------------------------------------ audio

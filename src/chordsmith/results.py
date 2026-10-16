@@ -192,6 +192,16 @@ class RemoveTrackResult(TypedDict):
     total_tracks: int
 
 
+class RenameTrackResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    renamed_from: str
+    renamed_to: str
+    total_tracks: int
+
+
 class DeleteResult(TypedDict):
     deleted: str
 

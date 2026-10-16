@@ -36,8 +36,8 @@ DESCRIPTION_BUDGET_BYTES = 26 * 1024
 # the states block on list_plugins detail; descriptions moved 22 -> 23 KB in the same patch)
 # and 24 KB (v0.25.0: import_tab — Guitar Pro/MusicXML conversion via MuseScore or the host
 # worker; one more tool and its description) and 272 KB (v0.28.0: project folders, the genre
-# presets and the add_bassline/add_drums tools; descriptions moved 24 -> 26 KB in the same
-# patch).
+# presets and the add_bassline/add_drums/rename_track tools; descriptions moved 24 -> 26 KB in
+# the same patch).
 # The surface grows with capabilities; keep new schemas lean.
 PAYLOAD_CEILING_BYTES = 272 * 1024
 
@@ -53,7 +53,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 41
+    assert len(tools) == 42
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

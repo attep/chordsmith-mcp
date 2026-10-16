@@ -568,6 +568,16 @@ def create_empty_file(
     }
 
 
+def _reject_duplicate_track(source: Path, track_name: str) -> None:
+    """Track names must stay unique: the by-name tools (specs, copy_from, remove) need it."""
+    names = renderers.track_names(mido.MidiFile(source))
+    if track_name in names:
+        raise ValueError(
+            f"A track named '{track_name}' already exists; pick another track_name or rename "
+            "the existing track with rename_track first."
+        )
+
+
 @mcp.tool(title="Remove track", annotations=CREATES)
 def remove_track(
     filename: Annotated[str, Field(description="Existing file to copy without the track.")],
@@ -603,6 +613,62 @@ def remove_track(
         "path": str(target),
         "uri": f"midi://{store.relative_name(target)}",
         "removed": track_name,
+        "total_tracks": len(midi.tracks),
+    }
+
+
+@mcp.tool(title="Rename track", annotations=CREATES)
+def rename_track(
+    filename: Annotated[str, Field(description="Existing file whose track to rename.")],
+    track_name: Annotated[str, Field(description="Current name of the track, e.g. 'Melody'.")],
+    new_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="New track name, e.g. 'Lead Guitar'.")
+    ],
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.RenameTrackResult:
+    """Write a copy of the file with one track renamed; the original is kept.
+
+    Track names must stay unique — the by-name tools (instrument specs, copy_from, remove_track)
+    depend on it — so renaming to an existing name is rejected and lookups match exactly.
+    Creates a new file like add_track (output_filename must differ from the source) and returns
+    the old and new names. The copy starts without the original's per-track instrument specs;
+    set them again with set_track_instrument.
+    """
+    source = store.existing_path(filename)
+    project = store.project_of(source)
+    midi = mido.MidiFile(source)
+    names = renderers.track_names(midi)
+    matches = [index for index, name in enumerate(names) if name == track_name]
+    if not matches:
+        available = ", ".join(name for name in names if name) or "(none)"
+        raise ValueError(f"No track named '{track_name}'. Tracks: {available}.")
+    if len(matches) > 1:
+        raise ValueError(f"Several tracks are named '{track_name}'; rename them first.")
+    if new_name != track_name and new_name in names:
+        raise ValueError(f"A track named '{new_name}' already exists; pick another name.")
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{new_name}", overwrite, project=project
+    ) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        track = midi.tracks[matches[0]]
+        renamed = False
+        for index, message in enumerate(track):
+            if message.type == "track_name":
+                track[index] = message.copy(name=new_name)
+                renamed = True
+                break
+        if not renamed:
+            track.insert(0, mido.MetaMessage("track_name", name=new_name, time=0))
+        midi.save(target)
+    return {
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+        "renamed_from": track_name,
+        "renamed_to": new_name,
         "total_tracks": len(midi.tracks),
     }
 
@@ -1121,7 +1187,9 @@ def _initial_time_signature(source: Path) -> tuple[int, int]:
 @mcp.tool(title="Add track", annotations=CREATES)
 def add_track(
     filename: Annotated[str, Field(description="Existing file to copy and extend.")],
-    track_name: Annotated[str, Field(description="Name of the new track, e.g. 'Melody'.")],
+    track_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="Name of the new track, e.g. 'Melody'.")
+    ],
     notes: Annotated[
         list[NoteInput] | None,
         Field(
@@ -1215,6 +1283,7 @@ def add_track(
     """
     source = store.existing_path(filename)
     project = store.project_of(source)
+    _reject_duplicate_track(source, track_name)
     with store.claimed_path(
         output_filename, f"{source.stem}_{track_name}", overwrite, project=project
     ) as target:
@@ -1307,7 +1376,9 @@ def add_track(
 @mcp.tool(title="Add bass line", annotations=CREATES)
 def add_bassline(
     filename: Annotated[str, Field(description="Existing MIDI file whose chords drive the bass line.")],
-    track_name: Annotated[str, Field(description="Name of the new bass track, e.g. 'Bass'.")] = "Bass",
+    track_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="Name of the new bass track, e.g. 'Bass'.")
+    ] = "Bass",
     style: Annotated[
         Literal["root", "root_fifth", "eighth_pulse", "octave", "walking"],
         Field(
@@ -1351,6 +1422,7 @@ def add_bassline(
     """
     source = store.existing_path(filename)
     project = store.project_of(source)
+    _reject_duplicate_track(source, track_name)
     windows, chord_source, symbols = _chord_windows(source)
     with store.claimed_path(
         output_filename, f"{source.stem}_{track_name}", overwrite, project=project
@@ -1386,7 +1458,9 @@ def add_bassline(
 @mcp.tool(title="Add drums", annotations=CREATES)
 def add_drums(
     filename: Annotated[str, Field(description="Existing MIDI file to add the drum track to.")],
-    track_name: Annotated[str, Field(description="Name of the new drum track.")] = "Drums",
+    track_name: Annotated[
+        str, Field(min_length=1, max_length=60, description="Name of the new drum track.")
+    ] = "Drums",
     pattern: Annotated[
         Literal[
             "four_on_floor",
@@ -1434,6 +1508,7 @@ def add_drums(
     """
     source = store.existing_path(filename)
     project = store.project_of(source)
+    _reject_duplicate_track(source, track_name)
     drum_pattern = grooves.DRUM_PATTERNS[pattern]
     resolved = sections.read_sections(source)
     if resolved:

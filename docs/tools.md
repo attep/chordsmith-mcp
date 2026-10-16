@@ -13,6 +13,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [add_drums](#add_drums)
 - [create_empty_file](#create_empty_file)
 - [remove_track](#remove_track)
+- [rename_track](#rename_track)
 - [set_song_sections](#set_song_sections)
 - [Song forms](#song-forms)
 - [bake_instruments](#bake_instruments)
@@ -328,14 +329,29 @@ tempo/meter map is written immediately, so [add_track](#add_track) can use `sect
 ## remove_track
 
 Writes a **copy** of a file without one track (the original is kept). The track is found by name
-(names must be unique; rename first if not). The per-track instrument sidecar belongs to the
-original, so the copy starts without specs.
+(names must be unique; rename with [rename_track](#rename_track) first if not). The per-track
+instrument sidecar belongs to the original, so the copy starts without specs.
 
 | Option | Description |
 |---|---|
 | `filename` (required) | Existing file in the output folder |
 | `track_name` (required) | Track to leave out, e.g. `"Chords"` |
 | `output_filename` | Default: `<name>_no_<track_name>` |
+| `overwrite` | Replace an existing copy |
+
+## rename_track
+
+Writes a **copy** of a file with one track renamed (the original is kept). Track names must stay
+unique — the by-name tools need it — so renaming to an existing name is rejected. The copy
+starts without the original's per-track instrument specs; set them again with
+[set_track_instrument](#set_track_instrument).
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing file in the output folder |
+| `track_name` (required) | Current name of the track, e.g. `"Melody"` |
+| `new_name` (required) | New name, e.g. `"Lead Guitar"` |
+| `output_filename` | Default: `<name>_<new_name>` |
 | `overwrite` | Replace an existing copy |
 
 ## set_song_sections
