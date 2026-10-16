@@ -5,6 +5,8 @@ A small web app for looking inside a running ChordSmith server and driving it by
 - **Dashboard**: server health, the MCP session, active render/mix/singing jobs with a
   per-track status matrix (refreshed every 1.5 s), and the MCP clients connected right now
   (a client that disconnects without saying goodbye drops off the list after about a minute).
+  **Click a client row** to see what it is doing: its recent requests, tool calls with a
+  compacted argument summary and the response status (keepalive pings are filtered).
 - **Tools**: every ChordSmith tool with a form built from its input schema. Run it and see
   the JSON result (errors are shown in red). Job IDs from results are kept in your browser,
   so they're still there after a reload.
@@ -140,3 +142,6 @@ npm run build       # production build in dist/
 
 `GET /api/status` (server side, in `src/chordsmith/manager.py`) returns the version, every
 job in the render/mix/singing registries with its progress, and the connected MCP sessions.
+`GET /api/sessions/{session_id}` returns one session in full: its row plus the recent
+requests and tool calls (with arguments and response status; pings are filtered). Both need
+the same bearer token as `/mcp` when the server has OAuth on.

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -35,6 +36,10 @@ CORS_ALLOW_HEADERS = [
 ]
 CORS_EXPOSE_HEADERS = ["mcp-session-id", "mcp-protocol-version", "www-authenticate"]
 MAX_INITIALIZE_BODY_BYTES = 64 * 1024
+MAX_ACTIVITY_BODY_BYTES = 64 * 1024
+ACTIVITY_LIMIT = 250
+# Keepalive noise: the manager pings every 15 s and clients send this after initialize.
+QUIET_METHODS = {"ping", "notifications/initialized"}
 # A session whose GET event stream closed (tab closed, client gone) and that sent nothing for
 # this long is no longer listed, even though the SDK keeps it until its idle timeout. The
 # manager UI pings well within this, so its own session stays listed if its stream drops.
@@ -113,20 +118,67 @@ def job_summaries() -> list[dict[str, Any]]:
 # ------------------------------------------------------------------ sessions
 
 
+def _shorten(value: Any, depth: int = 0) -> Any:
+    """A JSON-safe copy with long strings trimmed (base64 blobs must not flood the log)."""
+    if isinstance(value, str):
+        return value if len(value) <= 160 else f"<{len(value)} chars>"
+    if isinstance(value, dict) and depth < 4:
+        return {str(key): _shorten(child, depth + 1) for key, child in value.items()}
+    if isinstance(value, list) and depth < 4:
+        return [_shorten(child, depth + 1) for child in value[:20]]
+    return value
+
+
+def _compact_arguments(arguments: Any) -> str:
+    try:
+        text = json.dumps(_shorten(arguments), default=str)
+    except (TypeError, ValueError):
+        text = str(arguments)
+    return text[:600] + ("…" if len(text) > 600 else "")
+
+
+def _rpc_entry(body: bytes) -> dict[str, Any] | None:
+    """A log entry for one JSON-RPC request body ('tools/call' gets the tool and arguments)."""
+    if not body:
+        return {"method": "POST"}
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return {"method": "POST"}
+    if not isinstance(payload, dict):
+        return {"method": "POST"}
+    method = str(payload.get("method") or "POST")
+    entry: dict[str, Any] = {"method": method}
+    params = payload.get("params")
+    if method == "tools/call" and isinstance(params, dict):
+        entry["tool"] = params.get("name")
+        if params.get("arguments"):
+            entry["arguments"] = _compact_arguments(params["arguments"])
+    return entry
+
+
 class SessionTracker:
     """Raw ASGI middleware that remembers which MCP client opened each streamable-HTTP session.
 
     FastMCP does not expose its sessions' client info, so the tracker reads the (small)
     ``initialize`` request body, pairs it with the ``mcp-session-id`` response header, and
-    forgets the session on DELETE. Requests that already carry a session id are not buffered.
-    Open GET event streams are counted so sessions whose client went away without a DELETE
-    (e.g. a closed browser tab) can be left out.
+    forgets the session on DELETE. It also keeps a small per-session activity log (the recent
+    requests, tool calls and their arguments up to a cap, and the response status); keepalive
+    pings are counted but not logged. Open GET event streams are counted so sessions whose
+    client went away without a DELETE (e.g. a closed browser tab) can be left out.
     """
 
     def __init__(self, app, path: str):
         self.app = app
         self.path = path
         self.sessions: dict[str, dict[str, Any]] = {}
+
+    def _log(self, record: dict[str, Any], entry: dict[str, Any]) -> None:
+        if str(entry.get("method") or "") in QUIET_METHODS:
+            return
+        entry.setdefault("at", _iso(time.time()))
+        record.setdefault("activity", deque(maxlen=ACTIVITY_LIMIT)).append(entry)
+        record["last_activity_epoch"] = time.time()
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http" or scope.get("path") != self.path:
@@ -142,13 +194,34 @@ class SessionTracker:
                 record["requests"] += 1
                 if stream:
                     record["streams"] += 1
+                    self._log(record, {"method": "GET stream opened"})
+            if method == "POST" and record is not None:
+                body, replay = await _buffer(receive, MAX_ACTIVITY_BODY_BYTES)
+                entry = _rpc_entry(body)
+                status: list[int] = []
+
+                async def capture_status(message) -> None:
+                    if message["type"] == "http.response.start":
+                        status.append(int(message.get("status", 500)))
+                    await send(message)
+
+                try:
+                    await self.app(scope, replay, capture_status)
+                finally:
+                    if entry is not None:
+                        entry["status"] = status[0] if status else None
+                        self._log(record, entry)
+                return
             try:
                 await self.app(scope, receive, send)
             finally:
                 if stream:
                     record["streams"] -= 1
                     record["stream_closed_at"] = time.time()
+                    self._log(record, {"method": "GET stream closed"})
             if method == "DELETE":
+                if record is not None:
+                    self._log(record, {"method": "DELETE (client left)"})
                 self.sessions.pop(session_id, None)
             return
         if method != "POST":
@@ -168,7 +241,7 @@ class SessionTracker:
                 )
                 if new_id:
                     now = time.time()
-                    self.sessions[new_id] = {
+                    record = {
                         **client,
                         "connected_at": now,
                         "last_seen": now,
@@ -176,6 +249,10 @@ class SessionTracker:
                         "streams": 0,
                         "stream_closed_at": None,
                     }
+                    record["activity"] = deque(maxlen=ACTIVITY_LIMIT)
+                    record["last_activity_epoch"] = now
+                    self.sessions[new_id] = record
+                    self._log(record, {"method": "initialize", "status": message.get("status")})
             await send(message)
 
         await self.app(scope, replay, capture)
@@ -200,6 +277,8 @@ class SessionTracker:
                     "connected_at": _iso(record.get("connected_at")),
                     "last_seen": _iso(record.get("last_seen")),
                     "requests": record.get("requests"),
+                    "activity_count": len(record.get("activity") or ()),
+                    "last_activity": _iso(record.get("last_activity_epoch")),
                 }
             )
         rows.sort(key=lambda row: row["connected_at"] or "", reverse=True)
@@ -329,6 +408,36 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
                 "jobs": jobs,
                 "active_jobs": sum(1 for job in jobs if job["active"]),
                 "sessions": session_summary(mcp),
+            }
+        )
+
+    @mcp.custom_route("/api/sessions/{session_id}", methods=["GET"])
+    async def api_session(request: Request) -> Response:
+        """One tracked session in full: its row plus the recent request/tool-call activity."""
+        if not await _authorized(mcp, request):
+            return JSONResponse(
+                {"error": "Sign in first: send the MCP bearer token."},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+            )
+        session_id = request.path_params["session_id"]
+        record = _tracker.sessions.get(session_id) if _tracker is not None else None
+        if record is None:
+            live = _live_session_ids(mcp) or set()
+            if session_id not in live:
+                return JSONResponse({"error": "Unknown session."}, status_code=404)
+            record = {}
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "client_name": record.get("client_name"),
+                "client_version": record.get("client_version"),
+                "protocol_version": record.get("protocol_version"),
+                "connected_at": _iso(record.get("connected_at")),
+                "last_seen": _iso(record.get("last_seen")),
+                "requests": record.get("requests"),
+                "streams": record.get("streams"),
+                "activity": list(record.get("activity") or ()),
             }
         )
 

@@ -62,6 +62,11 @@ section h2 { font-size: 15px; margin: 22px 0 8px; display: flex; align-items: ce
 .table th, .table td, .matrix th, .matrix td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 tr.self td { background: #1f2a40; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--panel-2); }
+tr.selected td { background: #24304a; }
+.session-detail h2 { display: flex; align-items: center; gap: 10px; }
+.activity-args { display: inline-block; max-width: 640px; white-space: pre-wrap; word-break: break-all; color: var(--muted); }
 .matrix-wrap { overflow-x: auto; }
 .matrix th.track { writing-mode: horizontal-tb; white-space: nowrap; }
 .cell { text-align: center !important; font-size: 12px; min-width: 70px; }

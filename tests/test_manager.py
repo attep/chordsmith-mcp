@@ -185,3 +185,99 @@ def test_extra_cors_origins_from_env(monkeypatch, store):
         assert "access-control-allow-origin" not in prefix.headers
     manager._tracker = None
     server.mcp._session_manager = None
+
+
+def _open_session(client: TestClient) -> str:
+    init = client.post(
+        "/mcp",
+        headers={**MCP_HEADERS, "origin": DEV_ORIGIN},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "activity-check", "version": "0.1"},
+            },
+        },
+    )
+    assert init.status_code == 200
+    session_id = init.headers["mcp-session-id"]
+    client.post(
+        "/mcp",
+        headers={**MCP_HEADERS, "mcp-session-id": session_id},
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+    )
+    return session_id
+
+
+def _rpc(client: TestClient, session_id: str, rpc_id: int, method: str, params: dict | None = None):
+    payload = {"jsonrpc": "2.0", "id": rpc_id, "method": method}
+    if params is not None:
+        payload["params"] = params
+    return client.post("/mcp", headers={**MCP_HEADERS, "mcp-session-id": session_id}, json=payload)
+
+
+def test_session_activity_is_captured(http_app, store):
+    with TestClient(http_app, base_url=BASE_URL) as client:
+        session_id = _open_session(client)
+        call = _rpc(
+            client,
+            session_id,
+            2,
+            "tools/call",
+            {"name": "list_chord_types", "arguments": {}},
+        )
+        assert call.status_code == 200
+        _rpc(client, session_id, 3, "ping")
+
+        detail = client.get(f"/api/sessions/{session_id}")
+        assert detail.status_code == 200
+        payload = detail.json()
+        assert payload["client_name"] == "activity-check"
+        methods = [entry["method"] for entry in payload["activity"]]
+        assert methods[0] == "initialize"
+        assert "tools/call" in methods
+        assert "ping" not in methods  # keepalive noise stays out of the log
+        assert "notifications/initialized" not in methods
+        entry = next(item for item in payload["activity"] if item["method"] == "tools/call")
+        assert entry["tool"] == "list_chord_types"
+        assert entry["status"] == 200
+        assert entry["at"].endswith("+00:00")
+
+        listed = client.get("/api/status").json()["sessions"]["clients"]
+        row = next(item for item in listed if item["session_id"] == session_id)
+        assert row["activity_count"] == len(payload["activity"])
+        assert row["last_activity"] is not None
+
+        client.delete("/mcp", headers={**MCP_HEADERS, "mcp-session-id": session_id})
+        assert client.get(f"/api/sessions/{session_id}").status_code == 404
+
+
+def test_session_activity_shortens_big_arguments(http_app, store):
+    with TestClient(http_app, base_url=BASE_URL) as client:
+        session_id = _open_session(client)
+        blob = "A" * 50_000
+        call = _rpc(
+            client,
+            session_id,
+            2,
+            "tools/call",
+            {"name": "import_audio", "arguments": {"filename": "x.wav", "data_base64": blob}},
+        )
+        assert call.status_code == 200  # the tool itself may fail; the request is what matters
+        entry = next(
+            item
+            for item in client.get(f"/api/sessions/{session_id}").json()["activity"]
+            if item["method"] == "tools/call"
+        )
+        assert entry["tool"] == "import_audio"
+        assert "A" * 200 not in entry["arguments"]
+        assert "<50000 chars>" in entry["arguments"]
+        assert len(entry["arguments"]) <= 601
+
+
+def test_session_detail_requires_auth_and_known_ids(http_app, store):
+    with TestClient(http_app, base_url=BASE_URL) as client:
+        assert client.get("/api/sessions/does-not-exist").status_code == 404

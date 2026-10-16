@@ -30,6 +30,21 @@ export interface SessionRow {
   connected_at: string | null;
   last_seen: string | null;
   requests: number | null;
+  activity_count?: number;
+  last_activity?: string | null;
+}
+
+export interface SessionActivityEntry {
+  at: string;
+  method: string;
+  tool?: string | null;
+  arguments?: string | null;
+  status?: number | null;
+}
+
+export interface SessionDetail extends SessionRow {
+  streams: number | null;
+  activity: SessionActivityEntry[];
 }
 
 export interface Status extends Health {
@@ -51,3 +66,5 @@ async function getJson<T>(settings: Settings, path: string, token?: string): Pro
 
 export const getHealth = (settings: Settings, token?: string) => getJson<Health>(settings, "/healthz", token);
 export const getStatus = (settings: Settings, token?: string) => getJson<Status>(settings, "/api/status", token);
+export const getSession = (settings: Settings, sessionId: string, token?: string) =>
+  getJson<SessionDetail>(settings, `/api/sessions/${encodeURIComponent(sessionId)}`, token);

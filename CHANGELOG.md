@@ -10,6 +10,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
 long-running servers.
 
+## [0.32.0] - 2026-10-16
+
+See what a connected client is doing: the dashboard's client rows open a live activity log.
+
+### Added
+
+- **Per-client activity log**: the session tracker keeps a small log per MCP session — recent
+  requests, `tools/call` entries with the tool name and a compacted argument summary (long
+  strings like base64 blobs are elided) and the response status; keepalive pings and
+  `initialized` notifications are counted but not logged (250 entries per session).
+  `GET /api/sessions/{session_id}` returns one session in full (OAuth-guarded like
+  `/api/status`; 404 for unknown ids), and the manager UI's client rows are clickable to
+  watch the log live.
+
 ## [0.31.0] - 2026-10-16
 
 The manager UI: a browser dashboard for the server's jobs, files and tools, with session

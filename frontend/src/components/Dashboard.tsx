@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { getHealth, getStatus, type Health, type Status } from "../lib/api";
+import { getHealth, getSession, getStatus, type Health, type SessionDetail, type Status } from "../lib/api";
 import { useApp, usePolling } from "../lib/context";
 import { isFinal, JOB_TOOLS, type JobKind } from "../lib/jobs";
 import { resultData } from "../lib/mcp";
@@ -53,6 +53,9 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
   const [details, setDetails] = useState<Record<string, ToolDetail>>({});
   const [showFinished, setShowFinished] = useState(true);
   const [lastPoll, setLastPoll] = useState<Date | null>(null);
+  const [selectedSession, setSelectedSession] = useState<string | null>(null);
+  const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
 
   usePolling(
     async () => {
@@ -105,6 +108,21 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
     );
     setLastPoll(new Date());
   }, settings.pollMs);
+
+  usePolling(
+    async () => {
+      if (!selectedSession) return;
+      try {
+        setSessionDetail(await getSession(settings, selectedSession, await getToken()));
+        setSessionError(null);
+      } catch (error) {
+        setSessionDetail(null);
+        setSessionError(String(error instanceof Error ? error.message : error));
+      }
+    },
+    settings.pollMs,
+    Boolean(selectedSession),
+  );
 
   const rows = useMemo<JobRow[]>(() => {
     const byId = new Map<string, JobRow>();
@@ -223,7 +241,20 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
           </thead>
           <tbody>
             {(sessions?.clients ?? []).map((client) => (
-              <tr key={client.session_id} className={client.session_id === connection?.sessionId ? "self" : ""}>
+              <tr
+                key={client.session_id}
+                className={[
+                  client.session_id === connection?.sessionId ? "self" : "",
+                  "clickable",
+                  client.session_id === selectedSession ? "selected" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onClick={() =>
+                  setSelectedSession((current) => (current === client.session_id ? null : client.session_id))
+                }
+                title="Click to see what this client is doing"
+              >
                 <td>
                   {client.client_name ?? "unknown"} {client.client_version}
                   {client.session_id === connection?.sessionId && <span className="badge">this tab</span>}
@@ -240,6 +271,60 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
           </tbody>
         </table>
       </section>
+
+      {selectedSession && (
+        <section className="session-detail">
+          <h2>
+            Client activity — {sessionDetail?.client_name ?? "unknown"}{" "}
+            {sessionDetail?.client_version ?? ""}
+            <button type="button" className="small" onClick={() => {
+              setSelectedSession(null);
+              setSessionDetail(null);
+              setSessionError(null);
+            }}>
+              close
+            </button>
+          </h2>
+          <p className="muted small-text">
+            session <code>{selectedSession}</code>
+            {sessionDetail?.requests != null ? ` · ${sessionDetail.requests} requests` : ""}
+            {sessionDetail?.last_seen ? ` · last seen ${new Date(sessionDetail.last_seen).toLocaleTimeString()}` : ""}
+          </p>
+          {sessionError && <div className="banner error">{sessionError}</div>}
+          {sessionDetail && sessionDetail.activity.length === 0 && (
+            <p className="muted">No activity recorded yet.</p>
+          )}
+          {sessionDetail && sessionDetail.activity.length > 0 && (
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Request</th>
+                  <th>Details</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...sessionDetail.activity].reverse().map((entry, index) => (
+                  <tr key={`${entry.at}-${index}`}>
+                    <td>{new Date(entry.at).toLocaleTimeString()}</td>
+                    <td>
+                      <code>
+                        {entry.method}
+                        {entry.tool ? ` → ${entry.tool}` : ""}
+                      </code>
+                    </td>
+                    <td>
+                      <code className="activity-args">{entry.arguments ?? ""}</code>
+                    </td>
+                    <td>{entry.status ?? "–"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
     </div>
   );
 }
