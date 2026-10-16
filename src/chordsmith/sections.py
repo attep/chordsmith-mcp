@@ -57,7 +57,7 @@ class ResolvedSection:
     def total_beats(self) -> float:
         return self.bars * self.beats_per_bar
 
-    def payload(self) -> dict:
+    def payload(self) -> results.SectionEntry:
         return {
             "name": self.name,
             "start_beat": round(self.start_beat, 3),

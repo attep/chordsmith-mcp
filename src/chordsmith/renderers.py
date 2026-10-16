@@ -1163,8 +1163,7 @@ def _validate_vst(source: Path, spec: InstrumentSpec) -> None:
     if spec.reverb_send is not None or spec.chorus_send is not None:
         raise RenderError(
             "'reverb_send'/'chorus_send' drive FluidSynth's engine effects; a vst track has "
-            "none — use a VST reverb effect with a dry/wet (e.g. Fame Studio Reverb) or the "
-            "chain's 'reverb' stage."
+            "none — use a VST reverb effect with a dry/wet or the chain's 'reverb' stage."
         )
     if spec.sections:
         resolved = read_sections(source)

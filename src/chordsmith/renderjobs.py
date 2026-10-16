@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import mido
 from mcp.server.fastmcp import FastMCP
@@ -47,7 +47,7 @@ class RenderJob:
     created_at: float
     progress: dict[str, str] = field(default_factory=dict)  # track -> pending/running/done/failed
     errors: dict[str, str] = field(default_factory=dict)
-    result: dict | None = None
+    result: results.RenderAudioResult | None = None
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -135,9 +135,9 @@ def _prune() -> None:
         _persist()
 
 
-def _payload(job: RenderJob) -> dict:
+def _payload(job: RenderJob) -> results.RenderJobResult:
     with job.lock:
-        progress = [
+        progress: list[results.RenderJobTrack] = [
             {"track": track, "state": state, "error": job.errors.get(track)}
             for track, state in job.progress.items()
         ]
@@ -153,7 +153,7 @@ def _payload(job: RenderJob) -> dict:
 def _run(job: RenderJob, runner, args: dict) -> None:
     job.status = "running"
     try:
-        job.result = runner(args, job.set_state)
+        job.result = cast(results.RenderAudioResult, runner(args, job.set_state))
         job.status = "done"
     except Exception as exc:  # the job must never die silently
         job.error = str(exc)

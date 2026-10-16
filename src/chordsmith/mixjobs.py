@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -54,7 +54,7 @@ class MixJob:
     created_at: float
     progress: dict[str, str] = field(default_factory=dict)  # track/phase -> pending/running/done/failed
     errors: dict[str, str] = field(default_factory=dict)
-    result: dict | None = None
+    result: results.MixResult | None = None
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -142,9 +142,9 @@ def _prune() -> None:
         _persist()
 
 
-def _payload(job: MixJob) -> dict:
+def _payload(job: MixJob) -> results.MixJobResult:
     with job.lock:
-        progress = [
+        progress: list[results.RenderJobTrack] = [
             {"track": name, "state": state, "error": job.errors.get(name)}
             for name, state in job.progress.items()
         ]
@@ -161,7 +161,7 @@ def _run(job: MixJob, runner, args: dict) -> None:
     job.status = "running"
     _persist()
     try:
-        job.result = runner(args, job.set_state)
+        job.result = cast(results.MixResult, runner(args, job.set_state))
         job.status = "done"
     except Exception as exc:  # the job must never die silently
         job.error = str(exc)

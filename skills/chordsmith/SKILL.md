@@ -175,7 +175,8 @@ say so.
 
 - Verse/chorus songs: 8-bar sections, a rest at phrase ends (breaths), cymbals kept out from under
   the vocal (or `ducking: true`).
-- Soft singing: `diffsinger:hanami/nectar`, `gender: 0`, `seed` fixed for fair A/B comparisons.
+- Soft singing: the softest variant of the configured voicebank (e.g. Hanami's `nectar` when
+  `diffsinger:hanami/*` is installed), `gender: 0`, `seed` fixed for fair A/B comparisons.
 - For a lullaby-quiet mix: `loudness_target_lufs` around −18 and a reverb `returns` room of a few
   seconds; keep `vocal_level_db` modest (0–3) instead of pushing the voice forward.
 

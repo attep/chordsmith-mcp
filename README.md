@@ -99,8 +99,10 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `transpose_midi` | Moves a file up/down, or from one key to another |
 | `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key — with Roman numerals per chord |
 | `explain_progression` | Deterministic theory for a progression: numerals, functions, cadences, variation ideas |
-| `list_generated_files` | Lists the files you've made |
+| `list_generated_files` | Lists the files you've made, grouped by project folder |
 | `import_midi` | Imports a MIDI file made elsewhere (base64) and reports what it contains |
+| `import_audio` | Imports a vocal take or render made elsewhere (`.wav`/`.mp3`) |
+| `create_empty_file` / `remove_track` | Builds a song from scratch (optionally with a section map) / drops a track in a copy |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |
 | `export_musicxml` | Converts a MIDI file to a MusicXML score for MuseScore/Finale/Sibelius (local MuseScore or the host worker) |
 | `delete_midi_file` / `rename_midi_file` / `rename_track` | Tidies up files and track names |
@@ -192,9 +194,10 @@ Contributions are welcome — these are the areas where help is wanted most:
   tool that returns the theory (numerals, function, cadences, variations)
 - **Mastering & plugin states**: a master-bus plugin chain with loudness targeting, and
   automated plugin-state generation (parameter sweeps → named states)
-- **Project hygiene**: CONTRIBUTING/SECURITY docs, pre-commit hooks, stricter typing
 
 The [CHANGELOG](CHANGELOG.md) tracks what has shipped; releases follow semantic versioning.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, checks and guidelines, and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Development
 

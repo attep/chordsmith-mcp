@@ -39,8 +39,9 @@ class TokenBucketLimiter:
     def allow(self, key: str) -> tuple[bool, float]:
         """Take one token for ``key``; returns (allowed, retry_after_seconds)."""
         now = time.monotonic()
-        tokens, stamp = self.buckets.get(key, (float(self.burst), now))
-        tokens = min(float(self.burst), tokens + (now - stamp) * self.rate_per_minute / 60.0)
+        burst = float(self.burst) if self.burst is not None else float(max(1, self.rate_per_minute // 2))
+        tokens, stamp = self.buckets.get(key, (burst, now))
+        tokens = min(burst, tokens + (now - stamp) * self.rate_per_minute / 60.0)
         if tokens >= 1.0:
             self.buckets[key] = (tokens - 1.0, now)
             return True, 0.0

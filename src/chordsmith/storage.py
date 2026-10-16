@@ -317,7 +317,7 @@ class FileStore:
                         ),
                     }
                 )
-        files.sort(key=lambda entry: entry["modified"], reverse=True)
+        files.sort(key=lambda entry: str(entry["modified"]), reverse=True)
         return files
 
     def list_projects(self) -> list[dict]:
@@ -362,4 +362,4 @@ class FileStore:
             info["created"] = manifest.get("created")
             if manifest.get("title"):
                 info["title"] = manifest["title"]
-        return sorted(projects.values(), key=lambda item: item["last_modified"] or "", reverse=True)
+        return sorted(projects.values(), key=lambda item: str(item["last_modified"] or ""), reverse=True)

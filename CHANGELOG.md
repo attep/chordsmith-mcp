@@ -22,9 +22,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   notation apps open real notation instead of a raw MIDI import. The bridge's `/tab` endpoint
   takes a `target` for score output; notation from MIDI is approximate (quantised rhythms,
   chord markers as text).
+- **Project hygiene**: CONTRIBUTING.md and SECURITY.md, a `.pre-commit-config.yaml` (ruff +
+  mypy) and a curated mypy module set in `pyproject.toml` (the pydantic plugin understands
+  model defaults; the list grows as modules get clean). `dev` installs now include mypy.
 
-Planned: a master-bus plugin chain with plugin-state generation, quotas (bars, tracks, file
-size, storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY, pre-commit, mypy).
+Planned: a master-bus plugin chain with plugin-state generation and quotas (bars, tracks,
+file size, storage, TTL).
 
 ## [0.28.0] - 2026-10-16
 
