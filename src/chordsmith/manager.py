@@ -36,8 +36,9 @@ CORS_ALLOW_HEADERS = [
 CORS_EXPOSE_HEADERS = ["mcp-session-id", "mcp-protocol-version", "www-authenticate"]
 MAX_INITIALIZE_BODY_BYTES = 64 * 1024
 # A session whose GET event stream closed (tab closed, client gone) and that sent nothing for
-# this long is no longer listed, even though the SDK keeps it until it times out.
-STREAM_GRACE_SECONDS = 10
+# this long is no longer listed, even though the SDK keeps it until its idle timeout. The
+# manager UI pings well within this, so its own session stays listed if its stream drops.
+STREAM_GRACE_SECONDS = 60
 ACTIVE_STATES = ("queued", "running")
 
 

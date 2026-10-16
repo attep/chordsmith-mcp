@@ -22,6 +22,8 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+const KEEPALIVE_MS = 15_000;
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [connection, setConnection] = useState<McpConnection | null>(null);
@@ -61,6 +63,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (current) void current.close();
     };
   }, [settings.serverUrl, settings.mcpPath, settings.bearerToken, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!connection) return;
+    const timer = window.setInterval(() => void connection.ping().catch(() => undefined), KEEPALIVE_MS);
+    return () => window.clearInterval(timer);
+  }, [connection]);
 
   useEffect(() => {
     const onPageHide = () => connectionRef.current?.abandon();

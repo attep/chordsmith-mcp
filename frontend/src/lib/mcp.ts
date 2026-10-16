@@ -25,6 +25,11 @@ export class McpConnection {
     return new McpConnection(client, transport, endpoint, headers);
   }
 
+  /** Keeps the session marked active on the server (its event stream alone can drop). */
+  async ping(): Promise<void> {
+    await this.client.ping();
+  }
+
   /** Best-effort session DELETE while the page unloads; a keepalive fetch outlives the page. */
   abandon(): void {
     const sessionId = this.transport.sessionId;

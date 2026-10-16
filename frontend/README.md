@@ -4,7 +4,7 @@ A small web app for looking inside a running ChordSmith server and driving it by
 
 - **Dashboard**: server health, the MCP session, active render/mix/singing jobs with a
   per-track status matrix (refreshed every 1.5 s), and the MCP clients connected right now
-  (a client that disconnects without saying goodbye drops off the list after about 10 s).
+  (a client that disconnects without saying goodbye drops off the list after about a minute).
 - **Tools**: every ChordSmith tool with a form built from its input schema. Run it and see
   the JSON result (errors are shown in red). Job IDs from results are kept in your browser,
   so they're still there after a reload.
