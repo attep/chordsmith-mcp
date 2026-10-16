@@ -159,6 +159,7 @@ your file has several. See [docs/singing.md](docs/singing.md).
 6. [Troubleshooting](docs/troubleshooting.md): common problems and fixes
 7. [Architecture](docs/architecture.md): how the deterministic server and the LLM fit together
 8. [Development](docs/development.md): running tests and the project layout
+9. [Manager UI](frontend/README.md): the optional browser dashboard for jobs, files and tools
 
 ## Use it as an agent skill (Copilot, Claude)
 

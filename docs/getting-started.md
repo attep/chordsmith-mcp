@@ -199,6 +199,7 @@ ChordSmith reads these optional environment variables:
 | `CHORDSMITH_PUBLIC_URL` | local URL | Public `https://` URL when running online, e.g. `https://chordsmith.example.com` |
 | `CHORDSMITH_AUTH_PASSWORD` | random, printed in logs | Password for the OAuth sign-in page (HTTP transports) |
 | `CHORDSMITH_AUTH` | on for HTTP | `off` disables OAuth |
+| `CHORDSMITH_CORS_ORIGINS` | unset | Extra comma-separated browser origins allowed besides `localhost`/`127.0.0.1` (for the [manager UI](../frontend/README.md)) |
 | `CHORDSMITH_STATE_DIR` | `~/.chordsmith` | Where OAuth clients and tokens are stored (Docker: `/state`) |
 | `CHORDSMITH_SFZ_DIR` | unset | Folder whose `.sfz` instruments `list_instruments` lists (Docker: `/sfz`, mounted read-only) |
 | `CHORDSMITH_VST_DIR` | unset | Folder whose `.vst3` plugins `list_plugins` lists (Docker: `/vst`, mounted read-only) |

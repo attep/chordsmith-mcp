@@ -41,6 +41,7 @@ Consequences:
 | `analysis.py` | Simple chord/key detection for `analyze_midi` (marker-aware) |
 | `storage.py` | The output-folder sandbox: name cleaning, path containment, listing |
 | `delivery.py` | Signed, expiring download URLs for tool-only clients |
+| `manager.py` | `GET /api/status` (jobs and MCP sessions) and localhost CORS for the `frontend/` manager UI |
 | `audio.py` | FluidSynth/ffmpeg rendering of MIDI to wav/mp3 |
 | `renderers.py` | Per-track rendering: the Renderer protocol, FluidSynth engine, instrument specs |
 | `soundfont.py` | SoundFont (.sf2) preset inventory: names/banks/programs from the pdta/phdr table |

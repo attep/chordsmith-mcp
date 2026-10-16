@@ -4,6 +4,7 @@
 .pytest_cache
 .ruff_cache
 host/build
+frontend
 data
 downloads
 state

@@ -34,6 +34,7 @@ from chordsmith import (
     forms,
     grooves,
     harmony,
+    manager,
     mastering,
     mixjobs,
     renderers,
@@ -244,7 +245,7 @@ RhythmOption = Annotated[
 @mcp.custom_route("/healthz", methods=["GET"])
 async def health_check(_request: Request) -> Response:
     """Liveness probe for container platforms (includes the running version)."""
-    return JSONResponse({"status": "ok", "version": __version__})
+    return JSONResponse(manager.health_payload())
 
 
 @mcp.custom_route("/files/{path:path}", methods=["GET"])
@@ -2239,6 +2240,28 @@ renderers.register(mcp, lambda: store)
 sections.register(mcp, lambda: store)
 renderjobs.register(mcp, lambda: store, _run_audio_job)
 mixjobs.register(mcp, lambda: store, singing.run_mix)
+manager.register(mcp, lambda: store)
+
+
+def build_http_app(rate_limit: int = 0, auth_rate_limit: int = 0, trust_proxy: bool = False):
+    """The streamable-HTTP ASGI app: MCP endpoint and routes, rate limits, sessions, CORS."""
+    from chordsmith.ratelimit import (
+        AUTH_ENDPOINT_PATHS,
+        RateLimitMiddleware,
+        TokenBucketLimiter,
+    )
+
+    app = mcp.streamable_http_app()
+    limiters: dict[str, TokenBucketLimiter] = {}
+    if rate_limit > 0:
+        limiters[mcp.settings.streamable_http_path] = TokenBucketLimiter(rate_limit)
+    if auth_rate_limit > 0:
+        auth_limiter = TokenBucketLimiter(auth_rate_limit)
+        for path in AUTH_ENDPOINT_PATHS:
+            limiters[path] = auth_limiter
+    if limiters:
+        app = RateLimitMiddleware(app, limiters, trust_proxy=trust_proxy)
+    return manager.wrap_http_app(app, mcp.settings.streamable_http_path, manager.cors_origins_from_env())
 
 
 def main() -> None:
@@ -2275,9 +2298,6 @@ def main() -> None:
         import uvicorn
 
         from chordsmith.ratelimit import (
-            AUTH_ENDPOINT_PATHS,
-            RateLimitMiddleware,
-            TokenBucketLimiter,
             auth_rate_limit_from_env,
             rate_limit_from_env,
             trust_proxy_from_env,
@@ -2289,20 +2309,13 @@ def main() -> None:
         except ValueError as exc:
             parser.error(str(exc))
         trust_proxy = trust_proxy_from_env()
-        app = mcp.streamable_http_app()
-        limiters: dict[str, TokenBucketLimiter] = {}
         if limit > 0:
             logger.info("Rate limit: %d requests per minute per client.", limit)
-            limiters[mcp.settings.streamable_http_path] = TokenBucketLimiter(limit)
         if auth_limit > 0:
             logger.info("OAuth endpoint rate limit: %d requests per minute per client.", auth_limit)
-            auth_limiter = TokenBucketLimiter(auth_limit)
-            for path in AUTH_ENDPOINT_PATHS:
-                limiters[path] = auth_limiter
         if trust_proxy:
             logger.info("Trusting proxy client-IP headers for rate-limit keys (CHORDSMITH_TRUST_PROXY).")
-        if limiters:
-            app = RateLimitMiddleware(app, limiters, trust_proxy=trust_proxy)
+        app = build_http_app(limit, auth_limit, trust_proxy)
         uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
         return
     mcp.run(transport=args.transport)

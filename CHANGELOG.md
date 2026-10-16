@@ -10,6 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
 long-running servers.
 
+### Added
+
+- `frontend/`: a standalone Vite + React manager UI (dashboard, tool runner, files, Ollama
+  assistant). See [frontend/README.md](frontend/README.md).
+- `GET /api/status` lists render, mix and singing jobs with their per-track progress, plus the
+  connected MCP sessions. It needs the same bearer token as `/mcp` when OAuth is on.
+- HTTP transports answer CORS requests from `localhost`/`127.0.0.1` origins (any port);
+  `CHORDSMITH_CORS_ORIGINS` adds more.
+
 ## [0.30.0] - 2026-10-16
 
 Mastered renders and headless plugin states: a mix can hit a streaming loudness target, and
