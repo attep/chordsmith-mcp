@@ -16,6 +16,7 @@ pytest -q                   # run all tests
 ruff check src tests        # lint
 ruff format src tests       # format
 mypy                        # typing for the curated module set (see pyproject.toml)
+cd frontend && npm ci && npm test && npm run build   # manager UI checks (Node 22)
 chordsmith-mcp              # run the server on stdio (waits for a client; Ctrl+C to stop)
 npx @modelcontextprotocol/inspector .venv/bin/chordsmith-mcp   # try tools in a browser
 docker build -t chordsmith-mcp .                                # build the Docker image
@@ -53,6 +54,7 @@ src/chordsmith/
   ratelimit.py        Per-client rate limiting for the MCP and OAuth endpoints
   auth.py             OAuth 2.1 authorization server (sign-in page, tokens) for HTTP transports
   offload.py          Runs long tool bodies on worker threads
+frontend/             The manager UI (Vite + React): jobs dashboard, tool runner, files, Ollama
 tests/                pytest suite, including end-to-end tests through a real MCP client session
 ```
 

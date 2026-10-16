@@ -10,6 +10,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
 long-running servers.
 
+## [0.31.0] - 2026-10-16
+
+The manager UI: a browser dashboard for the server's jobs, files and tools, with session
+tracking and localhost CORS on the HTTP transport.
+
 ### Added
 
 - `frontend/`: a standalone Vite + React manager UI (dashboard, tool runner, files, Ollama
@@ -18,6 +23,7 @@ long-running servers.
   connected MCP sessions. It needs the same bearer token as `/mcp` when OAuth is on.
 - HTTP transports answer CORS requests from `localhost`/`127.0.0.1` origins (any port);
   `CHORDSMITH_CORS_ORIGINS` adds more.
+- A CI job runs the frontend's `npm ci`, vitest suite and `tsc` build.
 
 ## [0.30.0] - 2026-10-16
 
