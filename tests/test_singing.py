@@ -765,7 +765,7 @@ def test_delay_ms_resolves_tempo_sync():
 
 
 def test_limiter_filter_uses_a_linear_ceiling_and_no_auto_level():
-    assert singing._limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false:latency=true"
+    assert singing.limiter_filter(-1.0) == "alimiter=limit=0.891251:level=false:latency=true"
 
 
 @pytest.mark.skipif(not _ffmpeg_ready(), reason="ffmpeg is not installed")

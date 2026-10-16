@@ -105,6 +105,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `create_empty_file` / `remove_track` | Builds a song from scratch (optionally with a section map) / drops a track in a copy |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |
 | `export_musicxml` | Converts a MIDI file to a MusicXML score for MuseScore/Finale/Sibelius (local MuseScore or the host worker) |
+| `generate_plugin_states` | Sweeps plugin parameters headlessly into named states (no GUI sessions) |
 | `delete_midi_file` / `rename_midi_file` / `rename_track` | Tidies up files and track names |
 | `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or DiffSinger voicebanks — English and exact phonemes; several banks with their own variants, male and female) and mixes it with the backing |
 
@@ -189,11 +190,6 @@ Contributions are welcome — these are the areas where help is wanted most:
 
 - **Limits & hardening**: quotas (bars/tracks/file size/storage) and a storage TTL cleanup for
   long-running servers (per-client rate limiting shipped in v0.6.0)
-- **Interchange**: MusicXML export for MuseScore
-- **Analysis**: Roman-numeral analysis relative to the detected key, and an `explain_progression`
-  tool that returns the theory (numerals, function, cadences, variations)
-- **Mastering & plugin states**: a master-bus plugin chain with loudness targeting, and
-  automated plugin-state generation (parameter sweeps → named states)
 
 The [CHANGELOG](CHANGELOG.md) tracks what has shipped; releases follow semantic versioning.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, checks and guidelines, and

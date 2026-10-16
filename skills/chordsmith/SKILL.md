@@ -51,7 +51,10 @@ say so.
 5. **Render**: `render_audio` for short pieces, or `render_audio_job` for long songs (poll
    `get_render_job`; per-track progress, retry). `stems: true` renders per-track files;
    `normalize_peak_db` (default `null` = raw engine level; set −1 for a listening-ready peak)
-   sets the export peak; `reverb`/`chorus` switch the engine's effects on.
+   sets the export peak; `reverb`/`chorus` switch the engine's effects on. For a
+   distribution-ready mix: `master_effects` (VST bus chain, e.g. EQ → glue → saturation) then
+   `master` (`{"loudness_target_lufs": -14, "limiter": {"enabled": true}}` is the streaming
+   master; it supersedes `normalize_peak_db`).
 6. **Verify**: `analyze_midi` reports key, chords, tempo changes, sections and duration.
 
 ## Workflow 2 — a sung song (the flagship)
@@ -82,7 +85,8 @@ say so.
 - **Compose**: `create_chord_progression`, `create_progression_from_roman`, `add_track`,
   `add_bassline`, `add_drums`, `transpose_midi`, `set_song_sections`, `list_chord_types`
 - **Instruments & render**: `set_track_instrument`, `list_instruments`, `bake_instruments`,
-  `render_audio`, `render_audio_job`, `get_render_job`, `list_render_jobs`
+  `render_audio`, `render_audio_job`, `get_render_job`, `list_render_jobs`,
+  `generate_plugin_states`
 - **Singing**: `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`,
   `render_singing`, `get_singing_job`, `list_singing_jobs`, `mix_song_with_vocals`,
   `export_vocal_song`
@@ -130,8 +134,10 @@ say so.
   `effects`. **GUI-only plugins** (TONEX tones, Guitar Rig rigs, SampleTank/Syntronik patches)
   need a one-time **state capture**: `open_plugin_state_editor` opens their UI on a desktop
   server; loading the sound and closing the window saves a state file to pass as `plugin_state`
-  (instrument) or effect `state` — renders then load it headless, and TONEX/Guitar Rig captures
-  are verified working (they ignore their standalone apps when hosted). A server can also run
+   (instrument) or effect `state` — renders then load it headless, and TONEX/Guitar Rig captures
+   are verified working (they ignore their standalone apps when hosted). Parameter-driven plugins
+   can skip the GUI entirely: `generate_plugin_states` sweeps a grid of parameter values into
+   named states (`<prefix>_1`…, max 32 combinations; each loads the plugin). A server can also run
   **without** the plugins: with the Windows bridge worker (`scripts/vst_bridge.py` +
   `CHORDSMITH_VST_BRIDGE_URL`) one endpoint lists and renders them over the network. AmpliTube
   CS demo gear adds white-noise bursts — prefer licensed T-RackS v6 modules or a built-in

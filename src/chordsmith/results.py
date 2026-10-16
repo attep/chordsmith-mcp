@@ -289,6 +289,16 @@ class FailedTrack(TypedDict):
     error: str
 
 
+class MasterReport(TypedDict, total=False):
+    """The render's master stage: measurements and warnings (mirrors the mix tools)."""
+
+    loudness: LoudnessInfo | None
+    limiter_reduction_db: float | None
+    gain_correction_db: float | None
+    peak_db: float | None
+    warnings: list[str]
+
+
 class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     source: str | None
     duration_seconds: float | None
@@ -298,6 +308,7 @@ class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     effects: EffectsEntry | None
     failed: list[FailedTrack] | None
     stems: list[StemEntry] | None
+    master: MasterReport | None
 
 
 class RenderJobTrack(TypedDict):

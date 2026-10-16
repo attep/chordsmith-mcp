@@ -34,6 +34,7 @@ from chordsmith import (
     forms,
     grooves,
     harmony,
+    mastering,
     mixjobs,
     renderers,
     renderjobs,
@@ -53,6 +54,7 @@ from chordsmith.models import (
     ChorusSettings,
     Humanize,
     LoopSpec,
+    MasterSettings,
     NoteInput,
     NumeralEvent,
     PatternRow,
@@ -1768,6 +1770,22 @@ def render_audio(
             "speed, depth. Engine-wide for the render instance, not per track."
         ),
     ] = None,
+    master_effects: Annotated[
+        list[renderers.EffectPlugin] | None,
+        Field(
+            description="VST effect chain for the whole mix (mastering): runs over the combined "
+            "stem mix (or the single-pass render) after the tracks. Needs the VST host, like "
+            "per-track effects; states/params work the same. The stems themselves stay dry."
+        ),
+    ] = None,
+    master: Annotated[
+        MasterSettings | None,
+        Field(
+            description="Optional master stage on the mix: a true-peak limiter and/or an EBU "
+            "R128 loudness target (one static gain; supersedes normalize_peak_db). The streaming "
+            "master is {'loudness_target_lufs': -14, 'limiter': {'enabled': true}}."
+        ),
+    ] = None,
     output_filename: FileName = None,
     expires_in: Annotated[
         int, Field(ge=30, le=delivery.MAX_TTL_SECONDS, description="Download link lifetime in seconds.")
@@ -1787,8 +1805,11 @@ def render_audio(
     only the combined mix follows normalize_peak_db. Reverb/chorus are off by default (renders
     stay byte-identical); with them on the engine's tail past the last note is kept, and note
     that they are engine-wide per render instance — with stems every stem is rendered wet, so
-    summing wet stems is not identical to one wet pass. On failure a clear error explains what
-    is missing and no file is left behind.
+    summing wet stems is not identical to one wet pass. ``master_effects`` runs a VST chain over
+    the combined mix (mastering), and ``master`` finishes it: a true-peak limiter and/or an
+    EBU R128 loudness target (one static gain; supersedes normalize_peak_db); the result's
+    ``master`` block reports the measurements and warnings. On failure a clear error explains
+    what is missing and no file is left behind.
     """
     source = store.existing_path(filename)
     if not stems:
@@ -1809,6 +1830,8 @@ def render_audio(
             soundfont,
             normalize_peak_db,
             effects,
+            master_effects=master_effects,
+            master=master,
         )
         result["effects"] = effects_echo
         return result
@@ -1823,6 +1846,8 @@ def render_audio(
         normalize_peak_db,
         effects,
         effects_echo,
+        master_effects=master_effects,
+        master=master,
     )
 
 
@@ -1848,8 +1873,11 @@ def _render_single(
     normalize_peak_db: float | None,
     effects: dict[str, float | int] | None,
     effects_echo: dict[str, Any],
+    master_effects: list[renderers.EffectPlugin] | None = None,
+    master: MasterSettings | None = None,
 ) -> dict[str, Any]:
     """One FluidSynth pass over the whole file, delivered like get_midi_file."""
+    master_report: dict | None = None
     with store.claimed_path(
         output_filename or source.stem,
         f"{source.stem}_{audio_format}",
@@ -1858,8 +1886,26 @@ def _render_single(
         project=store.project_of(source),
     ) as target:
         try:
-            correction = audio.render(source, target, audio_format, soundfont, normalize_peak_db, effects)
-        except audio.AudioError as exc:
+            if master_effects or master is not None:
+                with tempfile.TemporaryDirectory() as render_scratch:
+                    working = Path(render_scratch) / "render.wav"
+                    audio.render(source, working, "wav", soundfont, None, effects)
+                    correction = 0.0
+                    if master_effects:
+                        renderers.apply_stem_effects(working, master_effects)
+                    if master is not None:
+                        master_report = mastering.apply_master(working, master)
+                    if normalize_peak_db is not None and (
+                        master is None or master.loudness_target_lufs is None
+                    ):
+                        correction = audio.normalize_wav(working, normalize_peak_db)
+                    if audio_format == "mp3":
+                        singing.to_mp3(working, target)
+                    else:
+                        shutil.copyfile(working, target)
+            else:
+                correction = audio.render(source, target, audio_format, soundfont, normalize_peak_db, effects)
+        except (audio.AudioError, renderers.RenderError) as exc:
             raise ValueError(str(exc)) from None
     data = target.read_bytes()
     result = delivery.deliver_file(store.relative_name(target), data, return_as, expires_in)
@@ -1867,6 +1913,7 @@ def _render_single(
     result["source"] = store.relative_name(source)
     result["gain_correction_db"] = correction
     result["effects"] = effects_echo
+    result["master"] = master_report
     if audio_format == "wav":
         peak = audio.wav_peak_db(target)
         result["peak_db"] = round(peak, 2)
@@ -1903,6 +1950,8 @@ def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
             only_tracks=only_tracks,
             progress=set_state,
             continue_on_error=True,
+            master_effects=args.get("master_effects"),
+            master=args.get("master"),
         )
         result["effects"] = effects_echo
         return result
@@ -1917,6 +1966,8 @@ def _run_audio_job(args: dict[str, Any], set_state) -> dict[str, Any]:
         args.get("normalize_peak_db"),
         effects,
         effects_echo,
+        master_effects=args.get("master_effects"),
+        master=args.get("master"),
     )
 
 
@@ -1933,6 +1984,8 @@ def _render_stems(
     only_tracks: list[str] | None = None,
     progress=None,
     continue_on_error: bool = False,
+    master_effects: list[renderers.EffectPlugin] | None = None,
+    master: MasterSettings | None = None,
 ) -> dict[str, Any]:
     """Render every note track on its own and combine the stems into the mix.
 
@@ -2010,6 +2063,7 @@ def _render_stems(
             detail = failures[0]["error"] if failures else "unknown error"
             raise ValueError(f"Every track failed to render: {detail}")
         correction = 0.0
+        master_report: dict | None = None
         with store.claimed_path(
             output_filename or source.stem,
             f"{source.stem}_{audio_format}",
@@ -2020,7 +2074,11 @@ def _render_stems(
             combined = target if audio_format == "wav" else Path(scratch) / "mix.wav"
             try:
                 renderers.combine_stems(stems, combined)
-                if normalize_peak_db is not None:
+                if master_effects:
+                    renderers.apply_stem_effects(combined, master_effects)
+                if master is not None:
+                    master_report = mastering.apply_master(combined, master)
+                if normalize_peak_db is not None and (master is None or master.loudness_target_lufs is None):
                     correction = audio.normalize_wav(combined, normalize_peak_db)
                 if audio_format == "mp3":
                     singing.to_mp3(combined, target)
@@ -2033,6 +2091,7 @@ def _render_stems(
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
     result["source"] = store.relative_name(source)
     result["gain_correction_db"] = correction
+    result["master"] = master_report
     result["failed"] = failures or None
     if audio_format == "wav":
         peak = audio.wav_peak_db(target)

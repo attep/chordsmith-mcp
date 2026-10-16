@@ -571,6 +571,8 @@ on `PATH`.
 | `normalize_peak_db` | Gain the rendered mix so its peak hits this level in dBFS (set `-1.0` for a listening-ready file). Default `null` keeps FluidSynth's raw level; **stems stay raw either way**, so their balance sums back to the unnormalized mix |
 | `reverb` | FluidSynth's built-in reverb (off when omitted): `{"room_size": 0.5, "damping": 0.3, "width": 0.8, "level": 0.7}` — those are the engine's own defaults, ranges are the engine's accepted values (room 0–1.2, damping 0–1, width 0–100, level 0–1). `{}` turns it on with the engine defaults |
 | `chorus` | FluidSynth's built-in chorus (off when omitted): `{"voices": 3, "level": 0.6, "speed": 0.2, "depth": 4.25}` — again the engine's defaults and accepted ranges (voices 0–99, level 0–10, speed 0.1–5 Hz, depth 0–21 ms; this engine build has no waveform setting) |
+| `master_effects` | A VST effect chain over the **combined mix** (mastering), e.g. `[{"plugin": "T-RackS ..."}]` with the same `preset`/`state`/`params` as per-track effects. Runs after the stems combine; the stems themselves stay dry. Needs the VST host |
+| `master` | The master stage on the mix: `{"loudness_target_lufs": -14, "limiter": {"enabled": true}}` is the streaming master. The loudness target is one static gain from an EBU R128 measurement (supersedes `normalize_peak_db`); the limiter runs 0.3 dB under its ceiling (−1 dBFS default) so true peaks stay inside it |
 | `output_filename` | Default: `<name>_wav` / `<name>_mp3` |
 | `expires_in`, `overwrite` | As above |
 
@@ -580,6 +582,13 @@ effective `effects` (reverb/chorus settings or nulls). Every stem entry carries 
 `peak_db`. Raw renders intentionally keep headroom (a busy arrangement can peak around
 −10 dBFS) — pass `normalize_peak_db: -1.0` when the file is for listening rather than for
 balancing.
+
+**Mastering (`master_effects` + `master`)** turns a render into a distribution-ready file: the
+VST chain shapes the mix (bus EQ, glue compressor, saturation), then the master stage hits the
+loudness target and tames peaks. The result's `master` block reports the measured `loudness`
+(integrated LUFS, range, true peak), the limiter's reduction and warnings (target missed,
+ceiling exceeded, clipping). Stems are never touched by either — their balance must sum back to
+the mix.
 
 **Instrumental effects (`reverb`/`chorus`) are off by default**, so renders stay byte-identical
 until you opt in; with them on, the engine's natural tail past the last note is kept (about
@@ -602,8 +611,8 @@ For renders that may outrun a client's tool timeout — a three-minute, nine-tra
 writes hundreds of megabytes and can take minutes — start the work in the background and poll it.
 
 `render_audio_job` takes the same options as [render_audio](#render_audio) (`format`,
-`return_as`, `soundfont`, `stems`, `normalize_peak_db`, `reverb`, `chorus`, `output_filename`,
-`expires_in`, `overwrite`) plus:
+`return_as`, `soundfont`, `stems`, `normalize_peak_db`, `reverb`, `chorus`, `master_effects`,
+`master`, `output_filename`, `expires_in`, `overwrite`) plus:
 
 | Option | Description |
 |---|---|
@@ -793,6 +802,25 @@ from here; the default is used when a spec names the plugin but no state.
 or a path); pass `null` (or `"none"`) to clear. Marks the state as the plugin's default, used
 whenever a spec names the plugin but gives no state. Returns the plugin and the state now used
 by default. See [open_plugin_state_editor](#open_plugin_state_editor).
+
+## generate_plugin_states
+
+Creates named plugin states by **sweeping parameters headlessly** — the alternative to
+capturing states one GUI session at a time for parameter-driven plugins.
+
+| Option | Description |
+|---|---|
+| `plugin` (required) | Plugin path or a name from `list_plugins` |
+| `parameters` (required) | The grid: parameter names (or indices) → lists of values (numbers or choice names), e.g. `{"Drive": [0, 6], "Tone": ["Bright", "Warm"]}`. Every combination becomes one state; max 32 per call |
+| `base_state` | Optional state (name or path) each variant starts from — e.g. a captured GUI tone that only a few parameters should vary |
+| `name_prefix` | State names are `<prefix>_1`, `<prefix>_2`, … (default `"sweep"`; existing ones are replaced) |
+| `make_default` | Also make the first generated state the plugin's default |
+
+Each combination loads the plugin once in the VST host (slow for large sample libraries) and
+the snapshot is written into the state library, ready to reference by name from
+`plugin_state`/effect `state`. Only parameters exposed to host automation can be swept —
+GUI-only plugins still need [open_plugin_state_editor](#open_plugin_state_editor). Returns the
+state library like [list_plugin_states](#list_plugin_states).
 
 ## list_chord_types
 

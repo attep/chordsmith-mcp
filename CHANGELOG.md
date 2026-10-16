@@ -7,8 +7,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Planned: a master-bus plugin chain with plugin-state generation and quotas (bars, tracks,
-file size, storage, TTL).
+Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
+long-running servers.
+
+## [0.30.0] - 2026-10-16
+
+Mastered renders and headless plugin states: a mix can hit a streaming loudness target, and
+parameter-driven plugins turn into a named palette of tones without opening a GUI.
+
+### Added
+
+- **Master bus on `render_audio` and `render_audio_job`**: `master_effects` runs a VST effect
+  chain over the combined mix (bus EQ/glue/saturation with the same preset/state/params as
+  per-track effects; the stems stay dry), and `master` finishes it — a true-peak limiter
+  (0.3 dB under its ceiling) and/or `loudness_target_lufs` (one static EBU R128 gain that
+  supersedes `normalize_peak_db`). The result's `master` block reports the measured loudness
+  (integrated LUFS, range, true peak), the limiter's reduction, the gain applied and warnings;
+  `{"loudness_target_lufs": -14, "limiter": {"enabled": true}}` is the streaming master.
+- **`generate_plugin_states`**: sweeps a parameter grid headlessly — every combination loads
+  the plugin once and lands in the state library as `<prefix>_N` (32-combination cap), with an
+  optional `base_state` to vary a captured GUI tone and `make_default` for the first variant.
+  `vst_host --dump-state` gained `--state`, so a sweep can start from any captured state.
+
+### Changed
+
+- `singing.loudness_report`/`limiter_filter`/`peak_db` are public now (shared with mastering);
+  behaviour is unchanged.
+- Tool count 44 -> 45; payload ceiling 272 -> 296 KB and the description budget 27 -> 29 KB in
+  the same patch (deliberate: the master options and the new tool).
 
 ## [0.29.0] - 2026-10-16
 

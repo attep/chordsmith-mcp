@@ -1258,7 +1258,7 @@ def _ffmpeg(args: list[str], timeout: float = 600) -> subprocess.CompletedProces
     return result
 
 
-def _peak_db(path: Path) -> float:
+def peak_db(path: Path) -> float:
     result = _ffmpeg(["-i", str(path), "-af", "volumedetect", "-f", "null", "-"])
     match = re.search(r"max_volume:\s*(-?[\d.]+) dB", result.stderr)
     if not match:
@@ -1837,7 +1837,7 @@ def _apply_gain(source: Path, gain_db: float, target: Path) -> None:
     _ffmpeg(["-y", "-loglevel", "error", "-i", str(source), "-af", f"volume={gain_db:g}dB", str(target)])
 
 
-def _limiter_filter(ceiling_db: float) -> str:
+def limiter_filter(ceiling_db: float) -> str:
     """alimiter with a dB ceiling; level=false keeps the output at the ceiling (no auto level).
 
     ``latency=true`` compensates the lookahead: the default would push the output ~5 ms late
@@ -1993,7 +1993,7 @@ def _render_processed_vocals(
                 "-i",
                 str(bus_current),
                 "-af",
-                _limiter_filter(vocal_bus.limiter.ceiling_db),
+                limiter_filter(vocal_bus.limiter.ceiling_db),
                 str(limited),
             ]
         )
@@ -2029,7 +2029,7 @@ def _render_processed_vocals(
     )
 
 
-def _loudness_report(path: Path, raw_f32: bool = False) -> dict:
+def loudness_report(path: Path, raw_f32: bool = False) -> dict:
     """Integrated LUFS, loudness range, true peak and short-term max via ebur128.
 
     With ``raw_f32`` the input is the uncorrected float mix probe (headerless f32le stereo at
@@ -2332,7 +2332,7 @@ def _mix_tracks_at_mix_rate(
                 graph += f";[{label}]volume={output_gain_db:.2f}dB[g]"
                 label = "g"
             if limiter_on:
-                graph += f";[{label}]{_limiter_filter(master.limiter.ceiling_db - LIMITER_MARGIN_DB)}[ml]"
+                graph += f";[{label}]{limiter_filter(master.limiter.ceiling_db - LIMITER_MARGIN_DB)}[ml]"
                 label = "ml"
             command += ["-filter_complex", graph, "-map", f"[{label}]", "-ar", "44100"]
         if float_output:
@@ -2349,7 +2349,7 @@ def _mix_tracks_at_mix_rate(
     loudness_target = master.loudness_target_lufs if master is not None else None
     if loudness_target is not None:
         # loudness scales with gain, so the correction to hit the target is read off the probe
-        probe_loudness = _loudness_report(probe, raw_f32=True)
+        probe_loudness = loudness_report(probe, raw_f32=True)
         integrated = probe_loudness["integrated_lufs"]
         correction = round(loudness_target - integrated, 2) if integrated is not None else 0.0
     elif normalize_peak_db is not None:
@@ -2359,13 +2359,13 @@ def _mix_tracks_at_mix_rate(
     else:
         correction = 0.0
     render(correction, target)
-    peak = _peak_db(target)
+    peak = peak_db(target)
 
     loudness: dict | None = None
     limiter_reduction: float | None = None
     master_warnings: list[str] = []
     if master is not None:
-        loudness = _loudness_report(target)
+        loudness = loudness_report(target)
         if loudness_target is not None and loudness["integrated_lufs"] is not None:
             if abs(loudness["integrated_lufs"] - loudness_target) > 1.0:
                 master_warnings.append(
