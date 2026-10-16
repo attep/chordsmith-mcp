@@ -7,9 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Planned: MusicXML export, Roman-numeral analysis and an `explain_progression` tool, a
-master-bus plugin chain with plugin-state generation, quotas (bars, tracks, file size,
-storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY, pre-commit, mypy).
+### Added
+
+- **Roman-numeral analysis**: `analyze_midi` now reports each window's `roman_numerals` in the
+  key it detected from the chords (`key_used`/`key_source`), or in a `key` you pass (e.g.
+  `"A minor"` for the minor reading). Numeral spelling follows the chord letters (bVII, #iv°),
+  case follows the third, and secondary dominants are named (D7 in C = V7/V).
+- **`explain_progression`** (tool): deterministic theory for a chord list — per-chord numeral
+  and function (tonic/subdominant/dominant, borrowed, secondary dominant), cadences (authentic,
+  plagal, half, deceptive, ii-V-I) and a few concrete variation ideas. The MCP prompt of the
+  same name stays the assistant-led path.
+
+Planned: MusicXML export, a master-bus plugin chain with plugin-state generation, quotas
+(bars, tracks, file size, storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY,
+pre-commit, mypy).
 
 ## [0.28.0] - 2026-10-16
 

@@ -33,6 +33,7 @@ from chordsmith import (
     delivery,
     forms,
     grooves,
+    harmony,
     mixjobs,
     renderers,
     renderjobs,
@@ -734,15 +735,73 @@ def analyze_midi(
         float | None,
         Field(gt=0, le=64, description="Analysis window in beats. Default: one bar."),
     ] = None,
+    key: Annotated[
+        str | None,
+        Field(
+            description="Key for the Roman numerals, e.g. 'A minor'; default: the detected "
+            "key's major reading."
+        ),
+    ] = None,
 ) -> results.AnalyzeResult:
     """Guess the chords, tempo and key of a MIDI file, window by window.
 
     Read-only; useful to check what a file (or a transposed copy) actually contains. Chord-name
     markers written by ChordSmith are used when their notes match the window, so inversions and
-    added melody notes still read back as the original chords. Works best with one chord per
-    window; with fast changes it may return '?' or 'N.C.'.
+    added melody notes still read back as the original chords. Each window's chord also gets a
+    Roman numeral in the key (key_used/key_source report which key was used; give 'key' for the
+    minor reading or a better fit). Works best with one chord per window; with fast changes it
+    may return '?' or 'N.C.'.
     """
-    return analyze_file(store.existing_path(filename), window_beats)
+    return analyze_file(store.existing_path(filename), window_beats, key)
+
+
+@mcp.tool(title="Explain progression", annotations=READ_ONLY)
+def explain_progression(
+    chords: Annotated[
+        str | list[str],
+        Field(
+            description="Chord symbols in order: a string ('Am F C G') or a list (['Am', 'F', "
+            "'C', 'G']); slash chords (C/E) are fine."
+        ),
+    ],
+    key: Annotated[
+        str | None,
+        Field(
+            description="Key for the numerals, e.g. 'A minor'; default: the best-fitting key of the chords."
+        ),
+    ] = None,
+) -> results.ExplainProgressionResult:
+    """Explain a chord progression deterministically: numerals, functions, cadences, ideas.
+
+    Read-only theory with no AI call: every chord gets its Roman numeral in the key (case,
+    accidentals and secondary dominants included), its harmonic function (tonic / subdominant /
+    dominant / borrowed / secondary dominant), the progression's cadences (authentic, plagal,
+    half, deceptive, ii-V-I) and a few concrete variation ideas. The key may be given ('A
+    minor'); without one the best-fitting major/minor key is chosen (key_source reports which).
+    For Roman numerals as input use create_progression_from_roman; to analyse a file use
+    analyze_midi (which returns numerals per window).
+    """
+    if isinstance(chords, str):
+        items = chords.replace(",", " ").split()
+    else:
+        items = [item.strip() for item in chords if item.strip()]
+    if not items:
+        raise ValueError("Give at least one chord symbol.")
+    if len(items) > 256:
+        raise ValueError("At most 256 chords.")
+    parsed: list[Chord] = []
+    for item in items:
+        try:
+            parsed.append(parse_chord(item))
+        except MusicTheoryError as exc:
+            raise ValueError(str(exc)) from None
+    if key is not None:
+        key_used = parse_key(key)
+        key_source = "given"
+    else:
+        key_used = harmony.detect_key(parsed)
+        key_source = "detected"
+    return harmony.explain(parsed, key_used, key_source)
 
 
 @mcp.tool(title="List generated files", annotations=READ_ONLY)
@@ -2032,9 +2091,9 @@ Steps:
 4. Reply with the chord names, the file path, and one idea for a variation."""
 
 
-@mcp.prompt()
-def explain_progression(chords: str, key: str = "") -> str:
-    """Ask the assistant to explain how a chord progression works."""
+@mcp.prompt(name="explain_progression")
+def explain_progression_prompt(chords: str, key: str = "") -> str:
+    """Ask the assistant to explain how a chord progression works (or use the tool for the theory)."""
     key_line = f"in the key of {key}" if key else "(work out the most likely key first)"
     return f"""Explain the chord progression {chords} {key_line}.
 

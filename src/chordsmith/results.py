@@ -88,8 +88,36 @@ class AnalyzeResult(TypedDict):
     total_beats: float
     window_beats: float
     key_signature_guess: str | None
+    key_used: str | None
+    key_source: str | None
     progression: list[str]
+    roman_numerals: list[str | None]
     segments: list[SegmentEntry]
+
+
+class ExplainChordEntry(TypedDict):
+    chord: str
+    numeral: str | None
+    function: str
+
+
+class CadenceEntry(TypedDict):
+    kind: str
+    from_chord: str
+    to_chord: str
+    description: str
+
+
+class ExplainProgressionResult(TypedDict):
+    key: str
+    key_source: str
+    chords: list[str]
+    numerals: list[str | None]
+    analysis: list[ExplainChordEntry]
+    cadences: list[CadenceEntry]
+    borrowed: list[str]
+    secondary_dominants: list[str]
+    suggestions: list[str]
 
 
 class FileEntry(TypedDict):

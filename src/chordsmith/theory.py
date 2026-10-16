@@ -473,3 +473,90 @@ def identify_chord(pitch_classes: set[int], bass_pc: int | None = None) -> tuple
     order = {ct.name: idx for idx, ct in enumerate(CHORD_TYPES)}
     candidates.sort(key=lambda c: (c[0] != bass_pc, order[c[1].name]))
     return candidates[0]
+
+
+def chord_degree(chord: Chord, key: Key) -> tuple[int, str] | None:
+    """The chord root's key degree (0-6) and accidental ('', '#', 'b', 'bb', '##'), or None.
+
+    The degree is measured by letter against the key's scale (so Bb in C major is degree 6
+    with a flat, not #VI), which needs a seven-note scale key.
+    """
+    if len(key.intervals) != 7:
+        return None
+    key_letter = key.tonic_name[0]
+    if key_letter not in _LETTERS:
+        return None
+    chord_name = chord.root_name or note_name(chord.root, chord.prefer_flats)
+    chord_letter = chord_name[0].upper()
+    if chord_letter not in _LETTERS:
+        return None
+    degree = (_LETTERS.index(chord_letter) - _LETTERS.index(key_letter)) % 7
+    expected_pc = (key.tonic + key.intervals[degree]) % 12
+    accidental = {0: "", 1: "#", 2: "##", 10: "bb", 11: "b"}.get((chord.root - expected_pc) % 12)
+    if accidental is None:
+        return None
+    return degree, accidental
+
+
+_NUMERAL_SUFFIX = {
+    "maj": "",
+    "min": "",
+    "7": "7",
+    "m7": "7",
+    "maj7": "maj7",
+    "dim": "°",
+    "dim7": "°7",
+    "m7b5": "ø7",
+    "aug": "+",
+    "aug7": "+7",
+}
+
+
+def _numeral_for_degree(degree: int, upper: bool) -> str:
+    numeral = ("I", "II", "III", "IV", "V", "VI", "VII")[degree]
+    return numeral if upper else numeral.lower()
+
+
+def chord_to_numeral(chord: Chord, key: Key, *, allow_secondary: bool = True) -> str | None:
+    """The chord's Roman numeral in a key ('vi', 'bVII', 'V7', 'V7/V'), or None.
+
+    Spelling follows the chord's root letter, the case follows the third (major/dominant
+    upper, minor/diminished lower) and dominant-quality chords on other scale degrees are
+    named as secondary dominants (D7 in C -> V7/V; C7 -> V7/IV). The key's own dominant stays
+    plain V even when a minor key's leading tone is raised. Keys without seven letters
+    (pentatonic, blues) cannot be numbered.
+    """
+    placement = chord_degree(chord, key)
+    if placement is None:
+        return None
+    degree, accidental = placement
+    intervals = chord.chord_type.intervals
+    third = intervals[1] if len(intervals) > 1 else 4
+    upper = third == 4
+    suffix = _NUMERAL_SUFFIX.get(chord.chord_type.name, chord.chord_type.aliases[0])
+    if allow_secondary and not accidental and third == 4 and degree != 4:
+        expected_third = (key.intervals[(degree + 2) % 7] - key.intervals[degree]) % 12
+        expected_seventh = (key.intervals[(degree + 6) % 7] - key.intervals[degree]) % 12
+        is_dominant_seventh = chord.chord_type.name == "7"
+        candidate = (is_dominant_seventh and (expected_third != 4 or expected_seventh != 10)) or (
+            chord.chord_type.name == "maj" and expected_third != 4
+        )
+        if candidate:
+            target_pc = (chord.root + 5) % 12
+            target_degree = next(
+                (d for d in range(7) if (key.tonic + key.intervals[d]) % 12 == target_pc), None
+            )
+            if target_degree is not None:
+                target_third = (key.intervals[(target_degree + 2) % 7] - key.intervals[target_degree]) % 12
+                target_fifth = (key.intervals[(target_degree + 4) % 7] - key.intervals[target_degree]) % 12
+                if target_fifth != 6:  # never the dominant of a diminished degree (V/vii°)
+                    target = _numeral_for_degree(target_degree, upper=target_third == 4)
+                    return f"{'V7' if is_dominant_seventh else 'V'}/{target}"
+    if (
+        accidental == "#"
+        and degree == 6
+        and key.is_minor_family
+        and chord.chord_type.name in ("dim", "dim7", "m7b5")
+    ):
+        accidental = ""  # a raised leading tone is the minor key's own vii°, not #vii°
+    return accidental + _numeral_for_degree(degree, upper=upper) + suffix

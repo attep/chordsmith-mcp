@@ -97,7 +97,8 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `set_track_instrument` / `list_instruments` / `list_plugins` | Per-track instrument specs (a soundfont, a GM program or drum kit, a sampled `.sfz` instrument, a `.vst3` plugin, trims and VST effect chains per track) and the engines + instrument/plugin catalogs this server can run |
 | `list_chord_types` | Shows every chord type ChordSmith understands (30) |
 | `transpose_midi` | Moves a file up/down, or from one key to another |
-| `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key |
+| `analyze_midi` | Reads a `.mid` file and guesses the chords, tempo and key — with Roman numerals per chord |
+| `explain_progression` | Deterministic theory for a progression: numerals, functions, cadences, variation ideas |
 | `list_generated_files` | Lists the files you've made |
 | `import_midi` | Imports a MIDI file made elsewhere (base64) and reports what it contains |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |

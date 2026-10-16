@@ -20,7 +20,7 @@ from chordsmith import server
 
 pytestmark = pytest.mark.anyio
 
-DESCRIPTION_BUDGET_BYTES = 26 * 1024
+DESCRIPTION_BUDGET_BYTES = 27 * 1024
 # Deliberately raised from 72 KB (v0.11.0: verification/diagnostics) to 96 KB (v0.14.0:
 # effects, import, sections), 108 KB (v0.16.0: background render jobs), 116 KB (v0.17.0: wet
 # mix + effect sends), 128 KB (v0.18.0: job listings, get_file, import_audio), 136 KB
@@ -37,7 +37,8 @@ DESCRIPTION_BUDGET_BYTES = 26 * 1024
 # and 24 KB (v0.25.0: import_tab — Guitar Pro/MusicXML conversion via MuseScore or the host
 # worker; one more tool and its description) and 272 KB (v0.28.0: project folders, the genre
 # presets and the add_bassline/add_drums/rename_track tools; descriptions moved 24 -> 26 KB in
-# the same patch).
+# the same patch). v0.29.0 raised only the description budget (26 -> 27 KB: Roman numerals on
+# analyze_midi and the explain_progression tool); the payload ceiling stands.
 # The surface grows with capabilities; keep new schemas lean.
 PAYLOAD_CEILING_BYTES = 272 * 1024
 
@@ -53,7 +54,7 @@ async def _tools():
 
 async def test_every_tool_has_a_unique_title_and_annotations():
     tools = await _tools()
-    assert len(tools) == 42
+    assert len(tools) == 43
     titles = [tool.title for tool in tools]
     assert all(titles), f"tools without a title: {[t.name for t in tools if not t.title]}"
     assert len(set(titles)) == len(titles), f"duplicate titles: {titles}"

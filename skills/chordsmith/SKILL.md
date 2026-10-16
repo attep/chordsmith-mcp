@@ -86,7 +86,8 @@ say so.
 - **Singing**: `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`,
   `render_singing`, `get_singing_job`, `list_singing_jobs`, `mix_song_with_vocals`,
   `export_vocal_song`
-- **Analysis**: `analyze_midi`
+- **Analysis**: `analyze_midi` (chords, key and Roman numerals per bar), `explain_progression`
+  (deterministic numerals/functions/cadences/suggestions for a chord list)
 
 ## Conventions and gotchas
 

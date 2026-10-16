@@ -27,6 +27,7 @@ for something specific ("use drop2 voicing") or understand a result.
 - [list_chord_types](#list_chord_types)
 - [transpose_midi](#transpose_midi)
 - [analyze_midi](#analyze_midi)
+- [explain_progression](#explain_progression)
 - [list_generated_files](#list_generated_files)
 - [delete_midi_file and rename_midi_file](#delete_midi_file-and-rename_midi_file)
 - [Resources](#resources)
@@ -793,18 +794,20 @@ Drum notes (MIDI channel 10) are not changed. The chord-name markers are renamed
 
 ## analyze_midi
 
-Reads a MIDI file and guesses the chord in each bar.
+Reads a MIDI file and guesses the chord in each bar, with its Roman numeral.
 
 | Option | Description |
 |---|---|
 | `filename` (required) | A file in the output folder |
 | `window_beats` | Size of each analysis window in beats. Default: one bar. Use `2` if chords change every half bar. |
+| `key` | Key for the Roman numerals, e.g. `"A minor"`. Default: the key detected from the chords (`key_used` reports it; `key_source` is `given` or `detected`) |
 
 Returns `tempo_bpm` and `time_signature` (the values the file *starts* with), the full
 `tempo_changes` and `time_signature_changes` lists (beat + value), the `sections` map
 ([set_song_sections](#set_song_sections)), `markers`, `key_signature_guess` (e.g.
-`"C major / A minor"`), `progression` (e.g. `["Am", "F", "C", "G"]`) and `segments` with
-start beat, length and notes of each chord.
+`"C major / A minor"`), `progression` (e.g. `["Am", "F", "C", "G"]`), `roman_numerals`
+(one per segment, e.g. `["i", "VI", "III", "VII"]`; `null` for `N.C.`/unknown windows) and
+`segments` with start beat, length and notes of each chord.
 
 If the file carries chord-name markers (ChordSmith files do), those names are used for a window
 whenever their notes match the sound, so inversions, voice leading and added melody notes don't
@@ -813,6 +816,28 @@ change the reported chords.
 **Limits:** this is a simple analyser. It works well on files with one chord per window, such as
 files ChordSmith made. Without chord-name markers, melodies, drums or fast chord changes can
 make it return `?` (unknown) or wrong chords. `N.C.` means no notes are sounding.
+
+## explain_progression
+
+Explains a chord progression with deterministic theory — no AI call, same answer every time.
+Use it to check or teach a progression's function; to analyse a file, use
+[analyze_midi](#analyze_midi); to write numerals as music, use
+[create_progression_from_roman](#create_progression_from_roman).
+
+| Option | Description |
+|---|---|
+| `chords` (required) | Chord symbols in order: `"Am F C G"` or `["Am", "F", "C", "G"]`; slash chords fine |
+| `key` | Key for the numerals, e.g. `"A minor"`. Default: the best-fitting key of the chords (`key_source` says which) |
+
+Returns, per chord, its `numeral` (case, accidentals like `bVII`, and secondary dominants like
+`V7/V` included) and `function` (`tonic`, `subdominant`, `dominant`, `borrowed` or
+`secondary dominant`); the progression's `cadences` (authentic, plagal, half, deceptive and
+ii–V–I, each with a plain-language description); the `borrowed` and `secondary_dominants`
+lists; and a few concrete `suggestions` (e.g. insert `Dm7` before the `G7`, or try `Bb` as a
+bVII lift).
+
+Example: `explain_progression(chords="Am F C G", key="A minor")` → numerals `i VI III VII`,
+functions tonic/subdominant/tonic/dominant.
 
 ## list_generated_files
 
