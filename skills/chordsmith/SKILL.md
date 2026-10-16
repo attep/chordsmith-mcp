@@ -34,6 +34,10 @@ say so.
    - Patterns: `{"pitch": 36, "steps": "x---x---"}` with `step_beats` (0.25 = sixteenth) — `x`
      hits, `X` accents, `-`/`.` rests; `loop: {"length_beats": 4, "times": 36}` repeats a short
      groove across the song (write a one-bar drum or bass pattern once).
+   - Bass and drums without writing notes: `add_bassline` (styles `root`, `root_fifth`,
+     `eighth_pulse`, `octave`, `walking`; chords come from the file's markers or analysis) and
+     `add_drums` (grooves `four_on_floor`, `backbeat`, `rock`, `metal`, `trap`, `boom_bap`,
+     `bossa_nova`, `shuffle`, `waltz`). Both write a copy and stay in the file's project.
    - `automation`: linear CC ramps, e.g. CC11 expression or CC7 fade.
    - `instrument`: a GM program number (e.g. 48 strings); `channel` 10 for drums.
 3. **Sections** (verse/chorus songs): `set_song_sections` writes names, bars, quarter-note BPM and

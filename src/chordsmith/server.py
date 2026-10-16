@@ -31,6 +31,7 @@ from chordsmith import (
     __version__,
     audio,
     delivery,
+    grooves,
     mixjobs,
     renderers,
     renderjobs,
@@ -77,8 +78,11 @@ INSTRUCTIONS = """ChordSmith turns musical choices into MIDI and audio files on 
 
 Workflow:
 1. Create: create_chord_progression (chord symbols) or create_progression_from_roman
-   (numerals + key). Read scales://{key} first to see the diatonic chords of a key.
-2. Extend: add_track adds a melody/bass/drum track to a copy of a file.
+   (numerals + key). Read scales://{key} first to see the diatonic chords of a key; genre
+   presets (pop, rock, metal, jazz, bossa, classical, cinematic, trap, edm, blues, funk, lofi)
+   set the feel in one word.
+2. Extend: add_track adds a custom note track to a copy of a file; add_bassline derives a bass
+   line from the file's chords; add_drums lays a named groove across the song.
 3. Listen: render_audio renders a file to wav/mp3 without a music app.
 4. Sing: prepare_vocal_score -> map_vocal_lyrics -> render_singing -> get_singing_job ->
    mix_song_with_vocals -> export_vocal_song (VOICEVOX for hums/kana, DiffSinger for English).
@@ -122,6 +126,50 @@ MAX_TILED_NOTES = 20000  # cap after a loop pattern is tiled, so one call cannot
 MAX_IMPORT_BYTES = 5 * 1024 * 1024  # import_midi: keep one base64 tool call to a sane size
 
 PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
+    "pop": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=0.5, velocity=85, gate=0.8),
+    ),
+    "rock": (
+        Voicing(add_bass=True),
+        Rhythm(pattern="pulse", subdivision=0.5, velocity=100, gate=0.9),
+    ),
+    "metal": (
+        Voicing(add_bass=True),
+        Rhythm(pattern="pulse", subdivision=0.25, velocity=110, gate=0.5),
+    ),
+    "jazz": (
+        Voicing(style="drop2", voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=1.0, velocity=75, gate=0.85, swing=0.33),
+    ),
+    "bossa": (
+        Voicing(style="drop2", voice_leading=True),
+        Rhythm(pattern="pulse", velocity=70, gate=1.0, hits=[0.0, 0.75, 1.5, 3.0]),
+    ),
+    "classical": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="alberti", subdivision=0.25, velocity=75, gate=0.9),
+    ),
+    "cinematic": (
+        Voicing(style="open", voice_leading=True, add_bass=True),
+        Rhythm(pattern="arpeggio_up", subdivision=1.0, velocity=60, gate=1.0),
+    ),
+    "trap": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=1.0, velocity=70, gate=0.95),
+    ),
+    "edm": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", velocity=90, gate=0.6, hits=[0.5, 1.5, 2.5, 3.5]),
+    ),
+    "blues": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", subdivision=0.5, velocity=85, gate=0.7, swing=0.33),
+    ),
+    "funk": (
+        Voicing(voice_leading=True),
+        Rhythm(pattern="pulse", velocity=95, gate=0.45, hits=[0.0, 0.75, 1.5, 2.5, 3.25]),
+    ),
     "lofi": (
         Voicing(voice_leading=True),
         Rhythm(
@@ -135,10 +183,25 @@ PRESETS: dict[str, tuple[Voicing, Rhythm]] = {
     ),
 }
 Preset = Annotated[
-    Literal["lofi"] | None,
+    Literal[
+        "pop",
+        "rock",
+        "metal",
+        "jazz",
+        "bossa",
+        "classical",
+        "cinematic",
+        "trap",
+        "edm",
+        "blues",
+        "funk",
+        "lofi",
+    ]
+    | None,
     Field(
-        description="Optional style preset. 'lofi' turns on voice leading and gives a soft, "
-        "swung, slightly humanized feel. Explicit voicing/rhythm objects replace the preset's."
+        description="Optional genre preset bundling voicing and rhythm (pop, rock, metal, jazz, "
+        "bossa, classical, cinematic, trap, edm, blues, funk, lofi). Explicit voicing/rhythm "
+        "objects replace the preset's."
     ),
 ]
 MidiType = Annotated[
@@ -907,6 +970,132 @@ def _bpm_lookup(source: Path, resolved: list[sections.ResolvedSection] | None) -
     return lambda beat: bpm
 
 
+def _pattern_rows_to_notes(
+    rows: list[PatternRow], step_beats: float, offset: float = 0.0
+) -> list[tuple[int, float, float, int]]:
+    """Compact step grids as (pitch, start_beat, beats, velocity) tuples."""
+    notes: list[tuple[int, float, float, int]] = []
+    for row in rows:
+        try:
+            row_pitch = parse_pitch(row.pitch)
+        except MusicTheoryError as exc:
+            raise ValueError(str(exc)) from None
+        step = 0
+        for char in row.steps:
+            if char in "| \t":  # bar lines are separators; they do not consume a step
+                continue
+            if char in "-._":
+                step += 1
+                continue
+            if char not in "xXoO":
+                raise ValueError(
+                    f"Unknown step '{char}' in the pattern for {row.pitch!r}; use 'x' for "
+                    "a hit, 'X' for an accent, '-' or '.' for a rest, '|' as a bar line."
+                )
+            velocity = min(127, row.velocity + 25) if char in "XO" else row.velocity
+            notes.append((row_pitch, offset + step * step_beats, step_beats, velocity))
+            step += 1
+    return notes
+
+
+def _tile_notes(
+    notes: list[tuple[int, float, float, int]], length_beats: float, times: int
+) -> list[tuple[int, float, float, int]]:
+    """Repeat a pattern window back to back, with the loop-fit and note-count guards."""
+    for _, start, beats, _ in notes:
+        if start >= length_beats:
+            raise ValueError(
+                f"A loop note starts at beat {start:g}, but the pattern is only {length_beats:g} beats long."
+            )
+        if start + beats > length_beats + 1e-9:
+            raise ValueError(
+                f"A loop note ends at {start + beats:g}, past the pattern length {length_beats:g}."
+            )
+    total = len(notes) * times
+    if total > MAX_TILED_NOTES:
+        raise ValueError(
+            f"The loop would produce {total} notes (limit {MAX_TILED_NOTES}); "
+            "reduce the pattern or the repeat count."
+        )
+    return [
+        (pitch, start + repeat * length_beats, beats, velocity)
+        for repeat in range(times)
+        for pitch, start, beats, velocity in notes
+    ]
+
+
+def _file_end_beat(source: Path) -> float:
+    """The last event of the file in quarter-note beats (the conductor's end included)."""
+    midi = mido.MidiFile(source)
+    end = 0
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+        end = max(end, tick)
+    return end / midi.ticks_per_beat
+
+
+def _chord_windows(source: Path) -> tuple[list[tuple[float, float, Chord]], str, list[str]]:
+    """Chord spans as (start_beat, length_beats, chord), their source, and the symbol list.
+
+    Chord-name markers (written by the create tools) win; a file without them falls back to
+    the analysis of the sounding notes. Raises when neither yields any chord.
+    """
+    midi = mido.MidiFile(source)
+    markers: list[tuple[float, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.type != "marker" or message.text.startswith(sections.SECTION_MARKER_PREFIX):
+                continue
+            try:
+                parse_chord(message.text)
+            except MusicTheoryError:
+                continue
+            if (tick, message.text) not in seen:
+                seen.add((tick, message.text))
+                markers.append((tick / midi.ticks_per_beat, message.text))
+    end_beat = _file_end_beat(source)
+    if markers:
+        markers.sort()
+        windows: list[tuple[float, float, Chord]] = []
+        for index, (start, symbol) in enumerate(markers):
+            stop = markers[index + 1][0] if index + 1 < len(markers) else end_beat
+            if stop - start <= 0:
+                continue
+            windows.append((start, stop - start, parse_chord(symbol)))
+        if windows:
+            return windows, "markers", [item[2].symbol for item in windows]
+    analyzed = analyze_file(source)
+    windows = []
+    for segment in analyzed["segments"]:
+        if segment["chord"] in ("N.C.", "?") or segment["beats"] <= 0:
+            continue
+        try:
+            chord = parse_chord(segment["chord"])
+        except MusicTheoryError:
+            continue
+        windows.append((segment["start_beat"], segment["beats"], chord))
+    if not windows:
+        raise ValueError(
+            f"No chords found in '{source.name}'. Create the file from a chord progression or "
+            "add chord-name markers, then try again."
+        )
+    return windows, "analysis", [item[2].symbol for item in windows]
+
+
+def _initial_time_signature(source: Path) -> tuple[int, int]:
+    """The file's first time signature; 4/4 when it has none."""
+    for track in mido.MidiFile(source).tracks:
+        for message in track:
+            if message.type == "time_signature":
+                return message.numerator, message.denominator
+    return 4, 4
+
+
 @mcp.tool(title="Add track", annotations=CREATES)
 def add_track(
     filename: Annotated[str, Field(description="Existing file to copy and extend.")],
@@ -1020,26 +1209,7 @@ def add_track(
         parsed: list[tuple[int, float, float, int]] = []
         if copy_from is not None:
             parsed = _copy_track_notes(source, copy_from, transpose_semitones, ticks_per_beat)
-        for row in patterns or []:
-            try:
-                row_pitch = parse_pitch(row.pitch)
-            except MusicTheoryError as exc:
-                raise ValueError(str(exc)) from None
-            step = 0
-            for char in row.steps:
-                if char in "| \t":  # bar lines are separators; they do not consume a step
-                    continue
-                if char in "-._":
-                    step += 1
-                    continue
-                if char not in "xXoO":
-                    raise ValueError(
-                        f"Unknown step '{char}' in the pattern for {row.pitch!r}; use 'x' for "
-                        "a hit, 'X' for an accent, '-' or '.' for a rest, '|' as a bar line."
-                    )
-                velocity = min(127, row.velocity + 25) if char in "XO" else row.velocity
-                parsed.append((row_pitch, step * step_beats, step_beats, velocity))
-                step += 1
+        parsed += _pattern_rows_to_notes(patterns or [], step_beats)
         resolved_sections: list[sections.ResolvedSection] | None = None
         for note in notes or []:
             try:
@@ -1078,28 +1248,7 @@ def add_track(
                 start = start_tick / ticks_per_beat
             parsed.append((pitch, start, note.beats, note.velocity))
         if loop is not None:
-            for _, start, beats, _ in parsed:
-                if start >= loop.length_beats:
-                    raise ValueError(
-                        f"A loop note starts at beat {start:g}, but the pattern is only "
-                        f"{loop.length_beats:g} beats long."
-                    )
-                if start + beats > loop.length_beats + 1e-9:
-                    raise ValueError(
-                        f"A loop note ends at beat {start + beats:g}, past the pattern length "
-                        f"{loop.length_beats:g}."
-                    )
-            total = len(parsed) * loop.times
-            if total > MAX_TILED_NOTES:
-                raise ValueError(
-                    f"The loop would produce {total} notes (limit {MAX_TILED_NOTES}); "
-                    "reduce the pattern or the repeat count."
-                )
-            parsed = [
-                (pitch, start + repeat * loop.length_beats, beats, velocity)
-                for repeat in range(loop.times)
-                for pitch, start, beats, velocity in parsed
-            ]
+            parsed = _tile_notes(parsed, loop.length_beats, loop.times)
         parsed = swing_notes(parsed, swing, step_beats)
         if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
             if resolved_sections is None:
@@ -1127,6 +1276,196 @@ def add_track(
         "channel": channel,
         "copied_from": copy_from,
         "transpose_semitones": transpose_semitones if copy_from is not None else 0,
+        "swing": swing,
+        "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
+        **info,
+    }
+
+
+@mcp.tool(title="Add bass line", annotations=CREATES)
+def add_bassline(
+    filename: Annotated[str, Field(description="Existing MIDI file whose chords drive the bass line.")],
+    track_name: Annotated[str, Field(description="Name of the new bass track, e.g. 'Bass'.")] = "Bass",
+    style: Annotated[
+        Literal["root", "root_fifth", "eighth_pulse", "octave", "walking"],
+        Field(
+            description="Bass feel: root = one held root per chord; root_fifth = root and fifth "
+            "alternating; eighth_pulse = root on every subdivision; octave = root alternating an "
+            "octave up; walking = a quarter-note walk (root, fifth, third, approach to next chord)."
+        ),
+    ] = "root_fifth",
+    octave: Annotated[int, Field(ge=1, le=4, description="Octave of the bass root (2 = around A2).")] = 2,
+    subdivision: Annotated[
+        float,
+        Field(gt=0, le=4, description="Step length in beats for the pulsing styles (0.5 = eighths)."),
+    ] = 0.5,
+    instrument: Instrument = 33,
+    channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
+    velocity: Annotated[int, Field(ge=1, le=127, description="Loudness of each bass note.")] = 90,
+    gate: Annotated[float, Field(gt=0, le=1, description="Fraction of each step the note sounds.")] = 0.9,
+    swing: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=0.75,
+            description="Delay notes on offbeat steps of the grid by this fraction of a step: "
+            "0.33 = triplet feel.",
+        ),
+    ] = 0,
+    humanize: Annotated[
+        Humanize | None, Field(description="Seeded timing/velocity variation, applied after generation.")
+    ] = None,
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.BasslineResult:
+    """Derive a bass line from the file's chords and add it as a new track.
+
+    The chords come from the chord-name markers the create tools write; a file without them is
+    analyzed note by note instead — ``chord_source`` in the result says which was used. Five
+    styles cover the common roles (root, root_fifth, eighth_pulse, octave, walking). Creates a
+    new file in the source's project (the original is kept; output_filename must differ) and
+    honors the section map's tempo for swing/humanize. Returns the style, the chords used, the
+    bass octave and the same file details as add_track.
+    """
+    source = store.existing_path(filename)
+    project = store.project_of(source)
+    windows, chord_source, symbols = _chord_windows(source)
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{track_name}", overwrite, project=project
+    ) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        parsed = grooves.bassline_notes(
+            style, windows, octave=octave, subdivision=subdivision, gate=gate, velocity=velocity
+        )
+        parsed = swing_notes(parsed, swing, subdivision)
+        if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
+            parsed = humanize_notes(parsed, humanize, _bpm_lookup(source, sections.read_sections(source)))
+        info = add_track_midi(
+            source, target, track_name=track_name, program=instrument, channel=channel - 1, notes=parsed
+        )
+    return {
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+        "track_name": track_name,
+        "channel": channel,
+        "style": style,
+        "chord_source": chord_source,
+        "chords": symbols,
+        "octave": octave,
+        "swing": swing,
+        "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
+        **info,
+    }
+
+
+@mcp.tool(title="Add drums", annotations=CREATES)
+def add_drums(
+    filename: Annotated[str, Field(description="Existing MIDI file to add the drum track to.")],
+    track_name: Annotated[str, Field(description="Name of the new drum track.")] = "Drums",
+    pattern: Annotated[
+        Literal[
+            "four_on_floor",
+            "backbeat",
+            "rock",
+            "metal",
+            "trap",
+            "boom_bap",
+            "bossa_nova",
+            "shuffle",
+            "waltz",
+        ],
+        Field(
+            description="Named groove: four_on_floor (house), backbeat (pop/rock), rock, metal, "
+            "trap, boom_bap (try swing 0.2), bossa_nova (two bars), shuffle (set swing 0.33), "
+            "waltz (3/4)."
+        ),
+    ] = "backbeat",
+    gate: Annotated[
+        float, Field(gt=0, le=1, description="Fraction of each step a hit sounds (0.5 = crisp).")
+    ] = 0.5,
+    swing: Annotated[
+        float,
+        Field(
+            ge=0,
+            le=0.75,
+            description="Delay hits on offbeat steps by this fraction of a step: 0.33 = triplet "
+            "shuffle, 0.2 = a lazy hip-hop pull.",
+        ),
+    ] = 0,
+    humanize: Annotated[
+        Humanize | None, Field(description="Seeded timing/velocity variation, applied after generation.")
+    ] = None,
+    output_filename: FileName = None,
+    overwrite: Overwrite = False,
+) -> results.DrumsResult:
+    """Lay a named drum groove over the whole song on the drum channel (10).
+
+    The groove repeats from the song's start to its end; the pattern's meter must match the
+    song's (the 4/4 grooves, the two-bar bossa_nova, or the 3/4 waltz). With a section map the
+    song length follows its bars; a file whose sections change meter is rejected (add drums
+    per section with add_track patterns instead). Creates a new file in the source's project
+    like add_track and returns the pattern, the repeat count, the total bars and the file
+    details.
+    """
+    source = store.existing_path(filename)
+    project = store.project_of(source)
+    drum_pattern = grooves.DRUM_PATTERNS[pattern]
+    resolved = sections.read_sections(source)
+    if resolved:
+        bar_beats = resolved[0].beats_per_bar
+        if any(abs(section.beats_per_bar - bar_beats) > 1e-9 for section in resolved):
+            raise ValueError(
+                "add_drums writes one meter, but this file's sections change meter. Add drums "
+                "per section with add_track patterns instead."
+            )
+        total_beats = sum(section.total_beats for section in resolved)
+    else:
+        numerator, denominator = _initial_time_signature(source)
+        bar_beats = numerator * 4 / denominator
+        total_beats = _file_end_beat(source)
+    if abs(bar_beats - drum_pattern.numerator) > 1e-9:
+        compatible = sorted(
+            name for name, item in grooves.DRUM_PATTERNS.items() if item.numerator == bar_beats
+        )
+        hint = ", ".join(compatible) or "none"
+        raise ValueError(
+            f"The song's bar is {bar_beats:g} beats, but '{pattern}' is written in "
+            f"{drum_pattern.numerator}/4. Patterns for this meter: {hint}."
+        )
+    total_bars = int(total_beats / bar_beats + 1e-9)
+    times = total_bars // drum_pattern.bars
+    if times < 1:
+        raise ValueError(
+            f"The song is {total_bars} bar(s) long; '{pattern}' needs at least {drum_pattern.bars} bar(s)."
+        )
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{track_name}", overwrite, project=project
+    ) as target:
+        if target == source:
+            raise ValueError("Choose a different output_filename; the original file is never modified.")
+        base = [
+            (pitch, start, max(0.05, beats * gate), velocity)
+            for pitch, start, beats, velocity in grooves.drum_notes(drum_pattern)
+        ]
+        parsed = _tile_notes(base, drum_pattern.beats, times)
+        parsed = swing_notes(parsed, swing, grooves.DRUM_STEP_BEATS)
+        if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
+            parsed = humanize_notes(parsed, humanize, _bpm_lookup(source, sections.read_sections(source)))
+        info = add_track_midi(source, target, track_name=track_name, program=0, channel=9, notes=parsed)
+    return {
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+        "track_name": track_name,
+        "channel": 10,
+        "pattern": pattern,
+        "pattern_bars": drum_pattern.bars,
+        "repeat": times,
+        "total_bars": total_bars,
         "swing": swing,
         "humanize": humanize.model_dump(exclude_none=True) if humanize is not None else None,
         **info,

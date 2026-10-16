@@ -90,6 +90,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `create_chord_progression` | Chord names (`["Am","F","C","G"]`) → `.mid` file |
 | `create_progression_from_roman` | Roman numerals (`i–VI–III–VII`) + key → `.mid` file |
 | `add_track` | Adds a note-level track (melody, bass, drums) to a copy of a file |
+| `add_bassline` / `add_drums` | Derives a bass line from the file's chords (root, root-fifth, pulse, octave, walking) or lays a named drum groove (backbeat, four-on-floor, trap, metal, bossa, shuffle, …) |
 | `set_song_sections` | Writes a section map (bars, tempo, meter per section) into the file's conductor |
 | `get_midi_file` | Hands the actual file back (base64 or a signed download link) |
 | `render_audio` | Renders a file to `.wav`/`.mp3` so it can be heard without a music app (or per-track stems with `stems: true`) |
@@ -104,8 +105,9 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or DiffSinger voicebanks — English and exact phonemes; several banks with their own variants, male and female) and mixes it with the backing |
 
 The create tools accept **voicing** options (inversions, open/drop-2, voice leading, bass note),
-**rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), a `lofi`
-preset, a `seed` for reproducible renders, and `midi_type` 0/1 for simple players. Songs can have
+**rhythm** options (block, pulse, arpeggios, Alberti, strum, swing, seeded humanize), genre
+**presets** (pop, rock, metal, jazz, bossa, classical, cinematic, trap, edm, blues, funk, lofi),
+a `seed` for reproducible renders, and `midi_type` 0/1 for simple players. Songs can have
 a **section map** with real tempo and meter changes (`set_song_sections`); notes can then be
 placed with section-relative bar/beat positions, and vocals, renders and exports follow the map.
 

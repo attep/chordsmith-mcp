@@ -7,7 +7,10 @@ for something specific ("use drop2 voicing") or understand a result.
 - [create_progression_from_roman](#create_progression_from_roman)
 - [Voicing options](#voicing-options)
 - [Rhythm options](#rhythm-options)
+- [Genre presets](#genre-presets)
 - [add_track](#add_track)
+- [add_bassline](#add_bassline)
+- [add_drums](#add_drums)
 - [create_empty_file](#create_empty_file)
 - [remove_track](#remove_track)
 - [set_song_sections](#set_song_sections)
@@ -92,7 +95,7 @@ Turns chord symbols into a MIDI file.
 | `instrument` | 0–127 | `0` | General MIDI sound: 0 piano, 4 electric piano, 24 nylon guitar, 25 steel guitar, 48 strings, 88 pad |
 | `voicing` | object | close, root position | See [Voicing options](#voicing-options) |
 | `rhythm` | object | block chords | See [Rhythm options](#rhythm-options) |
-| `preset` | text | none | `"lofi"`: voice leading on, soft swung repeated chord hits (pulse pattern) and light humanization |
+| `preset` | text | none | A genre preset bundling voicing and rhythm (see [Genre presets](#genre-presets)) |
 | `seed` | number | none | Fix the humanization randomness so the same call writes identical bytes (used with a preset or a `rhythm.humanize`; overrides its `seed`) |
 | `midi_type` | 0 or 1 | `1` | `1` = tempo/chords in track 0, notes in track 1 (standard; the first track carries the file's title, tempo and chord-name markers). `0` = everything in one track with the tempo inline, for simple players that ignore track 0 |
 | `overwrite` | true/false | `false` | Replace a file with the same name |
@@ -183,6 +186,28 @@ Pass these inside `"rhythm": {...}`. All are optional.
 With arpeggio and Alberti patterns, a bass note (from `add_bass` or a slash chord) is held under
 the moving notes.
 
+## Genre presets
+
+`create_chord_progression` and `create_progression_from_roman` take a `preset` that bundles a
+voicing and a rhythm, so one word sets the feel. Explicit `voicing`/`rhythm` options replace the
+preset's parts. The companion tools ([add_bassline](#add_bassline) and
+[add_drums](#add_drums)) name matching bass styles and drum grooves per genre.
+
+| Preset | Feel | Voicing / rhythm |
+|---|---|---|
+| `pop` | modern pop comping | voice leading; eighth-note chord pulses |
+| `rock` | downstroke eighth chords | root doubled an octave below; eighth pulses, strong hits |
+| `metal` | palm-muted chugs | root doubled; sixteenth pulses, short gates |
+| `jazz` | swung comping | drop-2 voicings, voice leading; swung quarter-note hits |
+| `bossa` | nylon-guitar comping | drop-2 voicings; syncopated hits `[0, 0.75, 1.5, 3]` |
+| `classical` | Alberti piano | voice leading; sixteenth-note Alberti figure |
+| `cinematic` | slow wide arpeggios | open voicings, voice leading, root below; quarter-note up-arpeggios |
+| `trap` | sparse dark stabs | voice leading; spaced quarter-note hits, long gates |
+| `edm` | off-beat house stabs | voice leading; hits on the “and” of every beat `[0.5, 1.5, 2.5, 3.5]` |
+| `blues` | shuffle | voice leading; swung eighth-note pulses |
+| `funk` | syncopated stabs | voice leading; short sixteenth-placed stabs `[0, 0.75, 1.5, 2.5, 3.25]` |
+| `lofi` | soft, swung, humanized | voice leading; soft swung pulses with seeded humanization |
+
 ## add_track
 
 Adds a note-level track (melody, bass, drums, …) to a **copy** of an existing MIDI file. The
@@ -236,6 +261,53 @@ company an octave up. With `copy_from` the layers take one call each:
    saturation adds harmonics up to 300–800 Hz, the highpass keeps the layer thin.
 3. Trim both with `gain_db` and keep the original sine under them; the mix's balance
    measurement ends up carrying the low end on any speaker.
+
+## add_bassline
+
+Derives a **bass line from the file's chords** and adds it as a new track — no note writing.
+The chords come from the chord-name markers the create tools write; a file without them is
+analyzed note by note instead (`chord_source` in the result says which was used). Creates a
+copy like [add_track](#add_track) and stays in the source's project.
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing MIDI file whose chords drive the bass |
+| `track_name` | Name of the new track (default `"Bass"`) |
+| `style` | `root` = one held root per chord · `root_fifth` = root and fifth alternating (default) · `eighth_pulse` = root on every subdivision · `octave` = root alternating an octave up · `walking` = quarter-note walk: root, fifth, third, chromatically into the next root |
+| `octave` | Octave of the bass root (default `2` ≈ A2) |
+| `subdivision` | Step length in beats for the pulsing styles (default `0.5` = eighths) |
+| `instrument` | GM program (default `33` electric bass finger) |
+| `channel` | MIDI channel (default 1) |
+| `velocity`, `gate`, `swing`, `humanize` | Like [add_track](#add_track); `swing` uses `subdivision` as the step |
+| `output_filename`, `overwrite` | Default: `<name>_<track_name>.mid` |
+
+## add_drums
+
+Lays a **named drum groove** over the whole song on channel 10. The groove repeats from the
+song's start to its end; with a section map the length follows its bars, and a file whose
+sections change meter is rejected (add drums per section with `add_track` patterns instead).
+The pattern's meter must match the song's.
+
+| Pattern | Meter | Groove |
+|---|---|---|
+| `four_on_floor` | 4/4 | House kick on every beat, off-beat open hats, clap on 2 and 4 |
+| `backbeat` | 4/4 | Pop/rock: kick on 1 and 3, snare on 2 and 4, eighth hats (default) |
+| `rock` | 4/4 | Driving kick pickups into 3, accented hats |
+| `metal` | 4/4 | Double-kick eighths under a 2-and-4 snare and ride |
+| `trap` | 4/4 | Sparse 808 kick, half-time clap, sixteenth hats with rolls |
+| `boom_bap` | 4/4 | Syncopated kick, lazy backbeat (try `swing: 0.2`) |
+| `bossa_nova` | 4/4 | Two-bar bossa: bass drum on 1 and 3, side-stick, shaker |
+| `shuffle` | 4/4 | Backbeat with a walking kick (set `swing: 0.33`) |
+| `waltz` | 3/4 | Kick on 1, snare on 2, a hat for each beat |
+
+| Option | Description |
+|---|---|
+| `filename` (required) | Existing MIDI file to add the drums to |
+| `track_name` | Name of the new track (default `"Drums"`) |
+| `pattern` | Groove name (default `"backbeat"`) |
+| `gate` | Fraction of each step a hit sounds (default `0.5` = crisp) |
+| `swing`, `humanize` | Seeded feel options, as on [add_track](#add_track) |
+| `output_filename`, `overwrite` | Default: `<name>_<track_name>.mid` |
 
 ## create_empty_file
 

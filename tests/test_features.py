@@ -443,6 +443,42 @@ async def test_lofi_preset_is_soft_and_swung(store):
     assert any(tick % 240 for tick in ticks)  # swung/humanized offbeats
 
 
+GENRES = [
+    "pop",
+    "rock",
+    "metal",
+    "jazz",
+    "bossa",
+    "classical",
+    "cinematic",
+    "trap",
+    "edm",
+    "blues",
+    "funk",
+    "lofi",
+]
+
+
+async def test_every_genre_preset_renders(store):
+    store.ensure_root()
+    assert set(GENRES) == set(server.PRESETS)
+    for genre in GENRES:
+        result = await _call(
+            "create_chord_progression",
+            {"chords": ["Am", "F", "C", "G"], "filename": f"genre_{genre}", "preset": genre},
+        )
+        assert not result.isError, result.content[0].text
+        assert (store.root / f"genre_{genre}.mid").is_file()
+
+
+def test_genre_presets_have_their_character():
+    assert server.PRESETS["metal"][1].subdivision == 0.25  # driving sixteenths
+    assert server.PRESETS["jazz"][0].style == "drop2" and server.PRESETS["jazz"][1].swing > 0
+    assert server.PRESETS["bossa"][1].hits  # syncopated comping pattern
+    assert server.PRESETS["edm"][1].hits == [0.5, 1.5, 2.5, 3.5]  # off-beat stabs
+    assert server.PRESETS["cinematic"][0].style == "open"
+
+
 # ------------------------------------------------------------------ file management
 
 

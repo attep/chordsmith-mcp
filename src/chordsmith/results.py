@@ -136,6 +136,44 @@ class AddTrackResult(TypedDict):
     track_index: int
 
 
+class BasslineResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    track_name: str
+    channel: int
+    style: str
+    chord_source: str
+    chords: list[str]
+    octave: int
+    swing: float
+    humanize: Humanize | None
+    notes_added: int
+    automation_events: int
+    total_tracks: int
+    track_index: int
+
+
+class DrumsResult(TypedDict):
+    source: str
+    filename: str
+    path: str
+    uri: str
+    track_name: str
+    channel: int
+    pattern: str
+    pattern_bars: int
+    repeat: int
+    total_bars: int
+    swing: float
+    humanize: Humanize | None
+    notes_added: int
+    automation_events: int
+    total_tracks: int
+    track_index: int
+
+
 class EmptyFileResult(TypedDict):
     filename: str
     path: str
