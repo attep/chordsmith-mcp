@@ -34,6 +34,12 @@ missing.
   the plugins, and the built-in limiter still runs last so a plugin limiter's ceiling holds even
   when the loudness correction adds gain. Entries take `preset`/`state`/`params` and default
   states like per-track effects; mixes without `master_effects` stay byte-identical.
+- **Assistant tool-call repair**: small models (qwen3.6 and friends) emit valid JSON with the
+  wrong shape — a required list merged into another string (`{"filename": "song [\"Am\",\"Dm\"]"}`),
+  stringified arrays, numbers as text. The manager repairs the call against the tool's own
+  schema (recovering the embedded list and cleaning the host string), notes `repaired: <fields>`
+  in the chat, and turns an unsalvageable call into a precise retry message for the model
+  instead of a pydantic dump. The MCP server's validation stays strict for every client.
 
 ## [0.31.0] - 2026-10-16
 

@@ -14,7 +14,10 @@ A small web app for looking inside a running ChordSmith server and driving it by
 - **Files**: everything in the output folder, with download links and an audio player for
   `.wav`/`.mp3`.
 - **Assistant**: chat with a local [Ollama](https://ollama.com) model that can call
-  ChordSmith tools. You choose which tools it may use.
+  ChordSmith tools. You choose which tools it may use. Every tool call and its result appear in
+  the chat; small models sometimes emit valid JSON with the wrong shape, so calls are repaired
+  against the tool's schema first (the chat shows `repaired: <fields>`), and an unsalvageable
+  call gets a precise retry message instead of a server validation dump.
 
 It's a separate app with its own `package.json`. It doesn't change how the Python package
 is built or installed.

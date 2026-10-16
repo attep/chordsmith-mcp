@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../lib/context";
+import { prepareToolArguments } from "../lib/arguments";
 import { resultData, type CallToolResult } from "../lib/mcp";
 import {
   chat,
@@ -13,7 +14,15 @@ import { JsonView, ToolResultView } from "./JsonView";
 
 type ChatItem =
   | { kind: "message"; message: OllamaMessage }
-  | { kind: "tool"; name: string; args: Record<string, unknown>; result?: CallToolResult; denied?: boolean }
+  | {
+      kind: "tool";
+      name: string;
+      args: Record<string, unknown>;
+      result?: CallToolResult;
+      denied?: boolean;
+      repaired?: string[];
+      badArguments?: string;
+    }
   | { kind: "error"; text: string };
 
 const MAX_ROUNDS = 8;
@@ -88,7 +97,9 @@ export function Assistant() {
       if (item.kind === "tool") {
         const content = item.denied
           ? `Tool '${item.name}' is not enabled for you in this chat; do not call it again.`
-          : compactForModel({ isError: item.result?.isError ?? false, result: item.result ? resultData(item.result) : null });
+          : item.badArguments
+            ? item.badArguments
+            : compactForModel({ isError: item.result?.isError ?? false, result: item.result ? resultData(item.result) : null });
         messages.push({ role: "tool", content, tool_name: item.name });
       }
     }
@@ -106,6 +117,7 @@ export function Assistant() {
     setItems(history);
     const ollamaTools = enabledTools.map(toOllamaTool);
     const allowedNames = new Set(enabledTools.map((tool) => tool.name));
+    const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
         const reply = await chat(settings.ollamaUrl, settings.ollamaModel, toMessages(history), ollamaTools, controller.signal);
@@ -115,15 +127,24 @@ export function Assistant() {
         if (!calls.length) break;
         for (const call of calls) {
           const name = call.function.name;
-          const args = parseArguments(call.function.arguments);
           if (!allowedNames.has(name)) {
-            history = [...history, { kind: "tool", name, args, denied: true }];
+            history = [...history, { kind: "tool", name, args: parseArguments(call.function.arguments), denied: true }];
             setItems(history);
             continue;
           }
-          const pending: ChatItem = { kind: "tool", name, args };
+          const tool = toolByName.get(name);
+          const prepared = tool
+            ? prepareToolArguments(tool, call.function.arguments)
+            : { args: parseArguments(call.function.arguments), repaired: [] as string[], error: undefined };
+          if (prepared.error) {
+            // don't send a broken call: the message goes back to the model so it can retry
+            history = [...history, { kind: "tool", name, args: prepared.args, badArguments: prepared.error }];
+            setItems(history);
+            continue;
+          }
+          const pending: ChatItem = { kind: "tool", name, args: prepared.args, repaired: prepared.repaired };
           setItems([...history, pending]);
-          const result = await callTool(name, args);
+          const result = await callTool(name, prepared.args);
           history = [...history, { ...pending, result }];
           setItems(history);
         }
@@ -229,16 +250,23 @@ export function Assistant() {
           if (item.kind === "error") return <div key={index} className="bubble error">{item.text}</div>;
           if (item.kind === "tool") {
             return (
-              <div key={index} className={`tool-call ${item.denied ? "denied" : ""}`}>
+              <div key={index} className={`tool-call ${item.denied || item.badArguments ? "denied" : ""}`}>
                 <div className="tool-call-head">
                   🔧 <code>{item.name}</code>
                   {item.denied && <span className="badge danger">blocked (not enabled)</span>}
-                  {!item.denied && !item.result && <span className="muted"> running…</span>}
+                  {item.badArguments && <span className="badge danger">bad arguments (asked the model to retry)</span>}
+                  {item.repaired && item.repaired.length > 0 && (
+                    <span className="badge" title="fixed against the tool's schema before the call">
+                      repaired: {item.repaired.join(", ")}
+                    </span>
+                  )}
+                  {!item.denied && !item.badArguments && !item.result && <span className="muted"> running…</span>}
                 </div>
                 <details>
                   <summary>arguments</summary>
                   <JsonView value={item.args} />
                 </details>
+                {item.badArguments && <div className="error-text">{item.badArguments}</div>}
                 {item.result && (
                   <details open={item.result.isError}>
                     <summary className={item.result.isError ? "error-text" : ""}>
