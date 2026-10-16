@@ -101,7 +101,7 @@ If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md
 | `list_generated_files` | Lists the files you've made |
 | `import_midi` | Imports a MIDI file made elsewhere (base64) and reports what it contains |
 | `import_tab` | Converts a Guitar Pro tab or MusicXML/MSCZ score to MIDI with MuseScore (local or via the host worker) and imports it like `import_midi` |
-| `delete_midi_file` / `rename_midi_file` | Tidies up the output folder |
+| `delete_midi_file` / `rename_midi_file` / `rename_track` | Tidies up files and track names |
 | `prepare_vocal_score` → `map_vocal_lyrics` → `render_singing` → `get_singing_job` → `mix_song_with_vocals` → `export_vocal_song` | Sings a melody (VOICEVOX hum/kana, or DiffSinger voicebanks — English and exact phonemes; several banks with their own variants, male and female) and mixes it with the backing |
 
 The create tools accept **voicing** options (inversions, open/drop-2, voice leading, bass note),
@@ -185,11 +185,11 @@ Contributions are welcome — these are the areas where help is wanted most:
 
 - **Limits & hardening**: quotas (bars/tracks/file size/storage) and a storage TTL cleanup for
   long-running servers (per-client rate limiting shipped in v0.6.0)
-- **More music helpers**: bass-line generation from the chords, drum-pattern presets, genre
-  presets (jazz, pop, bossa, trap), section-based songs (verse/chorus/bridge)
-- **Interchange**: MusicXML export for MuseScore, multi-track naming polish
+- **Interchange**: MusicXML export for MuseScore
 - **Analysis**: Roman-numeral analysis relative to the detected key, and an `explain_progression`
   tool that returns the theory (numerals, function, cadences, variations)
+- **Mastering & plugin states**: a master-bus plugin chain with loudness targeting, and
+  automated plugin-state generation (parameter sweeps → named states)
 - **Project hygiene**: CONTRIBUTING/SECURITY docs, pre-commit hooks, stricter typing
 
 The [CHANGELOG](CHANGELOG.md) tracks what has shipped; releases follow semantic versioning.

@@ -7,11 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Planned: project folders (one folder per song), genre presets and song-form templates,
-bass-line and drum-pattern helpers, MusicXML export, Roman-numeral analysis and an
-`explain_progression` tool, a master-bus plugin chain with plugin-state generation, quotas
-(bars, tracks, file size, storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY,
-pre-commit, mypy).
+Planned: MusicXML export, Roman-numeral analysis and an `explain_progression` tool, a
+master-bus plugin chain with plugin-state generation, quotas (bars, tracks, file size,
+storage, TTL), and contributor hygiene (CONTRIBUTING, SECURITY, pre-commit, mypy).
+
+## [0.28.0] - 2026-10-16
+
+Projects, genre presets, groove helpers and song forms: songs become folders, and a whole
+backing can be composed in a few calls.
+
+### Added
+
+- **Project folders**: a file name may name a project (`"my_song/verse"`), so one song's
+  files stay together under `~/ChordSmith/my_song/`. Derived files (renders, stems, mixes,
+  copies, bakes, vocals, exports) default into their source's project; each folder gets a
+  `project.json` manifest; `list_generated_files` gains a `project` filter, a per-file
+  `project` field and a `projects` summary, and `rename_midi_file` can move a file (with its
+  sidecars) between projects. Every tool result now reports the addressable relative name
+  (`my_song/verse.mid`), and signed download URLs serve project paths.
+- **Genre presets** on the create tools: pop, rock, metal, jazz, bossa, classical, cinematic,
+  trap, edm, blues, funk and lofi — each bundles voicing and rhythm.
+- **`add_bassline`**: derives a bass line from the file's chord markers (analysis as fallback)
+  in five styles — root, root_fifth, eighth_pulse, octave and walking — with octave, velocity,
+  gate, swing and humanize options.
+- **`add_drums`**: lays a named groove over the whole song — four_on_floor, backbeat, rock,
+  metal, trap, boom_bap, bossa_nova (two bars), shuffle or waltz (3/4) — honoring the section
+  map's bars and rejecting meter changes it cannot follow.
+- **Song-form templates**: `create_empty_file` and `set_song_sections` take `form` (pop, rock,
+  ballad, jazz 32-bar AABA, 12-bar blues, edm, cinematic) and lay out named sections with the
+  common published bar counts and tempos; `bpm` flattens the map onto one tempo.
+- **`rename_track`**: writes a copy with one track renamed; renaming to an existing name is
+  rejected.
+
+### Changed
+
+- **Track names must be unique**: `add_track`, `add_bassline` and `add_drums` refuse a
+  `track_name` that already exists (the by-name tools match exactly), and `track_name` gains
+  length bounds.
+- **Path tricks are rejected, not munged**: `"../x"`-style names now fail with a clear error
+  instead of being silently sanitized to the last segment.
+- Tool count 39 -> 42; the description budget moved 24 -> 26 KB and the payload ceiling
+  248 -> 272 KB in the same patch (deliberate).
+- The README roadmap drops the shipped items and gains "Mastering & plugin states".
+
+### Fixed
+
+- `import_tab` keeps a project prefix when deriving the imported `.mid` name.
+- The skill's `loop` option example is the real object form and `normalize_peak_db`'s default
+  is documented as `null`; `scripts/vst_bridge.py` no longer defaults `--host-exe` to a
+  machine-specific path; a `ruff` formatting slip in `singing.py` that would fail CI is fixed.
 
 ## [0.27.0] - 2026-10-14
 
