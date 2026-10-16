@@ -62,6 +62,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [settings.serverUrl, settings.mcpPath, settings.bearerToken, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    const onPageHide = () => connectionRef.current?.abandon();
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
+
   const updateSettings = useCallback((next: Settings) => {
     saveSettings(next);
     setSettings(next);

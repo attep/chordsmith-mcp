@@ -12,15 +12,26 @@ export class McpConnection {
   private constructor(
     private readonly client: Client,
     private readonly transport: StreamableHTTPClientTransport,
+    private readonly endpoint: string,
+    private readonly headers: Record<string, string>,
   ) {}
 
   static async open(settings: Settings): Promise<McpConnection> {
-    const transport = new StreamableHTTPClientTransport(new URL(serverEndpoint(settings, settings.mcpPath)), {
-      requestInit: { headers: authHeaders(settings) },
-    });
+    const endpoint = serverEndpoint(settings, settings.mcpPath);
+    const headers = authHeaders(settings);
+    const transport = new StreamableHTTPClientTransport(new URL(endpoint), { requestInit: { headers } });
     const client = new Client(CLIENT_INFO);
     await client.connect(transport);
-    return new McpConnection(client, transport);
+    return new McpConnection(client, transport, endpoint, headers);
+  }
+
+  /** Best-effort session DELETE while the page unloads; a keepalive fetch outlives the page. */
+  abandon(): void {
+    const sessionId = this.transport.sessionId;
+    if (!sessionId) return;
+    const headers: Record<string, string> = { ...this.headers, "mcp-session-id": sessionId };
+    if (this.transport.protocolVersion) headers["mcp-protocol-version"] = this.transport.protocolVersion;
+    fetch(this.endpoint, { method: "DELETE", headers, keepalive: true }).catch(() => undefined);
   }
 
   get sessionId(): string | undefined {

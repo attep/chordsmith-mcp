@@ -35,6 +35,9 @@ CORS_ALLOW_HEADERS = [
 ]
 CORS_EXPOSE_HEADERS = ["mcp-session-id", "mcp-protocol-version", "www-authenticate"]
 MAX_INITIALIZE_BODY_BYTES = 64 * 1024
+# A session whose GET event stream closed (tab closed, client gone) and that sent nothing for
+# this long is no longer listed, even though the SDK keeps it until it times out.
+STREAM_GRACE_SECONDS = 10
 ACTIVE_STATES = ("queued", "running")
 
 
@@ -115,6 +118,8 @@ class SessionTracker:
     FastMCP does not expose its sessions' client info, so the tracker reads the (small)
     ``initialize`` request body, pairs it with the ``mcp-session-id`` response header, and
     forgets the session on DELETE. Requests that already carry a session id are not buffered.
+    Open GET event streams are counted so sessions whose client went away without a DELETE
+    (e.g. a closed browser tab) can be left out.
     """
 
     def __init__(self, app, path: str):
@@ -130,10 +135,18 @@ class SessionTracker:
         method = scope.get("method")
         if session_id:
             record = self.sessions.get(session_id)
+            stream = method == "GET" and record is not None
             if record is not None:
                 record["last_seen"] = time.time()
                 record["requests"] += 1
-            await self.app(scope, receive, send)
+                if stream:
+                    record["streams"] += 1
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                if stream:
+                    record["streams"] -= 1
+                    record["stream_closed_at"] = time.time()
             if method == "DELETE":
                 self.sessions.pop(session_id, None)
             return
@@ -154,7 +167,14 @@ class SessionTracker:
                 )
                 if new_id:
                     now = time.time()
-                    self.sessions[new_id] = {**client, "connected_at": now, "last_seen": now, "requests": 1}
+                    self.sessions[new_id] = {
+                        **client,
+                        "connected_at": now,
+                        "last_seen": now,
+                        "requests": 1,
+                        "streams": 0,
+                        "stream_closed_at": None,
+                    }
             await send(message)
 
         await self.app(scope, replay, capture)
@@ -164,7 +184,9 @@ class SessionTracker:
         if live_ids is not None:
             for gone in [key for key in self.sessions if key not in live_ids]:
                 del self.sessions[gone]
-        ids = set(self.sessions) | (live_ids or set())
+        now = time.time()
+        lost = {key for key, record in self.sessions.items() if _stream_lost(record, now)}
+        ids = (set(self.sessions) | (live_ids or set())) - lost
         rows = []
         for session_id in ids:
             record = self.sessions.get(session_id, {})
@@ -181,6 +203,13 @@ class SessionTracker:
             )
         rows.sort(key=lambda row: row["connected_at"] or "", reverse=True)
         return rows
+
+
+def _stream_lost(record: dict[str, Any], now: float) -> bool:
+    closed_at = record.get("stream_closed_at")
+    if closed_at is None or record.get("streams", 0) > 0:
+        return False
+    return now - max(closed_at, record.get("last_seen") or 0) > STREAM_GRACE_SECONDS
 
 
 def _header(scope, name: bytes) -> str | None:

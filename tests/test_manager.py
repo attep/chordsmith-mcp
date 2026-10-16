@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import httpx
@@ -129,6 +130,47 @@ def test_cors_preflight_and_session_tracking(http_app):
         closed = client.delete("/mcp", headers={**MCP_HEADERS, "mcp-session-id": session_id})
         assert closed.status_code == 200
         assert client.get("/api/status").json()["sessions"]["clients"] == []
+
+
+def test_sessions_whose_stream_closed_drop_out(monkeypatch):
+    import anyio
+
+    async def app(scope, receive, send):
+        if scope["method"] == "POST":
+            await receive()
+            await send(
+                {"type": "http.response.start", "status": 200, "headers": [(b"mcp-session-id", b"s1")]}
+            )
+            await send({"type": "http.response.body", "body": b""})
+
+    def request(method, body=b"", session=True):
+        headers = [(b"mcp-session-id", b"s1")] if session else []
+        scope = {"type": "http", "path": "/mcp", "method": method, "headers": headers}
+        messages = [{"type": "http.request", "body": body, "more_body": False}]
+
+        async def receive():
+            return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+        async def send(message):
+            pass
+
+        return tracker(scope, receive, send)
+
+    clock = [1000.0]
+    monkeypatch.setattr(manager.time, "time", lambda: clock[0])
+    tracker = manager.SessionTracker(app, "/mcp")
+    initialize = {"method": "initialize", "params": {"clientInfo": {"name": "tab"}}}
+
+    async def scenario():
+        await request("POST", json.dumps(initialize).encode(), session=False)
+        await request("GET")  # the event stream opens and the tab closes
+        assert [row["session_id"] for row in tracker.snapshot({"s1"})] == ["s1"]
+        clock[0] += manager.STREAM_GRACE_SECONDS + 1
+        assert tracker.snapshot({"s1"}) == []
+        await request("POST", b"{}")  # still talking: listed again
+        assert [row["client_name"] for row in tracker.snapshot({"s1"})] == ["tab"]
+
+    anyio.run(scenario)
 
 
 def test_extra_cors_origins_from_env(monkeypatch, store):
