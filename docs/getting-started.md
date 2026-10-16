@@ -35,7 +35,7 @@ if needed, and runs it.
    uvx --from git+https://github.com/attep/chordsmith-mcp chordsmith-mcp --version
    ```
 
-   You should see `chordsmith-mcp 0.1.0`.
+   You should see `chordsmith-mcp 0.27.0`.
 
 The command your AI app will run is:
 
@@ -204,6 +204,8 @@ ChordSmith reads these optional environment variables:
 | `CHORDSMITH_VST_DIR` | unset | Folder whose `.vst3` plugins `list_plugins` lists (Docker: `/vst`, mounted read-only) |
 | `CHORDSMITH_VST_HOST` | `vst_host` on PATH | The VST host binary, e.g. the released `vst_host.exe` on Windows (see [VST plugins](vst.md)) |
 | `CHORDSMITH_VST_LOAD_WAIT` | unset | Seconds `vst_host` waits for plugins to load samples before a VST render; only sent to hosts built with `--load-wait` support |
+| `CHORDSMITH_RATE_LIMIT` | `120` | Requests per minute per client on the MCP endpoint (`0` disables); the OAuth endpoints have their own `CHORDSMITH_AUTH_RATE_LIMIT` (30) |
+| `CHORDSMITH_TRUST_PROXY` | off | `1` trusts `CF-Connecting-IP` / `X-Forwarded-For` for rate-limit identities (only behind a trusted proxy) |
 
 The online-related variables are explained in [Run it online](remote.md#settings).
 

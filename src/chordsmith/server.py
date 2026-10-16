@@ -441,7 +441,7 @@ def _chord_type_rows() -> list[dict]:
 
 @mcp.tool(title="Create empty file", annotations=CREATES)
 def create_empty_file(
-    filename: Annotated[str, Field(description="Name for the new file, e.g. 'abyss'. '.mid' is added.")],
+    filename: Annotated[str, Field(description="Name for the new file, e.g. 'my_song'. '.mid' is added.")],
     sections: Annotated[
         list[SongSection] | None,
         Field(
@@ -1621,16 +1621,35 @@ def main() -> None:
     if args.transport == "streamable-http":
         import uvicorn
 
-        from chordsmith.ratelimit import RateLimitMiddleware, TokenBucketLimiter, rate_limit_from_env
+        from chordsmith.ratelimit import (
+            AUTH_ENDPOINT_PATHS,
+            RateLimitMiddleware,
+            TokenBucketLimiter,
+            auth_rate_limit_from_env,
+            rate_limit_from_env,
+            trust_proxy_from_env,
+        )
 
         try:
             limit = rate_limit_from_env()
+            auth_limit = auth_rate_limit_from_env()
         except ValueError as exc:
             parser.error(str(exc))
+        trust_proxy = trust_proxy_from_env()
         app = mcp.streamable_http_app()
+        limiters: dict[str, TokenBucketLimiter] = {}
         if limit > 0:
             logger.info("Rate limit: %d requests per minute per client.", limit)
-            app = RateLimitMiddleware(app, TokenBucketLimiter(limit), mcp.settings.streamable_http_path)
+            limiters[mcp.settings.streamable_http_path] = TokenBucketLimiter(limit)
+        if auth_limit > 0:
+            logger.info("OAuth endpoint rate limit: %d requests per minute per client.", auth_limit)
+            auth_limiter = TokenBucketLimiter(auth_limit)
+            for path in AUTH_ENDPOINT_PATHS:
+                limiters[path] = auth_limiter
+        if trust_proxy:
+            logger.info("Trusting proxy client-IP headers for rate-limit keys (CHORDSMITH_TRUST_PROXY).")
+        if limiters:
+            app = RateLimitMiddleware(app, limiters, trust_proxy=trust_proxy)
         uvicorn.run(app, host=args.host, port=args.port, log_level=mcp.settings.log_level.lower())
         return
     mcp.run(transport=args.transport)

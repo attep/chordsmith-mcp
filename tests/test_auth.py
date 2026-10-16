@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 
 from chordsmith import auth, server
 from chordsmith.auth import (
+    MAX_FAILED_LOGINS_PER_HOUR,
     MAX_FAILED_LOGINS_PER_MINUTE,
     PENDING_REQUEST_TTL_SECONDS,
     AuthConfig,
@@ -198,6 +199,44 @@ async def test_expired_login_link_and_rate_limit(tmp_path, monkeypatch):
     with pytest.raises(LoginFailed) as exc:
         await provider.complete_login(request_id, PASSWORD)
     assert exc.value.status_code == 429
+
+
+@pytest.mark.anyio
+async def test_sign_in_lockout_is_per_client_key(tmp_path, monkeypatch):
+    async def _fast_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(auth.asyncio, "sleep", _fast_sleep)
+    provider = _provider(tmp_path)
+    client = _client()
+    _, challenge = _pkce_pair()
+
+    async def attempt(password, key):
+        login_url = await provider.authorize(client, _params(challenge))
+        request_id = login_url.split("request_id=")[1]
+        return await provider.complete_login(request_id, password, client_key=key)
+
+    for _ in range(MAX_FAILED_LOGINS_PER_HOUR):
+        with pytest.raises(LoginFailed) as exc:
+            await attempt("wrong", "1.2.3.4")
+        assert exc.value.status_code == 401
+        provider._failed_logins.clear()  # simulate the minutes between attempts
+
+    with pytest.raises(LoginFailed) as locked:
+        await attempt(PASSWORD, "1.2.3.4")
+    assert locked.value.status_code == 429
+    assert "Try again in" in locked.value.message
+
+    provider._failed_logins.clear()
+    with pytest.raises(LoginFailed) as other:
+        await attempt("wrong", "5.6.7.8")
+    assert other.value.status_code == 401  # other clients are not locked
+
+    provider._locked_until["1.2.3.4"] = 0.0  # the lockout window passes
+    provider._failed_logins.clear()
+    redirect = await attempt(PASSWORD, "1.2.3.4")
+    assert redirect.startswith(REDIRECT_URI)
+    assert "1.2.3.4" not in provider._failure_log  # success clears the history
 
 
 @pytest.mark.anyio

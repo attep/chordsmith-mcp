@@ -4,5 +4,11 @@
 .pytest_cache
 .ruff_cache
 host/build
+data
+downloads
+state
+sfz
+vst
+voicebank
 tests
 docs
