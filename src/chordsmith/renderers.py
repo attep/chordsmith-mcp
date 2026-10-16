@@ -1576,7 +1576,7 @@ def register(mcp: FastMCP, store_provider) -> None:
             except RenderError:
                 resolved[name] = None
         return {
-            "filename": source.name,
+            "filename": store.relative_name(source),
             "path": str(source),
             "tracks": {name: spec.model_dump() for name, spec in specs.items()},
             "resolved": resolved,
@@ -1672,7 +1672,7 @@ def register(mcp: FastMCP, store_provider) -> None:
                 except RenderError:
                     resolved[name] = None
             result["file"] = {
-                "filename": source.name,
+                "filename": store.relative_name(source),
                 "tracks": [names[index] for index in note_tracks(midi)],
                 "specs": {name: spec.model_dump() for name, spec in specs.items()},
                 "resolved": resolved,
@@ -2048,15 +2048,17 @@ def register(mcp: FastMCP, store_provider) -> None:
                     ]
             _rewrite_track(midi.tracks[index], events)
             baked[name] = spec
-        with store.claimed_path(output_filename, f"{source.stem}_instruments", overwrite) as target:
+        with store.claimed_path(
+            output_filename, f"{source.stem}_instruments", overwrite, project=store.project_of(source)
+        ) as target:
             if target == source:
                 raise ValueError("Choose a different output_filename; the original file is never modified.")
             midi.save(target)
         return {
-            "source": source.name,
-            "filename": target.name,
+            "source": store.relative_name(source),
+            "filename": store.relative_name(target),
             "path": str(target),
-            "uri": f"midi://{target.name}",
+            "uri": f"midi://{store.relative_name(target)}",
             "tracks": {name: spec.model_dump() for name, spec in baked.items()},
             "warnings": warnings,
         }

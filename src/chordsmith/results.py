@@ -96,14 +96,26 @@ class FileEntry(TypedDict):
     filename: str
     uri: str
     kind: str
+    project: str | None
     size_bytes: int
     empty: bool
     modified: str
 
 
+class ProjectEntry(TypedDict):
+    name: str
+    files: int
+    midi: int
+    audio: int
+    last_modified: str | None
+    created: str | None
+    title: str | None
+
+
 class ListFilesResult(TypedDict):
     output_dir: str
     total: int
+    projects: list[ProjectEntry]
     files: list[FileEntry]
 
 

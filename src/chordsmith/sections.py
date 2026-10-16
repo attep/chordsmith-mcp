@@ -276,7 +276,7 @@ def register(mcp: FastMCP, store_provider) -> None:
             raise ValueError(f"Duplicate section names: {', '.join(duplicates)}.")
         resolved = write_sections(source, sections)
         return {
-            "filename": source.name,
+            "filename": store.relative_name(source),
             "path": str(source),
             "sections": [section.payload() for section in resolved],
             "total_beats": round(sum(section.total_beats for section in resolved), 3),

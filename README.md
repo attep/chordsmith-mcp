@@ -67,7 +67,8 @@ Quit it completely, reopen it, and type:
 > Use ChordSmith to make a happy I–V–vi–IV progression in G major, strummed, 110 BPM.
 
 Files are saved in a **ChordSmith** folder in your home folder (`~/ChordSmith`; Docker uses
-`/data`). Open the `.mid` file in your music app and that's it.
+`/data`) — use a project name like `my_song/verse` to keep one song's files together. Open the
+`.mid` file in your music app and that's it.
 
 If something doesn't work, see [docs/troubleshooting.md](docs/troubleshooting.md).
 

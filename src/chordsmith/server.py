@@ -89,9 +89,12 @@ Workflow:
    them; list_instruments shows the engines this server can run.
 
 Conventions:
-- Files live in the output folder (see list_generated_files); '.mid'/'.wav'/'.mp3' is added to
-  names automatically, and an existing name is never replaced unless overwrite=true (otherwise
-  a '_2' suffix is used).
+- Files live in the output folder, either directly or in a project folder (one per song):
+  address them as 'my_song/verse.mid'. New files land in the project you name; renders, stems
+  and mixes stay in their source file's project unless output_filename says otherwise.
+  '.mid'/'.wav'/'.mp3' is added to names automatically, and an existing name is never replaced
+  unless overwrite=true (otherwise a '_2' suffix is used). list_generated_files shows the
+  projects and their files.
 - Everything is deterministic for the same input and settings; create tools accept 'seed' for
   reproducible humanized renders, and render_singing accepts 'seed' to fix DiffSinger noise.
 - Errors are tool results with isError=true and a readable message that names the problem and
@@ -177,10 +180,10 @@ async def health_check(_request: Request) -> Response:
     return JSONResponse({"status": "ok", "version": __version__})
 
 
-@mcp.custom_route("/files/{filename}", methods=["GET"])
+@mcp.custom_route("/files/{path:path}", methods=["GET"])
 async def download_file(request: Request) -> Response:
     """Serve a generated file for a signed, expiring URL from get_midi_file/render_audio."""
-    filename = request.path_params["filename"]
+    filename = request.path_params["path"]
     if not delivery.verify(
         filename, request.query_params.get("expires", ""), request.query_params.get("token", "")
     ):
@@ -209,7 +212,10 @@ ChordList = Annotated[
 ]
 FileName = Annotated[
     str | None,
-    Field(description="Output file name, e.g. 'sad_song'. '.mid' is added. Default: built from the chords."),
+    Field(
+        description="Output file name, e.g. 'sad_song' or 'my_song/verse' (project folder + "
+        "name). '.mid' is added. Default: built from the chords."
+    ),
 ]
 Tempo = Annotated[float, Field(ge=20, le=300, description="Tempo in beats per minute.")]
 TimeSignature = Annotated[str, Field(description="Time signature such as '4/4', '3/4', '6/8'.")]
@@ -288,9 +294,9 @@ def _render(
             midi_type=midi_type,
         )
     return {
-        "filename": path.name,
+        "filename": store.relative_name(path),
         "path": str(path),
-        "uri": f"midi://{path.name}",
+        "uri": f"midi://{store.relative_name(path)}",
         "tempo": tempo,
         "time_signature": f"{time_signature[0]}/{time_signature[1]}",
         **result,
@@ -469,9 +475,9 @@ def create_empty_file(
                 raise ValueError(f"Duplicate section names: {', '.join(duplicates)}.")
             resolved = [section.payload() for section in sections_module.write_sections(target, sections)]
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         **info,
         "sections": resolved,
     }
@@ -499,16 +505,18 @@ def remove_track(
         raise ValueError(f"No track named '{track_name}'. Tracks: {available}.")
     if len(matches) > 1:
         raise ValueError(f"Several tracks are named '{track_name}'; rename them first.")
-    with store.claimed_path(output_filename, f"{source.stem}_no_{track_name}", overwrite) as target:
+    with store.claimed_path(
+        output_filename, f"{source.stem}_no_{track_name}", overwrite, project=store.project_of(source)
+    ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
         del midi.tracks[matches[0]]
         midi.save(target)
     return {
-        "source": source.name,
-        "filename": target.name,
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "removed": track_name,
         "total_tracks": len(midi.tracks),
     }
@@ -552,15 +560,17 @@ def transpose_midi(
         shift = (parse_key(to_key).tonic - parse_key(from_key).tonic) % 12
         semitones = shift - 12 if shift > 6 else shift
     direction = f"up{semitones}" if semitones >= 0 else f"down{-semitones}"
-    with store.claimed_path(output_filename, f"{source.stem}_{direction}", overwrite) as target:
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{direction}", overwrite, project=store.project_of(source)
+    ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never replaced.")
         info = transpose_file(source, target, semitones)
     return {
-        "source": source.name,
-        "filename": target.name,
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "semitones": semitones,
         **info,
     }
@@ -592,27 +602,41 @@ def list_generated_files(
     kind: Annotated[
         Literal["midi", "wav", "mp3"] | None, Field(description="Only files of this kind.")
     ] = None,
+    project: Annotated[
+        str | None,
+        Field(
+            description="Only this project folder's files; '.' lists files that are not in a "
+            "project. Omit to list everything."
+        ),
+    ] = None,
     limit: Annotated[
         int, Field(ge=1, le=2000, description="Most files to return, newest first (default 200).")
     ] = 200,
 ) -> results.ListFilesResult:
     """Return the files in the output folder (MIDI and rendered audio, newest first).
 
-    Read-only; each entry has a kind (midi/wav/mp3), a size and an ``empty`` flag, so you can
-    confirm a render landed and spot 0-byte leftovers. Filter with ``name_contains`` and
-    ``kind`` and cap the reply with ``limit``; ``total`` says how many files matched before the
-    cap. Use it to find file names for get_midi_file, get_file, analyze_midi, transpose_midi or
-    the singing tools.
+    Read-only; each entry has a kind (midi/wav/mp3), a size, an ``empty`` flag and its project
+    (null for files directly in the output folder), so you can confirm a render landed, spot
+    0-byte leftovers and see which song a file belongs to. ``projects`` summarizes the song
+    folders (file counts, newest activity, manifest title). Filter with ``name_contains``,
+    ``kind`` and ``project``, and cap the reply with ``limit``; ``total`` says how many files
+    matched before the cap. Use it to find file names for get_midi_file, get_file, analyze_midi,
+    transpose_midi or the singing tools.
     """
     root = store.ensure_root()
-    files = store.list_files()
+    files = store.list_files(project)
     if name_contains:
         needle = name_contains.lower()
         files = [entry for entry in files if needle in entry["filename"].lower()]
     if kind:
         files = [entry for entry in files if entry["kind"] == kind]
     total = len(files)
-    return {"output_dir": str(root), "total": total, "files": files[:limit]}
+    return {
+        "output_dir": str(root),
+        "total": total,
+        "projects": store.list_projects(),
+        "files": files[:limit],
+    }
 
 
 ReturnAs = delivery.ReturnAs
@@ -635,7 +659,7 @@ def get_midi_file(
     """
     path = store.existing_path(filename)
     data = path.read_bytes()
-    result = delivery.deliver_file(path.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(path), data, return_as, expires_in)
     result["mime_type"] = "audio/midi"
     return result
 
@@ -656,7 +680,7 @@ def get_file(
     """
     path = store.existing_media_path(filename)
     data = path.read_bytes()
-    result = delivery.deliver_file(path.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(path), data, return_as, expires_in)
     suffix = path.suffix.lower()
     result["mime_type"] = {".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(suffix, "audio/midi")
     return result
@@ -704,9 +728,9 @@ def import_audio(
         except (OSError, wave.Error):
             peak_db = None
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"audio://{target.name}",
+        "uri": f"audio://{store.relative_name(target)}",
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "mime_type": "audio/wav" if suffix == ".wav" else "audio/mpeg",
@@ -745,9 +769,9 @@ def import_midi(
     with store.claimed_path(filename, "imported", overwrite) as target:
         target.write_bytes(data)
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "size_bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "mime_type": "audio/midi",
@@ -792,12 +816,12 @@ def import_tab(
     except tabs.TabError as exc:
         raise ValueError(str(exc)) from None
     midi = mido.MidiFile(file=io.BytesIO(midi_bytes))
-    with store.claimed_path(Path(filename).stem + ".mid", "imported", overwrite) as target:
+    with store.claimed_path(str(Path(filename).with_suffix(".mid")), "imported", overwrite) as target:
         target.write_bytes(midi_bytes)
     return {
-        "filename": target.name,
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "size_bytes": len(midi_bytes),
         "sha256": hashlib.sha256(midi_bytes).hexdigest(),
         "mime_type": "audio/midi",
@@ -979,7 +1003,10 @@ def add_track(
     adds seeded timing/velocity variation after the tiling, so repeated loops breathe.
     """
     source = store.existing_path(filename)
-    with store.claimed_path(output_filename, f"{source.stem}_{track_name}", overwrite) as target:
+    project = store.project_of(source)
+    with store.claimed_path(
+        output_filename, f"{source.stem}_{track_name}", overwrite, project=project
+    ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
         if copy_from is not None:
@@ -1092,10 +1119,10 @@ def add_track(
             automation=ramps,
         )
     return {
-        "source": source.name,
-        "filename": target.name,
+        "source": store.relative_name(source),
+        "filename": store.relative_name(target),
         "path": str(target),
-        "uri": f"midi://{target.name}",
+        "uri": f"midi://{store.relative_name(target)}",
         "track_name": track_name,
         "channel": channel,
         "copied_from": copy_from,
@@ -1119,7 +1146,7 @@ def delete_midi_file(
     path = store.remove(filename)
     renderers.specs_path(path).unlink(missing_ok=True)
     sections.sections_sidecar_path(path).unlink(missing_ok=True)
-    return {"deleted": path.name}
+    return {"deleted": store.relative_name(path)}
 
 
 @mcp.tool(title="Rename MIDI file", annotations=DESTRUCTIVE)
@@ -1139,7 +1166,11 @@ def rename_midi_file(
         sidecar = sidecar_path(source)
         if sidecar.is_file():
             sidecar.replace(sidecar_path(target))
-    return {"filename": target.name, "path": str(target), "uri": f"midi://{target.name}"}
+    return {
+        "filename": store.relative_name(target),
+        "path": str(target),
+        "uri": f"midi://{store.relative_name(target)}",
+    }
 
 
 @mcp.tool(title="Render audio", annotations=CREATES)
@@ -1272,16 +1303,20 @@ def _render_single(
 ) -> dict[str, Any]:
     """One FluidSynth pass over the whole file, delivered like get_midi_file."""
     with store.claimed_path(
-        output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
+        output_filename or source.stem,
+        f"{source.stem}_{audio_format}",
+        overwrite,
+        f".{audio_format}",
+        project=store.project_of(source),
     ) as target:
         try:
             correction = audio.render(source, target, audio_format, soundfont, normalize_peak_db, effects)
         except audio.AudioError as exc:
             raise ValueError(str(exc)) from None
     data = target.read_bytes()
-    result = delivery.deliver_file(target.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(target), data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
-    result["source"] = source.name
+    result["source"] = store.relative_name(source)
     result["gain_correction_db"] = correction
     result["effects"] = effects_echo
     if audio_format == "wav":
@@ -1375,6 +1410,7 @@ def _render_stems(
         tracks = [index for index in tracks if names[index] not in muted]
     if not tracks:
         raise ValueError("This file has no unmuted note tracks to render.")
+    project = store.project_of(source)
     with tempfile.TemporaryDirectory() as scratch:
 
         def render_track(index: int):
@@ -1393,14 +1429,18 @@ def _render_stems(
                 # big sample library.
                 renderer.render(stem_midi, spec, working, effects)
                 if spec.chain or spec.effects:
-                    with store.claimed_path(None, f"{source.stem}_{name}_raw", extension=".wav") as raw_wav:
+                    with store.claimed_path(
+                        None, f"{source.stem}_{name}_raw", extension=".wav", project=project
+                    ) as raw_wav:
                         shutil.copyfile(working, raw_wav)
                 windows = renderers.section_gain_windows(spec, section_timeline)
                 if windows:
                     renderers.apply_section_gains(working, windows, spec.gain_db)
                 singing.apply_stem_chain(working, spec.chain)
                 renderers.apply_stem_effects(working, spec.effects)
-                with store.claimed_path(None, f"{source.stem}_{name}", extension=".wav") as stem_wav:
+                with store.claimed_path(
+                    None, f"{source.stem}_{name}", extension=".wav", project=project
+                ) as stem_wav:
                     shutil.copyfile(working, stem_wav)
             except renderers.RenderError as exc:
                 message = f"Track '{name}': {exc}"
@@ -1423,7 +1463,11 @@ def _render_stems(
             raise ValueError(f"Every track failed to render: {detail}")
         correction = 0.0
         with store.claimed_path(
-            output_filename or source.stem, f"{source.stem}_{audio_format}", overwrite, f".{audio_format}"
+            output_filename or source.stem,
+            f"{source.stem}_{audio_format}",
+            overwrite,
+            f".{audio_format}",
+            project=project,
         ) as target:
             combined = target if audio_format == "wav" else Path(scratch) / "mix.wav"
             try:
@@ -1437,9 +1481,9 @@ def _render_stems(
             except audio.AudioError as exc:
                 raise ValueError(str(exc)) from None
     data = target.read_bytes()
-    result = delivery.deliver_file(target.name, data, return_as, expires_in)
+    result = delivery.deliver_file(store.relative_name(target), data, return_as, expires_in)
     result["mime_type"] = "audio/wav" if audio_format == "wav" else "audio/mpeg"
-    result["source"] = source.name
+    result["source"] = store.relative_name(source)
     result["gain_correction_db"] = correction
     result["failed"] = failures or None
     if audio_format == "wav":
@@ -1456,7 +1500,9 @@ def _render_stems(
     stem_return = "url" if delivery.public_url() else return_as
     result["stems"] = [
         {
-            **delivery.deliver_file(stem.path.name, stem.path.read_bytes(), stem_return, expires_in),
+            **delivery.deliver_file(
+                store.relative_name(stem.path), stem.path.read_bytes(), stem_return, expires_in
+            ),
             "mime_type": "audio/wav",
             "track": stem.track,
             "gain_db": stem.gain_db,

@@ -8,8 +8,9 @@ license: This skill is MIT (matching ChordSmith). Voicebanks and engines have th
 
 ChordSmith is an MCP server that makes music files: it writes `.mid` files, renders them to
 `.wav`/`.mp3` with a soundfont, and sings melodies with VOICEVOX (Japanese kana or a wordless hum)
-or DiffSinger (English lyrics with a user-supplied voicebank). Everything lands in one output
-folder (`~/ChordSmith`; Docker uses `/data`).
+or DiffSinger (English lyrics with a user-supplied voicebank). Everything lands in the output
+folder (`~/ChordSmith`; Docker uses `/data`), directly or in a project folder per song —
+address files as `"my_song/verse.mid"` and derived files stay in the same project.
 
 If the `chordsmith` tools are not in the tool list, the server is not connected. Tell the user how
 to add it, then retry:

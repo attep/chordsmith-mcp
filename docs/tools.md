@@ -33,6 +33,16 @@ Files are always saved in the output folder (default `~/ChordSmith`, see
 (`"my song"` becomes `my_song.mid`), and an existing file is never replaced unless you set
 `overwrite: true`. Otherwise the new file gets a number, e.g. `my_song_2.mid`.
 
+### Project folders
+
+A file name may name a **project folder**, so every song's files stay together:
+`"my_song/verse"` writes `~/ChordSmith/my_song/verse.mid`, and later calls address it as
+`my_song/verse.mid`. Renders, stems, mix files and copies follow their source file's project
+unless you give an `output_filename` with another project. Each folder gets a small
+`project.json` manifest (name, creation date) so several tools or people can find the song they
+are working on; `list_generated_files` reports the projects and their files. Files saved without
+a project sit directly in the output folder, exactly as before.
+
 ## How tools appear to MCP clients
 
 Everything on this page is also machine-readable. MCP clients (and the assistants inside them)
@@ -671,23 +681,28 @@ make it return `?` (unknown) or wrong chords. `N.C.` means no notes are sounding
 
 ## list_generated_files
 
-Returns the output folder path, a `total` count and its files (newest first), each with size,
-date, a `kind` (`midi`/`wav`/`mp3`), an `empty` flag (0-byte crash leftovers) and a link
-scheme (`midi://` or `audio://`). Rendered audio is listed too, so you can confirm a render,
-stem or mix actually landed on disk.
+Returns the output folder path, a `total` count, a `projects` summary (each song folder with
+file counts, newest activity and the manifest's title/creation date) and its files (newest
+first), each with size, date, a `kind` (`midi`/`wav`/`mp3`), its `project` (null for files
+directly in the output folder), an `empty` flag (0-byte crash leftovers) and a link scheme
+(`midi://` or `audio://`). Rendered audio is listed too, so you can confirm a render, stem or
+mix actually landed on disk.
 
 | Option | Description |
 |---|---|
 | `name_contains` | Only files whose name contains this text (case-insensitive) |
 | `kind` | Only `"midi"`, `"wav"` or `"mp3"` files |
+| `project` | Only files of one project folder; `"."` lists files that are not in a project. Omit for everything |
 | `limit` | Most files to return, newest first (default 200) |
 
 ## delete_midi_file and rename_midi_file
 
-Tidy up the output folder. Both stay inside the folder; path tricks are cleaned up or rejected.
+Tidy up the output folder. Both stay inside the folder; path tricks are rejected.
 
-- `delete_midi_file(filename)` removes a file.
-- `rename_midi_file(filename, new_name)` renames a file and refuses to overwrite an existing one.
+- `delete_midi_file(filename)` removes a file (and its instrument/section sidecars).
+- `rename_midi_file(filename, new_name)` renames a file and refuses to overwrite an existing
+  one. `new_name` may name another project (`"other_song/chorus"`), which moves the file and
+  its sidecars there; a bare name keeps the file's folder.
 
 ---
 

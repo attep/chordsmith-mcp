@@ -459,14 +459,15 @@ async def test_delete_and_rename(store):
     assert "already exists" in conflict.content[0].text
 
     trick = await _call("rename_midi_file", {"filename": "new_song.mid", "new_name": "../escape"})
-    assert not trick.isError
-    assert (store.root / "escape.mid").is_file()
+    assert trick.isError  # traversal is rejected, never munged into a name
+    assert "usable project name" in trick.content[0].text
+    assert (store.root / "new_song.mid").is_file()
     assert not (store.root.parent / "escape.mid").exists()
 
-    deleted = await _call("delete_midi_file", {"filename": "escape.mid"})
-    assert deleted.structuredContent["deleted"] == "escape.mid"
-    assert not (store.root / "escape.mid").exists()
-    assert (await _call("delete_midi_file", {"filename": "escape.mid"})).isError
+    deleted = await _call("delete_midi_file", {"filename": "new_song.mid"})
+    assert deleted.structuredContent["deleted"] == "new_song.mid"
+    assert not (store.root / "new_song.mid").exists()
+    assert (await _call("delete_midi_file", {"filename": "new_song.mid"})).isError
 
 
 # ------------------------------------------------------------------ audio
