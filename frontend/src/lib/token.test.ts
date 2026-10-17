@@ -4,9 +4,12 @@ import {
   cacheKey,
   cachedAccessToken,
   hasRefreshCredentials,
+  invalidateAccessToken,
+  isAuthError,
   loadTokenCache,
   refreshAccessToken,
   saveTokenCache,
+  withAuthRetry,
   RENEW_MARGIN_MS,
 } from "./token";
 
@@ -97,5 +100,59 @@ describe("token cache", () => {
   it("treats missing credentials as no refresh support", () => {
     expect(hasRefreshCredentials({ ...SETTINGS, refreshToken: "" })).toBe(false);
     expect(hasRefreshCredentials({ ...SETTINGS, clientId: "" })).toBe(false);
+  });
+});
+
+describe("auth errors and retry", () => {
+  it("recognises the server's rejection messages", () => {
+    expect(isAuthError(new Error("/mcp: HTTP 401 unauthorized"))).toBe(true);
+    expect(isAuthError(new Error('{"error":"invalid_token"}'))).toBe(true);
+    expect(isAuthError(new Error("Authentication required"))).toBe(true);
+    expect(isAuthError(new Error("HTTP 500 boom"))).toBe(false);
+    expect(isAuthError("some string error")).toBe(false);
+  });
+
+  it("clears the cached access token", () => {
+    const storage = memoryStorage();
+    saveTokenCache(
+      { refreshKey: cacheKey(SETTINGS.refreshToken), accessToken: "at", expiresAt: Date.now() + 3600_000 },
+      storage,
+    );
+    expect(cachedAccessToken(SETTINGS, storage)).toBe("at");
+    invalidateAccessToken(storage);
+    expect(cachedAccessToken(SETTINGS, storage)).toBeNull();
+  });
+
+  it("retries once with a forced token after a 401", async () => {
+    const forced: (boolean | undefined)[] = [];
+    const used: (string | undefined)[] = [];
+    const result = await withAuthRetry(
+      async (force) => {
+        forced.push(force);
+        return force ? "fresh" : "stale";
+      },
+      async (token) => {
+        used.push(token);
+        if (token === "stale") throw new Error("/api/status: HTTP 401 invalid_token");
+        return "ok";
+      },
+    );
+    expect(result).toBe("ok");
+    expect(forced).toEqual([false, true]);
+    expect(used).toEqual(["stale", "fresh"]);
+  });
+
+  it("does not retry non-auth failures", async () => {
+    let calls = 0;
+    await expect(
+      withAuthRetry(
+        async () => "token",
+        async () => {
+          calls += 1;
+          throw new Error("/api/status: HTTP 500 boom");
+        },
+      ),
+    ).rejects.toThrow(/500/);
+    expect(calls).toBe(1);
   });
 });

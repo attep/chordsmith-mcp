@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { getHealth, getSession, getStatus, type Health, type SessionDetail, type Status } from "../lib/api";
 import { durationClass, formatDuration } from "../lib/format";
+import { withAuthRetry } from "../lib/token";
 import { useApp, usePolling } from "../lib/context";
 import { isFinal, JOB_TOOLS, type JobKind } from "../lib/jobs";
 import { resultData } from "../lib/mcp";
@@ -61,7 +62,7 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
   usePolling(
     async () => {
       try {
-        setHealth(await getHealth(settings, await getToken()));
+        setHealth(await withAuthRetry(getToken, (token) => getHealth(settings, token)));
         setHealthError(null);
       } catch (error) {
         setHealth(null);
@@ -74,7 +75,7 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
   usePolling(async () => {
     let current: Status | null = null;
     try {
-      current = await getStatus(settings, await getToken());
+      current = await withAuthRetry(getToken, (token) => getStatus(settings, token));
       setStatus(current);
       setStatusError(null);
     } catch (error) {
@@ -114,7 +115,9 @@ export function Dashboard({ onOpenTool }: { onOpenTool: (name: string, args: Rec
     async () => {
       if (!selectedSession) return;
       try {
-        setSessionDetail(await getSession(settings, selectedSession, await getToken()));
+        setSessionDetail(
+          await withAuthRetry(getToken, (token) => getSession(settings, selectedSession, token)),
+        );
         setSessionError(null);
       } catch (error) {
         setSessionDetail(null);

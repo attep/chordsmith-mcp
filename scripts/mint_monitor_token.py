@@ -10,6 +10,10 @@ The password is read from ``CHORDSMITH_AUTH_PASSWORD``, ``--password``, or (by d
 environment of a running Docker container (``--container``), so it never has to be typed or
 printed. The token file is a secret: keep it out of the repository.
 
+One refresh-token chain per consumer: every refresh rotates the token, so a second client that
+refreshes the same pair logs the first one out. Mint separate pairs (separate ``--out`` files)
+for the UI and for tools like ``assistant_rehearsal.py``.
+
 Usage:
     python scripts/mint_monitor_token.py --server https://your-host.example.com --out token.json
 """
@@ -32,6 +36,10 @@ import httpx
 REDIRECT = "http://localhost:5173/oauth/callback"
 
 
+class MintError(RuntimeError):
+    """Sign-in failed; the message says what to fix."""
+
+
 def password_from_container(container: str) -> str:
     raw = subprocess.run(
         ["docker", "inspect", container, "--format", "{{json .Config.Env}}"],
@@ -43,25 +51,22 @@ def password_from_container(container: str) -> str:
         key, _, value = entry.partition("=")
         if key == "CHORDSMITH_AUTH_PASSWORD":
             return value
-    raise SystemExit(f"CHORDSMITH_AUTH_PASSWORD not found in container '{container}'")
+    raise MintError(f"CHORDSMITH_AUTH_PASSWORD not found in container '{container}'")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--server", required=True, help="Public server URL, e.g. https://name.trycloudflare.com")
-    parser.add_argument("--out", default="monitor-token.json", help="Where to write the token file.")
-    parser.add_argument("--container", default="chordsmith", help="Docker container to read the password from.")
-    parser.add_argument(
-        "--password",
-        default=None,
-        help="The sign-in password (default: CHORDSMITH_AUTH_PASSWORD env, else the container env).",
-    )
-    args = parser.parse_args()
-    server = args.server.rstrip("/")
+def resolve_password(container: str, password: str | None = None) -> str:
+    """The sign-in password: explicit, environment, else the Docker container's environment."""
     import os
 
-    password = args.password or os.environ.get("CHORDSMITH_AUTH_PASSWORD") or password_from_container(args.container)
+    resolved = password or os.environ.get("CHORDSMITH_AUTH_PASSWORD") or password_from_container(container)
+    if not resolved:
+        raise MintError("No password given (CHORDSMITH_AUTH_PASSWORD env or the container env).")
+    return resolved
 
+
+def mint_tokens(server: str, password: str, out: Path) -> dict:
+    """Sign in through the server's OAuth flow and write the token file; returns its payload."""
+    server = server.rstrip("/")
     with httpx.Client(timeout=30, follow_redirects=True) as client:
         resource = (client.get(f"{server}/.well-known/oauth-protected-resource/mcp").json()).get("resource")
         registration = client.post(
@@ -76,8 +81,7 @@ def main() -> int:
             },
         )
         if registration.status_code not in (200, 201):
-            print("register failed:", registration.status_code, registration.text[:300])
-            return 1
+            raise MintError(f"register failed: HTTP {registration.status_code} {registration.text[:300]}")
         registered = registration.json()
         client_id = registered["client_id"]
         client_secret = registered.get("client_secret")
@@ -99,8 +103,7 @@ def main() -> int:
         authorize = client.get(f"{server}/authorize", params=params, follow_redirects=False)
         location = authorize.headers.get("location", "")
         if authorize.status_code not in (302, 303, 307) or "/login" not in location:
-            print("unexpected authorize response:", authorize.status_code, location or authorize.text[:300])
-            return 1
+            raise MintError(f"unexpected authorize response: HTTP {authorize.status_code} {location[:200]}")
         request_id = parse_qs(urlparse(location).query).get("request_id", [""])[0]
 
         login = client.post(
@@ -108,13 +111,11 @@ def main() -> int:
         )
         location = login.headers.get("location", "")
         if login.status_code not in (302, 303, 307):
-            print("sign-in failed:", login.status_code, "(wrong password or locked out?)")
-            return 1
+            raise MintError(f"sign-in failed: HTTP {login.status_code} (wrong password or locked out?)")
         query = parse_qs(urlparse(location).query)
         code = query.get("code", [""])[0]
         if not code or query.get("state", [""])[0] != state:
-            print("no authorization code in the sign-in redirect.")
-            return 1
+            raise MintError("no authorization code in the sign-in redirect.")
 
         form = {
             "grant_type": "authorization_code",
@@ -129,36 +130,47 @@ def main() -> int:
             form["resource"] = resource
         tokens = client.post(f"{server}/token", data=form)
         if tokens.status_code != 200:
-            print("token exchange failed:", tokens.status_code, tokens.text[:300])
-            return 1
+            raise MintError(f"token exchange failed: HTTP {tokens.status_code} {tokens.text[:300]}")
         payload = tokens.json()
 
         headers = {"Authorization": f"Bearer {payload['access_token']}", "Origin": REDIRECT.rsplit("/oauth", 1)[0]}
         status = client.get(f"{server}/api/status", headers=headers)
-        summary = (
-            f"api/status: HTTP {status.status_code}"
-            + (f" (version {status.json()['version']})" if status.status_code == 200 else "")
-        )
+        if status.status_code != 200:
+            raise MintError(f"the minted access token was rejected by /api/status: HTTP {status.status_code}")
+        version = status.json().get("version")
 
-    out = Path(args.out)
-    out.write_text(
-        json.dumps(
-            {
-                "server_url": server,
-                "mcp_path": "/mcp",
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": payload.get("refresh_token", ""),
-                "access_token": payload["access_token"],
-                "expires_at": int(time.time()) + int(payload.get("expires_in", 3600)),
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    data = {
+        "server_url": server,
+        "mcp_path": "/mcp",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": payload.get("refresh_token", ""),
+        "access_token": payload["access_token"],
+        "expires_at": int(time.time()) + int(payload.get("expires_in", 3600)),
+    }
+    out = Path(out)
+    out.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return {**data, "verified_version": version}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--server", required=True, help="Public server URL, e.g. https://name.trycloudflare.com")
+    parser.add_argument("--out", default="monitor-token.json", help="Where to write the token file.")
+    parser.add_argument("--container", default="chordsmith", help="Docker container to read the password from.")
+    parser.add_argument(
+        "--password",
+        default=None,
+        help="The sign-in password (default: CHORDSMITH_AUTH_PASSWORD env, else the container env).",
     )
-    print(f"signed in; {summary}")
-    print(f"token file written: {out.resolve()}")
+    args = parser.parse_args()
+    try:
+        data = mint_tokens(args.server, resolve_password(args.container, args.password), Path(args.out))
+    except MintError as exc:
+        print("mint failed:", exc)
+        return 1
+    print(f"signed in; api/status: HTTP 200 (version {data.get('verified_version')})")
+    print(f"token file written: {Path(args.out).resolve()}")
     print("Paste server_url, client_id and refresh_token into the manager UI's Settings.")
     print("The file is a secret - do not commit it.")
     return 0

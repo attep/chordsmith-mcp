@@ -5,8 +5,11 @@ the model sent, what the repair layer fixed (mirroring frontend/src/lib/argument
 server answered, and where a retry was needed. Run it after changes instead of clicking through
 the Assistant call by call:
 
-    python scripts/assistant_rehearsal.py --server https://your-host.example.com \
-        --token-file monitor-token.json [--model qwen3.6:latest]
+    python scripts/assistant_rehearsal.py --server https://your-host.example.com [--model qwen3.6:latest]
+
+Credentials: the rehearsal keeps its **own** token pair (``monitor-token.rehearsal.json``,
+auto-minted through the server's OAuth flow) so refreshing it can never rotate — and log out —
+the pair the manager UI uses. Pass ``--token-file`` for a different file or ``--token`` directly.
 
 The schema simplifier and the repair rules here mirror the frontend (ollama.ts / arguments.ts);
 keep them in sync when those change.
@@ -22,6 +25,9 @@ import time
 from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mint_monitor_token import MintError, mint_tokens, resolve_password  # noqa: E402
 
 MCP_HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
 MAX_ROUNDS = 10
@@ -459,15 +465,35 @@ def main() -> int:
     parser.add_argument("--ollama", default="http://127.0.0.1:11434", help="Ollama base URL.")
     parser.add_argument("--model", default="qwen3.6:latest", help="Ollama model id.")
     parser.add_argument("--token", default="", help="Bearer token (OAuth servers).")
-    parser.add_argument("--token-file", default="", help="monitor-token.json to refresh a token from.")
+    parser.add_argument(
+        "--token-file",
+        default="monitor-token.rehearsal.json",
+        help="The rehearsal's own token pair (auto-minted when missing); never the UI's file.",
+    )
+    parser.add_argument("--container", default="chordsmith", help="Docker container for the sign-in password.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="What to ask the model.")
     args = parser.parse_args()
 
     headers = {**MCP_HEADERS}
     if args.token:
         headers["Authorization"] = f"Bearer {args.token}"
-    elif args.token_file:
-        data = json.loads(Path(args.token_file).read_text(encoding="utf-8"))
+    else:
+        token_path = Path(args.token_file)
+        data: dict | None = None
+        if token_path.is_file():
+            try:
+                stored = json.loads(token_path.read_text(encoding="utf-8"))
+            except ValueError:
+                stored = None
+            if isinstance(stored, dict) and stored.get("server_url", "").rstrip("/") == args.server.rstrip("/"):
+                data = stored
+        if data is None:
+            try:
+                data = mint_tokens(args.server, resolve_password(args.container), token_path)
+            except MintError as exc:
+                print("could not mint rehearsal credentials:", exc)
+                return 1
+            print(f"minted its own credentials at {token_path.resolve()} (the UI's file is left alone)")
         with httpx.Client(timeout=30) as client:
             response = client.post(
                 f"{data['server_url']}/token",
@@ -481,7 +507,8 @@ def main() -> int:
             fresh = response.json()
         data["refresh_token"] = fresh.get("refresh_token", data["refresh_token"])
         data["access_token"] = fresh["access_token"]
-        Path(args.token_file).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        data["expires_at"] = int(time.time()) + int(fresh.get("expires_in", 3600))
+        token_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         headers["Authorization"] = f"Bearer {data['access_token']}"
 
     with httpx.Client(timeout=600) as client:

@@ -116,6 +116,13 @@ The token file is a secret — don't commit it. The server allows browser reques
 `localhost`/`127.0.0.1` origins by default; to open the UI from another address, start the
 server with `CHORDSMITH_CORS_ORIGINS=<that origin>`.
 
+**One refresh-token chain per consumer.** Every refresh rotates the pair, so a second client
+that refreshes the same token logs the first one out; mint separate pairs (`--out` files) for
+the UI and for tools. `scripts/assistant_rehearsal.py` keeps its own
+`monitor-token.rehearsal.json` (auto-minted) and never touches the UI's file. A stale manual
+**Bearer token** in Settings beats everything — clear it to use the refresh flow — and if an
+access token dies with a server restart the UI renews it on the 401 by itself.
+
 ## Opening the manager from another address
 
 The server allows browser requests from `localhost` and `127.0.0.1` on any port. To use the

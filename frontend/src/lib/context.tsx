@@ -2,7 +2,15 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { extractJobIds, loadJobs, mergeJobs, saveJobs, type KnownJob } from "./jobs";
 import { McpConnection, resultData, type CallToolResult, type Tool } from "./mcp";
 import { loadSettings, saveSettings, type Settings } from "./settings";
-import { cacheKey, cachedAccessToken, hasRefreshCredentials, refreshAccessToken, saveTokenCache } from "./token";
+import {
+  cacheKey,
+  cachedAccessToken,
+  hasRefreshCredentials,
+  invalidateAccessToken,
+  isAuthError,
+  refreshAccessToken,
+  saveTokenCache,
+} from "./token";
 
 export type ConnectionState = "connecting" | "connected" | "error";
 
@@ -16,7 +24,7 @@ interface AppContextValue {
   reconnect: () => void;
   callTool: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
   /** The bearer token to use right now: manual token, refreshed access token, or undefined. */
-  getToken: () => Promise<string | undefined>;
+  getToken: (force?: boolean) => Promise<string | undefined>;
   jobs: KnownJob[];
   rememberJobs: (jobs: KnownJob[]) => void;
   forgetJob: (jobId: string) => void;
@@ -41,12 +49,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const refreshInFlight = useRef<Promise<string | undefined> | null>(null);
 
   /** A fresh bearer token: the manual one, or a silent refresh against the token endpoint. */
-  const getToken = useCallback(async (): Promise<string | undefined> => {
+  const getToken = useCallback(async (force = false): Promise<string | undefined> => {
     const current = settingsRef.current;
     if (current.bearerToken) return current.bearerToken;
     if (!hasRefreshCredentials(current)) return undefined;
-    const cached = cachedAccessToken(current);
-    if (cached) return cached;
+    if (!force) {
+      const cached = cachedAccessToken(current);
+      if (cached) return cached;
+    }
     if (!refreshInFlight.current) {
       refreshInFlight.current = refreshAccessToken(current)
         .then((fresh) => {
@@ -74,7 +84,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     setConnectionState("connecting");
     setConnectionError(null);
-    (async () => McpConnection.open(settings, await getToken()))()
+    const open = async (force: boolean) => McpConnection.open(settings, await getToken(force));
+    open(false)
+      .catch(async (error: unknown) => {
+        // a 401 may just mean the cached access token died with a server restart: refresh + retry
+        if (!isAuthError(error)) throw error;
+        invalidateAccessToken();
+        return open(true);
+      })
       .then(async (opened) => {
         if (cancelled) {
           void opened.close();
@@ -90,7 +107,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setConnection(null);
         setTools([]);
         setConnectionState("error");
-        setConnectionError(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        setConnectionError(
+          isAuthError(error) && settingsRef.current.bearerToken
+            ? `${message} — the manual Bearer token was rejected; clear it in Settings to use the automatic refresh token.`
+            : message,
+        );
       });
     return () => {
       cancelled = true;

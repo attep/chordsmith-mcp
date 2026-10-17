@@ -19,4 +19,4 @@ state-local/
 host/build/
 *.zip
 downloads/
-monitor-token.json
+monitor-token*.json

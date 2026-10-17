@@ -51,6 +51,39 @@ export function saveTokenCache(cache: TokenCache, storage: Storage = localStorag
   storage.setItem(CACHE_KEY, JSON.stringify(cache));
 }
 
+/** Drop the cached access token so the next request refreshes (used after a 401). */
+export function invalidateAccessToken(storage: Storage = localStorage): void {
+  try {
+    storage.removeItem(CACHE_KEY);
+  } catch {
+    // ignore: a locked-down storage just means no cache to clear
+  }
+}
+
+/** True when an error means the server rejected the token (expired, revoked, missing). */
+export function isAuthError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /\b401\b|invalid_token|authentication required/i.test(text);
+}
+
+/**
+ * Run a request with the current token; on an auth error clear the cache, refresh once and
+ * retry. Access tokens live in the server's memory, so a container restart 401s a token the
+ * client still believes is fresh — this heals that without user action.
+ */
+export async function withAuthRetry<T>(
+  tokenProvider: (force?: boolean) => Promise<string | undefined>,
+  run: (token: string | undefined) => Promise<T>,
+): Promise<T> {
+  try {
+    return await run(await tokenProvider(false));
+  } catch (error) {
+    if (!isAuthError(error)) throw error;
+    invalidateAccessToken();
+    return await run(await tokenProvider(true));
+  }
+}
+
 export function hasRefreshCredentials(settings: Settings): boolean {
   return Boolean(settings.refreshToken && settings.clientId);
 }

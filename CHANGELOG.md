@@ -44,6 +44,11 @@ missing.
   dump. Guards: a test sweeps all 45 of the server's tool schemas through the repair layer, and
   `scripts/assistant_rehearsal.py` replays a whole song request through a live server and Ollama
   and reports every call. The MCP server's validation stays strict for every client.
+- **OAuth self-healing in the manager**: on a 401 the UI drops its cached access token, refreshes
+  once and retries — access tokens live in the server's memory, so a container restart used to
+  strand the UI until the cache expired; a rejected manual Bearer token now says to clear it.
+  `scripts/assistant_rehearsal.py` keeps its own token pair (`monitor-token.rehearsal.json`,
+  auto-minted) so rehearsals can never rotate — and log out — the UI's refresh token.
 
 ## [0.31.0] - 2026-10-16
 
