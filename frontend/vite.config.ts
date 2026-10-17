@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5173, strictPort: true },
+  // host binds 0.0.0.0 so the dev container is reachable through the published port
+  server: { port: 5173, strictPort: true, host: true },
   test: { environment: "jsdom" },
 });

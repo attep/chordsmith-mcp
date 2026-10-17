@@ -1,0 +1,29 @@
+# Development frontend: the manager UI's Vite dev server in a container.
+#
+#   docker compose -f docker-compose.dev.yml up -d                     # start (first run builds)
+#   docker compose -f docker-compose.dev.yml exec frontend npm test    # unit tests
+#   docker compose -f docker-compose.dev.yml up -d --build frontend    # after dependency changes
+#   docker compose -f docker-compose.dev.yml logs -f frontend
+#
+# HMR polls the filesystem (CHOKIDAR_USEPOLLING) because Docker Desktop on Windows does not
+# forward file-change events from the host into the container.
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0
+    ports:
+      - "5173:5173"
+    environment:
+      CHOKIDAR_USEPOLLING: "1"
+    volumes:
+      - ./frontend:/app
+      # native deps (esbuild/rollup) do not survive Windows bind mounts: keep node_modules
+      # in the image and let this volume carry it over the bind-mounted source
+      - frontend-node-modules:/app/node_modules
+
+volumes:
+  frontend-node-modules:

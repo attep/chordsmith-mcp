@@ -49,6 +49,12 @@ missing.
   strand the UI until the cache expired; a rejected manual Bearer token now says to clear it.
   `scripts/assistant_rehearsal.py` keeps its own token pair (`monitor-token.rehearsal.json`,
   auto-minted) so rehearsals can never rotate — and log out — the UI's refresh token.
+- **Development stack**: the manager UI's Vite dev server runs in Docker
+  (`docker compose -f docker-compose.dev.yml`; filesystem polling because Docker Desktop does
+  not forward file-change events, `node_modules` in a named volume), `scripts/start-bridge.cmd`
+  starts the Windows VST bridge with the token check, and `AGENTS.md` records the verification
+  policy: fast checks (pytest, ruff, mypy, frontend tests/build) on every commit; rehearsals,
+  container rebuilds and redeploys only on explicit request.
 
 ## [0.31.0] - 2026-10-16
 

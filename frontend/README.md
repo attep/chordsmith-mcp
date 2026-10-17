@@ -58,15 +58,18 @@ Check it's running: open <http://localhost:8000/healthz>. You should see
 
 ## 2. Start the manager
 
-In a second terminal, from this `frontend/` folder:
+In a second terminal, from the repository root:
 
 ```bash
-npm install
-npm run dev
+docker compose -f docker-compose.dev.yml up -d
 ```
 
 Open <http://localhost:5173>. The dot in the top right turns green when it's connected.
 If your server isn't on `http://localhost:8000`, change it under **Settings**.
+
+The container serves the working tree with HMR (change detection polls, since Docker Desktop
+does not forward Windows file-change events). Without Docker, Node 22 works too: `npm install`
+then `npm run dev` from this folder.
 
 ## 3. Optional: Ollama assistant
 

@@ -16,7 +16,9 @@ pytest -q                   # run all tests
 ruff check src tests        # lint
 ruff format src tests       # format
 mypy                        # typing for the curated module set (see pyproject.toml)
-cd frontend && npm ci && npm test && npm run build   # manager UI checks (Node 22)
+docker compose -f docker-compose.dev.yml up -d                        # manager UI dev server (:5173)
+docker compose -f docker-compose.dev.yml exec frontend npm test       # frontend unit tests
+docker compose -f docker-compose.dev.yml exec frontend npm run build  # typecheck + build
 chordsmith-mcp              # run the server on stdio (waits for a client; Ctrl+C to stop)
 npx @modelcontextprotocol/inspector .venv/bin/chordsmith-mcp   # try tools in a browser
 docker build -t chordsmith-mcp .                                # build the Docker image
@@ -24,6 +26,23 @@ docker build -t chordsmith-mcp .                                # build the Dock
 
 Optional: `pip install pre-commit && pre-commit install` runs ruff and mypy on every commit
 (see `.pre-commit-config.yaml`).
+
+## Dev stack (Docker)
+
+The manager UI's Vite dev server runs in a container so it can be managed with Docker commands
+instead of host processes (`docker compose -f docker-compose.dev.yml up -d`, `restart frontend`,
+`logs -f frontend`; `--build frontend` after `package-lock.json` changes). Two details make it
+work on Windows:
+
+- `CHOKIDAR_USEPOLLING=1`: Docker Desktop does not forward host file-change events into the
+  container, so HMR polls the filesystem.
+- `node_modules` lives in a named volume (native esbuild/rollup binaries do not survive
+  Windows bind mounts); the source is bind-mounted over it.
+
+Server-side work targets the hosted service (its public URL or `127.0.0.1:18000`); there is no
+local server process. Python tests run in the host `.venv`, frontend tests inside the container.
+The Windows-only VST bridge is started with `scripts/start-bridge.cmd` (Ollama stays a host app).
+
 
 CI (GitHub Actions) runs lint, format check and tests on Python 3.10 and 3.12 on tags and pull
 requests (and manually via workflow dispatch).

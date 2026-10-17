@@ -1,0 +1,8 @@
+# Dev container for the manager UI: deps baked in at build, source bind-mounted, Vite with HMR.
+FROM node:22-slim
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
