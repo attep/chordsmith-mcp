@@ -2134,9 +2134,10 @@ def _render_stems(
     else:
         result["peak_db"] = None
         result["clipping"] = False
-    # Stem diagnostics: a stem at full scale or a wide level spread inside one file usually
-    # means a spec gain (or a plugin output) is off — say so before the mix hides it.
-    stem_peaks = [(stem.track, round(audio.wav_peak_db(stem.path), 2)) for stem in stems]
+    # Stem diagnostics: compare the levels as the mix will hear them (raw peak + the spec's
+    # gain_db trim) — a quiet stem raised by its gain is fine, one left at full scale in the
+    # mix usually means a spec gain (or a plugin output) is off.
+    stem_peaks = [(stem.track, round(audio.wav_peak_db(stem.path) + stem.gain_db, 2)) for stem in stems]
     warnings: list[str] = []
     if result["clipping"]:
         warnings.append(
@@ -2145,8 +2146,8 @@ def _render_stems(
     for track, track_peak in stem_peaks:
         if track_peak > -0.1:
             warnings.append(
-                f"Track '{track}' renders at full scale ({track_peak:g} dBFS); trim its gain_db or "
-                "add a limiter stage."
+                f"Track '{track}' sits at full scale in the mix ({track_peak:g} dBFS after its "
+                "gain_db); trim it or add a limiter stage."
             )
     if stem_peaks:
         loudest_track, loudest_peak = max(stem_peaks, key=lambda entry: entry[1])

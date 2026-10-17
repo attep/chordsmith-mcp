@@ -257,9 +257,14 @@ async def test_stem_diagnostics_warn_about_hot_and_uneven_stems(store, monkeypat
     monkeypatch.setattr(
         renderers, "combine_stems", lambda stems, target: _write_sine(target, amplitude=32767)
     )
+    # the quiet stem is trimmed up in the mix: the warning must use the gain-adjusted level
+    await _call(
+        "set_track_instrument",
+        {"filename": song, "tracks": {"Bass": {"engine": "fluidsynth", "gain_db": 12.0}}},
+    )
     result = await _call("render_audio", {"filename": song, "stems": True})
     assert not result.isError, result.content[0].text
     warnings = result.structuredContent["warnings"] or []
     assert any("full scale" in warning for warning in warnings), warnings
-    assert any("dB under" in warning for warning in warnings), warnings
+    assert any("32.3 dB under" in warning for warning in warnings), warnings
     assert any("combined mix clips" in warning for warning in warnings), warnings
