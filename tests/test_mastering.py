@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+import subprocess
 import wave
 from pathlib import Path
 
+import mido
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
@@ -65,6 +67,31 @@ def test_apply_master_limiter_only_guards_the_ceiling(tmp_path):
     report = mastering.apply_master(path, MasterSettings(limiter=LimiterSettings(enabled=True)))
     assert report["peak_db"] <= -0.9
     assert report["limiter_reduction_db"] > 0
+
+
+def test_mastering_scratch_file_stays_on_the_target_filesystem(tmp_path, monkeypatch):
+    """The mastered temp file must live next to its target.
+
+    The output folder and the system temp dir can be different filesystems (Docker mounts
+    /data separately), where renaming the scratch file raises EXDEV (Errno 18) and the master
+    stage fails after the render is otherwise finished. Guard the placement, not the rename.
+    """
+    _skip_without_ffmpeg()
+    path = tmp_path / "song.wav"
+    _write_sine(path, amplitude=2000)
+    outputs: list[Path] = []
+    real_run = subprocess.run
+
+    def recording_run(command, **kwargs):
+        outputs.append(Path(str(command[-1])))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(mastering.subprocess, "run", recording_run)
+    mastering.apply_master(path, MasterSettings(loudness_target_lufs=-20.0))
+    scratch_runs = [output for output in outputs if output.name.endswith(".master.tmp.wav")]
+    assert scratch_runs, f"no mastering pass recorded: {outputs}"
+    assert all(output.parent == path.parent for output in scratch_runs)
+    assert not (path.parent / (path.stem + ".master.tmp" + path.suffix)).exists()
 
 
 class _FakeRenderer:
@@ -194,3 +221,45 @@ def test_mix_without_master_effects_skips_the_plugin_pass(tmp_path, monkeypatch)
     info = singing.mix_tracks(backing, vocal, target, vocal_level_db=0.0, normalize_peak_db=-1.0)
     assert target.is_file()
     assert info["peak_db"] <= -0.9
+
+
+async def test_stem_diagnostics_warn_about_hot_and_uneven_stems(store, monkeypatch):
+    """A full-scale stem, a far quieter stem and a clipped sum all get named warnings."""
+    await _call("create_chord_progression", {"chords": ["Am", "F"], "filename": "song"})
+    added = await _call(
+        "add_track",
+        {
+            "filename": "song.mid",
+            "track_name": "Bass",
+            "notes": [{"pitch": "A2", "start_beat": 0, "beats": 1.0}],
+        },
+    )
+    song = added.structuredContent["filename"]
+
+    class FakeRenderer:
+        name = "fluidsynth"
+        notes = "test renderer"
+
+        def available(self):
+            return True
+
+        def render(self, midi, spec, out, effects=None):
+            names = [
+                message.name
+                for track in mido.MidiFile(midi).tracks
+                for message in track
+                if message.type == "track_name"
+            ]
+            # the Bass stem comes out far quieter than the chord track
+            _write_sine(out, amplitude=200 if "Bass" in names else 32767)
+
+    monkeypatch.setitem(renderers.RENDERERS, "fluidsynth", FakeRenderer())
+    monkeypatch.setattr(
+        renderers, "combine_stems", lambda stems, target: _write_sine(target, amplitude=32767)
+    )
+    result = await _call("render_audio", {"filename": song, "stems": True})
+    assert not result.isError, result.content[0].text
+    warnings = result.structuredContent["warnings"] or []
+    assert any("full scale" in warning for warning in warnings), warnings
+    assert any("dB under" in warning for warning in warnings), warnings
+    assert any("combined mix clips" in warning for warning in warnings), warnings

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -12,11 +12,38 @@ RhythmPattern = Literal[
 ]
 
 
+class RhythmHit(BaseModel):
+    """One explicit chord hit: a plain beat number, or this object for extra detail.
+
+    ``{"beat": 0.75}`` lands at beat 0.75; add ``"velocity"`` for a different loudness and
+    ``"gate"`` for a different length (a fraction of the gap to the next hit, or to the chord
+    end for the last hit).
+    """
+
+    beat: float = Field(ge=0, le=64, description="Where the hit lands, in beats from the chord start.")
+    velocity: int | None = Field(
+        None, ge=1, le=127, description="This hit's loudness, 1-127. Default: the rhythm's velocity."
+    )
+    gate: float | None = Field(
+        None,
+        gt=0,
+        le=1,
+        description="Fraction of the gap to the next hit this hit sounds for (1.0 = up to the "
+        "next hit). Default: the rhythm's gate.",
+    )
+
+
 class ChordEvent(BaseModel):
     """A chord with its own length, e.g. {"chord": "Am", "beats": 2}."""
 
     chord: str = Field(description="Chord symbol, e.g. 'Am', 'Cmaj7', 'G/B'.")
     beats: float = Field(gt=0, le=64, description="Length of this chord in beats (quarter notes).")
+    hits: list[float | RhythmHit] | None = Field(
+        None,
+        max_length=64,
+        description="Hit pattern just for this chord, same format as the rhythm's hits "
+        '(numbers, or {"beat", "velocity", "gate"} objects). Overrides the rhythm\'s hits here.',
+    )
 
 
 class NumeralEvent(BaseModel):
@@ -24,6 +51,12 @@ class NumeralEvent(BaseModel):
 
     numeral: str = Field(description="Roman numeral, e.g. 'i', 'bVII', 'V7', 'vii°', 'V7/V'.")
     beats: float = Field(gt=0, le=64, description="Length of this chord in beats (quarter notes).")
+    hits: list[float | RhythmHit] | None = Field(
+        None,
+        max_length=64,
+        description="Hit pattern just for this chord, same format as the rhythm's hits "
+        '(numbers, or {"beat", "velocity", "gate"} objects). Overrides the rhythm\'s hits here.',
+    )
 
 
 class Tuplet(BaseModel):
@@ -492,10 +525,11 @@ class Rhythm(BaseModel):
     humanize: Humanize | None = Field(
         None, description="Adds small, seed-controlled timing/velocity variation for a less robotic feel."
     )
-    hits: list[Annotated[float, Field(ge=0)]] | None = Field(
+    hits: list[float | RhythmHit] | None = Field(
         None,
         max_length=64,
         description="Explicit chord hit positions in beats, e.g. [0, 0.75, 1.5, 2.25] for off-beat "
-        "stabs, chugs or gallops. Overrides pattern/subdivision/swing; gate, velocity and "
-        "humanize still apply.",
+        'stabs, chugs or gallops; an entry can be {"beat", "velocity", "gate"} to shape that one '
+        "hit. Up to 64 hits. Overrides pattern/subdivision/swing; a hit without its own gate or "
+        "velocity uses the rhythm's. Hits at or past the chord length are skipped with a warning.",
     )

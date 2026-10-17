@@ -35,6 +35,9 @@ def test_researched_bar_counts():
     assert [section.bars for section in jazz] == [8, 8, 8, 8]  # 32-bar AABA
     blues = forms.SONG_FORMS["blues"]
     assert [section.bars for section in blues] == [12, 12, 12]
+    metal = forms.SONG_FORMS["metal"]
+    assert metal[1].name == "Riff" and any(section.name == "Breakdown" for section in metal)
+    assert {section.bpm for section in metal} == {150}
     cinematic = forms.SONG_FORMS["cinematic"]
     assert cinematic[-2].name == "Climax" and cinematic[-2].bpm == 120  # builds to the climax
     assert cinematic[-1].bpm < cinematic[-2].bpm

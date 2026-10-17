@@ -10,6 +10,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
 long-running servers.
 
+## [0.33.0] - 2026-10-17
+
+Safer masters everywhere, expressive hit patterns, and a bass line that can follow any track.
+
+### Fixed
+
+- **Master stage across filesystems**: a master chain's intermediate file now lives in the
+  output file's own folder and is renamed into place, so mastered renders no longer fail with
+  `Invalid cross-device link` when the scratch directory and the output folder sit on different
+  mounts (the common hosted layout). Mixes and masters without plugins were unaffected.
+- **Stem safety net**: `render_audio` with `stems: true` now reports `warnings` when the
+  summed mix clips, a stem renders at full scale, or two stems sit more than 12 dB apart — the
+  level mistakes a mix would otherwise hide, named by track. Nothing about a healthy render
+  changes.
+- Tool docs and help text no longer use one particular voicebank or captured plugin state as
+  the example; examples point at `list_singing_voices` and `list_plugin_states` instead. The
+  `add_bassline` docs now say which parts of a genre are named presets and which are
+  role-based styles.
+
+### Added
+
+- **Per-hit detail in `hits`**: an entry can be `{"beat": 2.5, "velocity": 110, "gate": 0.4}`
+  to shape one hit's loudness and length (plain beat numbers keep working), and a chord or
+  numeral object can carry its own `hits` that override the rhythm's for that chord only. A
+  hit at or past the chord's length is now skipped with a warning instead of failing the
+  whole file.
+- **`add_bassline` style `follow`**: with `rhythm_track` naming another track, the bass root
+  lands at every one of its note onsets and copies each onset's velocity (a chord window with
+  no onsets holds the root) — a locked bass without writing notes by hand.
+- **`get_vocal_mapping`**: re-read a stored mapping's per-note plan (lyrics, phonemes,
+  timings) when the original reply was lost; render jobs also echo their `lyrics` and
+  `wordless` flag, so a job report still says what was sung. 46 tools.
+- **`metal` song form**: Intro · Riff · Verse 1 · Chorus 1 · Breakdown · Solo · Chorus 2 ·
+  Outro at 150 bpm, with its section map in the Song forms table.
+- A polymeter recipe in the tool docs: tuplet slots position a layer that does not share the
+  song's grid (4:3 hemiola included), exact over long loops.
+
 ## [0.32.0] - 2026-10-16
 
 See what a connected client is doing — and give the vocal mix the whole-song plugin slot it was

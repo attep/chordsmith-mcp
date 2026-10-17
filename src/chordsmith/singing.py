@@ -198,6 +198,8 @@ class SingingJob:
     echo_settings: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
+    lyrics: list[str] | None = None
+    wordless: bool | None = None
 
 
 @dataclass
@@ -858,8 +860,8 @@ class SoftSettings(BaseModel):
     """Soft-voice controls.
 
     VOICEVOX uses energy and volume_cap. DiffSinger voices use velocity, gender, expr, steps and
-    depth; breathiness/voicing/tension pass through to voicebanks that declare them (Hanami
-    declares none of the three and they are refused for it).
+    depth; breathiness/voicing/tension pass through to voicebanks that declare them (a bank
+    without them is refused with an error naming the missing flag).
     """
 
     energy: float = Field(
@@ -876,7 +878,7 @@ class SoftSettings(BaseModel):
         ge=0.0,
         le=1.0,
         description="DiffSinger only: breathiness embedding, 0-1. Needs a voicebank that declares "
-        "use_breathiness_embed (Hanami does not); refused with a clear error otherwise.",
+        "use_breathiness_embed; refused with a clear error otherwise.",
     )
     voicing: float | None = Field(
         None,
@@ -994,7 +996,7 @@ def _settings_dict(settings: SoftSettings | None, engine: str, voice_id: str | N
 
 
 def parse_voice_engine(voice_id: str) -> tuple[str, str]:
-    """Split a voice id into (engine, rest): 'voicevox:6000' or 'diffsinger:hanami/nectar'."""
+    """Split a voice id into (engine, rest): 'voicevox:6000' or 'diffsinger:<bank>/<variant>'."""
     engine, _, rest = voice_id.partition(":")
     if engine not in ("voicevox", "diffsinger") or not rest:
         raise SingingError(f"Unknown voice '{voice_id}'. Use list_singing_voices to pick one.")
@@ -1215,6 +1217,9 @@ def start_job(
         created_at=time.time(),
         source=score.source,
         echo_settings=echo_settings if echo_settings is not None else dict(settings),
+        # the words travel with the job, so a report read days later still says what was sung
+        lyrics=None if mapping.wordless else [note.lyric for note in mapping.notes if not note.is_rest],
+        wordless=mapping.wordless,
     )
     with _registry.lock:
         _registry.jobs[job.job_id] = job
@@ -1229,6 +1234,9 @@ def _job_payload(job: SingingJob) -> dict:
         "job_id": job.job_id,
         "status": job.status,
         "voice_id": job.voice_id,
+        "mapping_id": job.mapping_id,
+        "wordless": job.wordless,
+        "lyrics": job.lyrics,
         "source": job.source or None,
         "created_at": datetime.fromtimestamp(job.created_at, timezone.utc).isoformat(timespec="seconds"),
         "progress": job.progress,
@@ -3051,7 +3059,8 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             str | None,
             Field(
                 description="DiffSinger only: the target voice id from list_singing_voices, e.g. "
-                "'diffsinger:hanami/nectar' — phonemes and words are validated against that "
+                "'diffsinger:<bank>/<variant>' — pick one from list_singing_voices; phonemes and "
+                "words are validated against that "
                 "voicebank. Omit to validate against the first configured bank."
             ),
         ] = None,
@@ -3095,6 +3104,21 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         _persist_singing()
         return _mapping_payload(mapping)
 
+    @mcp.tool(title="Get vocal mapping", annotations=_READ_ONLY)
+    def get_vocal_mapping(
+        mapping_id: Annotated[str, Field(description="Mapping id from map_vocal_lyrics.")],
+    ) -> results.MappingResult:
+        """Re-read a stored mapping; returns the same per-note plan map_vocal_lyrics did.
+
+        Read-only. Use it to recover a mapping's lyrics, phonemes and timings when the original
+        reply was lost (a restart, or a session that ended first); mappings live 24 hours.
+        """
+        with _registry.lock:
+            mapping = _registry.mappings.get(mapping_id)
+        if mapping is None:
+            raise SingingError(f"Mapping '{mapping_id}' not found (mappings expire after 24 hours).")
+        return _mapping_payload(mapping)
+
     @mcp.tool(title="Render singing", annotations=_CREATES)
     def render_singing(
         mapping_id: Annotated[str, Field(description="Mapping id from map_vocal_lyrics.")],
@@ -3102,7 +3126,7 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
             str,
             Field(
                 description="Voice id from list_singing_voices: 'voicevox:6000' or "
-                "'diffsinger:hanami/nectar'."
+                "'diffsinger:<bank>/<variant>'; pick one from list_singing_voices."
             ),
         ],
         settings: Annotated[
@@ -3119,9 +3143,9 @@ def register(mcp: FastMCP, store_provider: Callable[[], FileStore]) -> None:
         Creates a wav when the job finishes; poll get_singing_job. The job record is kept for
         24 hours (the rendered file stays in the output folder). Repeating an identical request
         reuses the finished job instead of rendering twice. A 'seed' in settings fixes DiffSinger's
-        sampling noise so the same input renders identical bytes (tested on Hanami v1.0; not
-        promised across voicebank versions). Failures (missing voicebank, engine unreachable) are
-        reported on the job as status 'failed' with the reason.
+        sampling noise so the same input renders identical bytes (verified with DiffSinger
+        voicebanks; not promised across voicebank versions). Failures (missing voicebank, engine
+        unreachable) are reported on the job as status 'failed' with the reason.
         """
         with _registry.lock:
             mapping = _registry.mappings.get(mapping_id)

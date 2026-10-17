@@ -130,8 +130,8 @@ def _bank_fingerprint(bank: Path) -> str:
 def _match_bank(identifier: str) -> Path | None:
     """Resolve a bank identifier: a folder path, a folder name, or a slug/word in either.
 
-    ``hanami`` finds ``Hoshino Hanami ~AIdol~ for DiffSinger v1.0`` — the folder slug, the
-    character name and any word inside them are all accepted, case-insensitively.
+    A short word finds the folder whose slug, character name or path word contains it —
+    case-insensitively.
     """
     text = str(identifier).strip()
     if not text:
@@ -405,9 +405,9 @@ def soft_controls(identifier: str | None = None) -> dict | None:
     DiffSinger voicebanks declare whether they were trained with the variance embeddings
     (``use_breathiness_embed``, ``use_voicing_embed``, ``use_tension_embed``, ``use_energy_embed``)
     and the key-shift/speed embeddings behind the ``gender`` and ``velocity`` controls. A bank
-    that declares none of them — Hanami ~AI❤dol~ is one — cannot use those settings, while a
-    bank that declares one gets the setting fed to its acoustic model. Returns None when the
-    bank is not configured.
+    that declares none of them cannot use those settings — the refusal names the bank and the
+    missing flag — while a bank that declares one gets the setting fed to its acoustic model.
+    Returns None when the bank is not configured.
     """
     path = voicebank_path(identifier)
     if path is None:

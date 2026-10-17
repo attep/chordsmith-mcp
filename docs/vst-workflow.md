@@ -45,7 +45,7 @@ Load the tone/rig/patch there, then close the window: the state is written to
 **name** or path:
 
 ```json
-{"plugin": "C:/Program Files/Common Files/VST3/TONEX.vst3", "state": "tonex_metal"}
+{"plugin": "C:/Program Files/Common Files/VST3/TONEX.vst3", "state": "<state from list_plugin_states>"}
 ```
 
 ### The state library
@@ -103,7 +103,7 @@ parameter; `parameter_values` lists its names.
 **Rhythm guitar**: sfizz + captured amp:
 ```json
 {"engine": "sfizz", "sfz": "/sfz/emilyguitar/emily_basic.sfz",
- "effects": [{"plugin": "…/TONEX.vst3", "state": "/data/states/tonex_metal.state"}],
+ "effects": [{"plugin": "…/TONEX.vst3", "state": "/data/states/<name>.state"}],
  "gain_db": -4.0}
 ```
 
@@ -128,7 +128,7 @@ Rendered locally during development (the audio is not shipped with the repo):
 | Drums | instrument + effect | MODO DRUM (bridge) → Tape Machine 80 v6 (bridge), `Tape Type: "456"` |
 | Bass | instrument | MODO BASS 2 (bridge) |
 | Pad | params by name | Surge XT (local), `A Osc 1 Type: "Sine"` |
-| Gtr Rhythm | captured state | sfizz → TONEX `tonex_metal.state` |
+| Gtr Rhythm | captured state | sfizz → TONEX `<state>.state` |
 | Gtr Solo | captured state | sfizz → GR7 `guitar_rig_7_solo.state` |
 
 ## Pitfalls

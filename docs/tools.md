@@ -62,7 +62,7 @@ see each tool with:
 
   | Hint | Tools | Meaning |
   |---|---|---|
-  | Read-only | `list_chord_types`, `analyze_midi`, `list_generated_files`, `get_midi_file`, `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`, `get_singing_job` | Nothing on disk changes (the singing steps only keep temporary state in memory) |
+  | Read-only | `list_chord_types`, `analyze_midi`, `list_generated_files`, `get_midi_file`, `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`, `get_vocal_mapping`, `get_singing_job` | Nothing on disk changes (the singing steps only keep temporary state in memory) |
   | Creates files | `create_chord_progression`, `create_progression_from_roman`, `add_track`, `transpose_midi`, `render_audio`, `render_singing`, `mix_song_with_vocals`, `export_vocal_song` | Writes new files; an existing file is never replaced unless you pass `overwrite: true`. A copy tool's `output_filename` must differ from its source |
   | Destructive | `delete_midi_file`, `rename_midi_file` | Changes files that already exist; some clients ask you to confirm first |
 
@@ -91,7 +91,7 @@ Turns chord symbols into a MIDI file.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `chords` | list (required) | | Chord symbols, e.g. `["Am", "F", "C", "G"]`. Give a chord its own length with `{"chord": "G7", "beats": 2}`. Up to 256 chords. |
+| `chords` | list (required) | | Chord symbols, e.g. `["Am", "F", "C", "G"]`. Give a chord its own length — and its own hit pattern — with an object: `{"chord": "G7", "beats": 2}` or `{"chord": "G7", "hits": [0, 0.75, {"beat": 2.5, "velocity": 110}]}` (see [Rhythm options](#rhythm-options) for hit entries; the chord's hits override the rhythm's for that chord only). Up to 256 chords. |
 | `filename` | text | built from chords | e.g. `"sad_song"` → `sad_song.mid` |
 | `tempo` | number 20–300 | `100` | Beats per minute |
 | `time_signature` | text | `"4/4"` | e.g. `"3/4"`, `"6/8"` |
@@ -145,7 +145,7 @@ the [music cheat sheet](music-basics.md#roman-numerals).
 
 | Option | Type | Description |
 |---|---|---|
-| `numerals` | text or list (required) | `"i–VI–III–VII"`, `"I V vi IV"`, `["ii7", "V7", "Imaj7"]` or `[{"numeral": "V7", "beats": 2}]` |
+| `numerals` | text or list (required) | `"i–VI–III–VII"`, `"I V vi IV"`, `["ii7", "V7", "Imaj7"]` or `[{"numeral": "V7", "beats": 2}]` (an object can carry its own `hits` too) |
 | `key` | text (required) | `"C major"`, `"A minor"`, `"D dorian"`, `"Bb"`, `"F#m"` |
 | everything else | | Same as `create_chord_progression` |
 
@@ -170,7 +170,7 @@ Pass these inside `"rhythm": {...}`. All are optional.
 | Option | Default | Description |
 |---|---|---|
 | `pattern` | `"block"` | See below |
-| `hits` | off | `[0, 0.75, 1.5, 2.25]`: play the chord at exactly these beats inside each chord — off-beat stabs, chugs and gallops. Overrides `pattern`/`subdivision`/`swing`; `gate`, `velocity` and `humanize` still apply |
+| `hits` | off | `[0, 0.75, 1.5, 2.25]`: play the chord at exactly these beats inside each chord — off-beat stabs, chugs and gallops. An entry can be an object — `{"beat": 2.5, "velocity": 110, "gate": 0.4}` — to shape that one hit (a hit without its own `gate`/`velocity` uses the rhythm's). Overrides `pattern`/`subdivision`/`swing`; `humanize` still applies. Up to 64 hits; a hit at or past the chord's length is skipped with a warning. A [chord object](#create_chord_progression) can carry its own `hits` for one chord |
 | `subdivision` | `0.5` | Step length in beats for patterns that repeat. `1` = quarter notes, `0.5` = eighths, `0.25` = sixteenths |
 | `velocity` | `90` | Loudness 1–127 |
 | `gate` | `0.95` | How long each note sounds within its step (`1.0` = fully connected) |
@@ -195,8 +195,9 @@ the moving notes.
 
 `create_chord_progression` and `create_progression_from_roman` take a `preset` that bundles a
 voicing and a rhythm, so one word sets the feel. Explicit `voicing`/`rhythm` options replace the
-preset's parts. The companion tools ([add_bassline](#add_bassline) and
-[add_drums](#add_drums)) name matching bass styles and drum grooves per genre.
+preset's parts. The companion tools complete a genre: [add_drums](#add_drums) names per-genre
+drum grooves, while [add_bassline](#add_bassline) is role-based (root, walking, …) and can
+follow any track's rhythm (`style: "follow"`).
 
 | Preset | Feel | Voicing / rhythm |
 |---|---|---|
@@ -251,6 +252,26 @@ with `patterns` is three short strings:
  ]}
 ```
 
+### Polymeter with tuplets
+
+A layer that does not share the song's grid is written slot by slot with `tuplet`: `count`
+even divisions of `in_beats` beats, measured from `start_beat`. Four notes over three beats
+(a 4:3 hemiola) against a steady 4/4:
+
+```json
+{"filename": "song.mid", "track_name": "Hemiola", "loop": {"length_beats": 3, "times": 16},
+ "notes": [
+   {"pitch": "C5", "beats": 0.7, "tuplet": {"count": 4, "in_beats": 3, "start_beat": 0, "slot": 0}},
+   {"pitch": "C5", "beats": 0.7, "tuplet": {"count": 4, "in_beats": 3, "start_beat": 0, "slot": 1}},
+   {"pitch": "C5", "beats": 0.7, "tuplet": {"count": 4, "in_beats": 3, "start_beat": 0, "slot": 2}},
+   {"pitch": "C5", "beats": 0.7, "tuplet": {"count": 4, "in_beats": 3, "start_beat": 0, "slot": 3}}
+ ]}
+```
+
+Positions are computed in MIDI ticks, so the grid stays exact for the whole repeat — the two
+grids meet again every 12 beats (whenever `count` and the bar length share a least common
+multiple). `count: 3, in_beats: 2` gives the triplet version of the same idea.
+
 ### Layered subs that survive small speakers
 
 A 30–50 Hz sine is inaudible on most phones and earbuds, no matter its gain — deep bass needs
@@ -278,9 +299,10 @@ copy like [add_track](#add_track) and stays in the source's project.
 |---|---|
 | `filename` (required) | Existing MIDI file whose chords drive the bass |
 | `track_name` | Name of the new track (default `"Bass"`) |
-| `style` | `root` = one held root per chord · `root_fifth` = root and fifth alternating (default) · `eighth_pulse` = root on every subdivision · `octave` = root alternating an octave up · `walking` = quarter-note walk: root, fifth, third, chromatically into the next root |
+| `style` | `root` = one held root per chord · `root_fifth` = root and fifth alternating (default) · `eighth_pulse` = root on every subdivision · `octave` = root alternating an octave up · `walking` = quarter-note walk: root, fifth, third, chromatically into the next root · `follow` = the root at every note onset of `rhythm_track`, copying each onset's velocity (a chord window with no onsets holds the root) |
 | `octave` | Octave of the bass root (default `2` ≈ A2) |
 | `subdivision` | Step length in beats for the pulsing styles (default `0.5` = eighths) |
+| `rhythm_track` | For `style: "follow"` only: name of an existing track whose note onsets the bass locks to (e.g. a guitar or keys track). Required by `follow`, ignored by the other styles |
 | `instrument` | GM program (default `33` electric bass finger) |
 | `channel` | MIDI channel (default 1) |
 | `velocity`, `gate`, `swing`, `humanize` | Like [add_track](#add_track); `swing` uses `subdivision` as the step |
@@ -325,7 +347,7 @@ tempo/meter map is written immediately, so [add_track](#add_track) can use `sect
 |---|---|
 | `filename` (required) | Name for the new file, e.g. `"my_song"` (`.mid` is added) |
 | `sections` | Optional section map, like [set_song_sections](#set_song_sections) |
-| `form` | Optional [song-form template](#song-forms) (`"pop"`, `"rock"`, `"ballad"`, `"jazz"`, `"blues"`, `"edm"`, `"cinematic"`) |
+| `form` | Optional [song-form template](#song-forms) (`"pop"`, `"rock"`, `"metal"`, `"ballad"`, `"jazz"`, `"blues"`, `"edm"`, `"cinematic"`) |
 | `bpm` | With a form: one tempo for every section |
 | `output_filename`, `overwrite` | As above |
 
@@ -424,6 +446,7 @@ What the section names mean:
 |---|---|---|
 | `pop` | Intro 4 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Bridge 8 · Chorus 8 · Outro 4 | 110 |
 | `rock` | Intro 4 · Verse 8 · Chorus 8 · Verse 8 · Chorus 8 · Solo 8 · Chorus 8 · Outro 4 | 130 |
+| `metal` | Intro 4 · Riff 8 · Verse 1 8 · Chorus 1 8 · Breakdown 8 · Solo 8 · Chorus 2 8 · Outro 4 | 150 |
 | `ballad` | Intro 4 · Verse 8 · Pre-Chorus 4 · Chorus 8 · Verse 8 · Chorus 8 · Bridge 8 · Chorus 8 · Outro 4 | 70 |
 | `jazz` | A1 8 · A2 8 · B 8 · A3 8 (32-bar AABA) | 132 |
 | `blues` | Blues 1 12 · Blues 2 12 · Blues 3 12 | 100 |
@@ -676,7 +699,7 @@ Each spec has:
 | `reverb_send`, `chorus_send` | CC91/CC93 effect sends (0–127; 0 = fully dry) — how much of FluidSynth's engine reverb/chorus this track gets, since the engine applies them by send amount. Omit to keep the file's own send (GM defaults: reverb 40, chorus 0). A track with no send gets a subtle reverb; raise it for a wetter part. FluidSynth tracks only — sfizz/vst tracks use the chain's `reverb` stage or a VST effect |
 | `gain_db` | Trim for this stem when the stems are combined, −24 to +12 |
 | `mute` | Muted: left out of stem renders and vocal mixes entirely, and baked as CC7=0 so external players hear it silent too |
-| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}, {"plugin": "/vst/Tonex.vst3", "state": "tonex_metal"}]`. An effect's `state` is a captured plugin state, by name or path (the plugin's default applies when omitted) — how TONEX gets its tone. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
+| `effects` | VST3 effect plugins applied to this track's rendered stem, in order, e.g. `[{"plugin": "/vst/Comp.vst3"}, {"plugin": "/vst/Tape.vst3", "preset": "Warm", "params": {"Mix": 0.4}}, {"plugin": "/vst/Tonex.vst3", "state": "<state from list_plugin_states>"}]`. An effect's `state` is a captured plugin state, by name or path (the plugin's default applies when omitted) — how TONEX gets its tone. Works for any engine; the host compensates each plugin's reported latency, so stems stay aligned. Needs the VST host |
 | `chain` | Built-in processing chain for the rendered stem — the same stages as the vocal chain (`eq` → `de-esser` → `saturation` → `compressor`) plus an optional convolution `reverb` (no plugin host needed; `{"reverb": {"decay_s": 2.5, "damping": 0.4, "wet": 0.18}}`), applied before VST effects. How instrument grit, filtering, glue and space work without plugins: e.g. `{"eq": {"highpass_hz": 120}, "saturation": {"enabled": true, "drive_db": 9}}` |
 
 Example — a synth bass, a power drum kit, and the keys pulled back:

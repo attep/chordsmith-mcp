@@ -349,17 +349,72 @@ def test_rhythm_hits_place_stabs(tmp_path):
     assert ticks == [0, 360, 720, 1080]
 
 
-def test_rhythm_hits_validate_chord_length(tmp_path):
-    with pytest.raises(ValueError, match="past the chord"):
-        _write(tmp_path / "bad.mid", chords=("C",), rhythm=Rhythm(hits=[0, 4.5]))
+def test_rhythm_hits_past_the_chord_are_skipped(tmp_path):
+    path = tmp_path / "skipping.mid"
+    summary = _write(path, chords=("C",), rhythm=Rhythm(hits=[0, 4.5]))
+    assert _note_on_ticks(path) == [0]
+    assert summary["warnings"]
+    assert "past the chord length" in summary["warnings"][0]
 
 
-async def test_rhythm_hits_past_the_chord_are_rejected(store):
+async def test_rhythm_hits_past_the_chord_warn_in_the_tool_result(store):
     result = await _call(
         "create_chord_progression",
         {"chords": ["C"], "rhythm": {"hits": [0, 4.5]}},
     )
-    assert result.isError and "past the chord" in result.content[0].text
+    assert not result.isError
+    data = result.structuredContent
+    assert data["warnings"] and "skipped" in data["warnings"][0]
+
+
+def test_hit_objects_shape_velocity_and_gate(tmp_path):
+    path = tmp_path / "shaped.mid"
+    _write(
+        path,
+        chords=("C",),
+        rhythm=Rhythm(hits=[{"beat": 0, "velocity": 60}, {"beat": 2, "velocity": 120, "gate": 0.5}]),
+    )
+    midi = mido.MidiFile(path)
+    track = next(t for t in midi.tracks if any(m.type == "note_on" for m in t))
+    tick = 0
+    starts: list[tuple[int, int]] = []
+    for msg in track:
+        tick += msg.time
+        if msg.type == "note_on":
+            starts.append((tick, msg.velocity))
+    first = {velocity for at, velocity in starts if at == 0}
+    second = {velocity for at, velocity in starts if at == 960}
+    assert first == {60}
+    assert second == {120}
+
+
+def test_chord_event_hits_override_the_rhythm(tmp_path):
+    path = tmp_path / "per_chord.mid"
+    write_progression(
+        path,
+        [(parse_chord("C"), 4, [0, 1, 2, 3]), (parse_chord("G"), 4)],
+        tempo_bpm=120,
+        time_signature=(4, 4),
+        voicing=Voicing(),
+        rhythm=Rhythm(pattern="block"),
+        program=0,
+    )
+    ticks = _note_on_ticks(path)
+    assert ticks == [0, 480, 960, 1440, 1920]  # the G chord holds as one block at beat 4
+
+
+async def test_chord_event_hits_come_through_the_tool(store):
+    result = await _call(
+        "create_chord_progression",
+        {
+            "chords": [
+                {"chord": "C", "beats": 4, "hits": [0, {"beat": 2.5, "velocity": 111}]},
+                "G",
+            ],
+        },
+    )
+    assert not result.isError, result.content[0].text
+    assert result.structuredContent["warnings"] is None
 
 
 def test_humanize_is_deterministic_and_in_range(tmp_path):

@@ -35,7 +35,7 @@ if needed, and runs it.
    uvx --from git+https://github.com/attep/chordsmith-mcp chordsmith-mcp --version
    ```
 
-   You should see `chordsmith-mcp 0.32.0`.
+   You should see `chordsmith-mcp 0.33.0`.
 
 The command your AI app will run is:
 

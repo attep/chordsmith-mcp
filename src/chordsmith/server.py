@@ -61,6 +61,7 @@ from chordsmith.models import (
     PatternRow,
     ReverbSettings,
     Rhythm,
+    RhythmHit,
     SongSection,
     Voicing,
 )
@@ -275,7 +276,8 @@ ChordList = Annotated[
         min_length=1,
         max_length=256,
         description='Chord symbols in order, e.g. ["Am", "F", "C", "G"]. To give a chord its own '
-        'length use an object: {"chord": "G7", "beats": 2}.',
+        'length or hit pattern use an object: {"chord": "G7", "beats": 2} or '
+        '{"chord": "G7", "hits": [0, 0.75, {"beat": 2.5, "velocity": 110}]}.',
     ),
 ]
 FileName = Annotated[
@@ -335,7 +337,7 @@ def _apply_seed(rhythm: Rhythm | None, seed: int | None) -> Rhythm | None:
 
 
 def _render(
-    chords: list[tuple[Chord, float]],
+    chords: list[tuple[Chord, float] | tuple[Chord, float, list[float | RhythmHit] | None]],
     *,
     filename: str | None,
     default_stem: str,
@@ -401,18 +403,18 @@ def create_chord_progression(
     """
     ts = _parse_time_signature(time_signature)
     default_beats = beats_per_chord or ts[0] * 4 / ts[1]
-    parsed: list[tuple[Chord, float]] = []
+    parsed: list[tuple[Chord, float, list[float | RhythmHit] | None]] = []
     for item in chords:
         if isinstance(item, ChordEvent):
-            parsed.append((parse_chord(item.chord), item.beats))
+            parsed.append((parse_chord(item.chord), item.beats, item.hits))
         else:
-            parsed.append((parse_chord(item), default_beats))
+            parsed.append((parse_chord(item), default_beats, None))
     voicing, rhythm = _apply_preset(preset, voicing, rhythm)
     rhythm = _apply_seed(rhythm, seed)
     return _render(
         parsed,
         filename=filename,
-        default_stem=_stem([c.symbol for c, _ in parsed]),
+        default_stem=_stem([entry[0].symbol for entry in parsed]),
         tempo=tempo,
         time_signature=ts,
         repeat=repeat,
@@ -464,14 +466,14 @@ def create_progression_from_roman(
         raise ValueError("Give at least one Roman numeral.")
     if len(items) > 256:
         raise ValueError("At most 256 chords per progression.")
-    parsed: list[tuple[Chord, float]] = []
+    parsed: list[tuple[Chord, float, list[float | RhythmHit] | None]] = []
     labels: list[str] = []
     for item in items:
         if isinstance(item, NumeralEvent):
-            parsed.append((roman_to_chord(item.numeral, parsed_key), item.beats))
+            parsed.append((roman_to_chord(item.numeral, parsed_key), item.beats, item.hits))
             labels.append(item.numeral)
         else:
-            parsed.append((roman_to_chord(item, parsed_key), default_beats))
+            parsed.append((roman_to_chord(item, parsed_key), default_beats, None))
             labels.append(item)
     voicing, rhythm = _apply_preset(preset, voicing, rhythm)
     rhythm = _apply_seed(rhythm, seed)
@@ -491,7 +493,7 @@ def create_progression_from_roman(
     return {
         "key": parsed_key.name,
         "numerals": labels,
-        "resolved_chords": [c.symbol for c, _ in parsed],
+        "resolved_chords": [entry[0].symbol for entry in parsed],
         **result,
     }
 
@@ -527,8 +529,8 @@ def create_empty_file(
         forms.Form | None,
         Field(
             description="Optional song-form template that lays out sections with bars and tempos "
-            "(pop, rock, ballad, jazz 32-bar AABA, 12-bar blues, edm, cinematic); see the Song "
-            "forms table in docs/tools.md. Give sections or form, not both.",
+            "(pop, rock, metal, ballad, jazz 32-bar AABA, 12-bar blues, edm, cinematic); see the "
+            "Song forms table in docs/tools.md. Give sections or form, not both.",
         ),
     ] = None,
     bpm: Annotated[
@@ -1495,11 +1497,12 @@ def add_bassline(
         str, Field(min_length=1, max_length=60, description="Name of the new bass track, e.g. 'Bass'.")
     ] = "Bass",
     style: Annotated[
-        Literal["root", "root_fifth", "eighth_pulse", "octave", "walking"],
+        Literal["root", "root_fifth", "eighth_pulse", "octave", "walking", "follow"],
         Field(
             description="Bass feel: root = one held root per chord; root_fifth = root and fifth "
             "alternating; eighth_pulse = root on every subdivision; octave = root alternating an "
-            "octave up; walking = a quarter-note walk (root, fifth, third, approach to next chord)."
+            "octave up; walking = a quarter-note walk (root, fifth, third, approach to next chord); "
+            "follow = the root at every note onset of rhythm_track, copying its velocities."
         ),
     ] = "root_fifth",
     octave: Annotated[int, Field(ge=1, le=4, description="Octave of the bass root (2 = around A2).")] = 2,
@@ -1507,6 +1510,13 @@ def add_bassline(
         float,
         Field(gt=0, le=4, description="Step length in beats for the pulsing styles (0.5 = eighths)."),
     ] = 0.5,
+    rhythm_track: Annotated[
+        str | None,
+        Field(
+            description="For style 'follow' only: name of an existing track whose note onsets the "
+            "bass locks to (e.g. the guitar or keys track). Ignored by the other styles."
+        ),
+    ] = None,
     instrument: Instrument = 33,
     channel: Annotated[int, Field(ge=1, le=16, description="MIDI channel, 1-16 (10 = drums).")] = 1,
     velocity: Annotated[int, Field(ge=1, le=127, description="Loudness of each bass note.")] = 90,
@@ -1529,11 +1539,12 @@ def add_bassline(
     """Derive a bass line from the file's chords and add it as a new track.
 
     The chords come from the chord-name markers the create tools write; a file without them is
-    analyzed note by note instead — ``chord_source`` in the result says which was used. Five
-    styles cover the common roles (root, root_fifth, eighth_pulse, octave, walking). Creates a
-    new file in the source's project (the original is kept; output_filename must differ) and
-    honors the section map's tempo for swing/humanize. Returns the style, the chords used, the
-    bass octave and the same file details as add_track.
+    analyzed note by note instead — ``chord_source`` in the result says which was used. The
+    styles cover the common roles (root, root_fifth, eighth_pulse, octave, walking), and
+    'follow' locks the root to another track's note onsets (name it in rhythm_track), copying
+    each onset's velocity. Creates a new file in the source's project (the original is kept;
+    output_filename must differ) and honors the section map's tempo for swing/humanize. Returns
+    the style, the chords used, the bass octave and the same file details as add_track.
     """
     source = store.existing_path(filename)
     project = store.project_of(source)
@@ -1544,8 +1555,27 @@ def add_bassline(
     ) as target:
         if target == source:
             raise ValueError("Choose a different output_filename; the original file is never modified.")
+        onsets: list[tuple[float, int]] | None = None
+        if style == "follow":
+            if not rhythm_track:
+                raise ValueError(
+                    "The 'follow' style needs rhythm_track: name the track whose note onsets the "
+                    "bass should lock to."
+                )
+            midi = mido.MidiFile(source)
+            rhythm_notes = _copy_track_notes(source, rhythm_track, 0, midi.ticks_per_beat)
+            best: dict[float, int] = {}
+            for _, start_beat, _, note_velocity in rhythm_notes:
+                best[start_beat] = max(best.get(start_beat, 0), note_velocity)
+            onsets = sorted(best.items())
         parsed = grooves.bassline_notes(
-            style, windows, octave=octave, subdivision=subdivision, gate=gate, velocity=velocity
+            style,
+            windows,
+            octave=octave,
+            subdivision=subdivision,
+            gate=gate,
+            velocity=velocity,
+            onsets=onsets,
         )
         parsed = swing_notes(parsed, swing, subdivision)
         if humanize is not None and (humanize.timing_ms or humanize.velocity_range):
@@ -1561,6 +1591,7 @@ def add_bassline(
         "track_name": track_name,
         "channel": channel,
         "style": style,
+        "rhythm_track": rhythm_track,
         "chord_source": chord_source,
         "chords": symbols,
         "octave": octave,
@@ -1915,6 +1946,7 @@ def _render_single(
     result["gain_correction_db"] = correction
     result["effects"] = effects_echo
     result["master"] = master_report
+    result["warnings"] = None
     if audio_format == "wav":
         peak = audio.wav_peak_db(target)
         result["peak_db"] = round(peak, 2)
@@ -2102,10 +2134,34 @@ def _render_stems(
     else:
         result["peak_db"] = None
         result["clipping"] = False
+    # Stem diagnostics: a stem at full scale or a wide level spread inside one file usually
+    # means a spec gain (or a plugin output) is off — say so before the mix hides it.
+    stem_peaks = [(stem.track, round(audio.wav_peak_db(stem.path), 2)) for stem in stems]
+    warnings: list[str] = []
+    if result["clipping"]:
+        warnings.append(
+            "The combined mix clips; lower a track's gain_db (or set normalize_peak_db) and render again."
+        )
+    for track, track_peak in stem_peaks:
+        if track_peak > -0.1:
+            warnings.append(
+                f"Track '{track}' renders at full scale ({track_peak:g} dBFS); trim its gain_db or "
+                "add a limiter stage."
+            )
+    if stem_peaks:
+        loudest_track, loudest_peak = max(stem_peaks, key=lambda entry: entry[1])
+        for track, track_peak in stem_peaks:
+            if track != loudest_track and loudest_peak - track_peak > 12.0:
+                warnings.append(
+                    f"Track '{track}' is {loudest_peak - track_peak:.1f} dB under '{loudest_track}'; "
+                    "check its level before mixing."
+                )
+    result["warnings"] = warnings or None
     # Stems are big (a minute of stereo wav is ~10 MB each), so with a public URL configured
     # they are always delivered as signed links: inlining ten of them can outsize any client's
     # tool timeout. The mix above still follows return_as.
     stem_return = "url" if delivery.public_url() else return_as
+    peak_by_track = dict(stem_peaks)
     result["stems"] = [
         {
             **delivery.deliver_file(
@@ -2114,7 +2170,7 @@ def _render_stems(
             "mime_type": "audio/wav",
             "track": stem.track,
             "gain_db": stem.gain_db,
-            "peak_db": round(audio.wav_peak_db(stem.path), 2),
+            "peak_db": peak_by_track.get(stem.track),
         }
         for stem in stems
     ]

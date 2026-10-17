@@ -9,7 +9,7 @@ from pathlib import Path
 
 import mido
 
-from chordsmith.models import Humanize, Rhythm, Voicing
+from chordsmith.models import Humanize, Rhythm, RhythmHit, Voicing
 from chordsmith.theory import Chord, MusicTheoryError, midi_note_name, note_name_with_octave, parse_chord
 
 TICKS_PER_BEAT = 480
@@ -103,9 +103,35 @@ def _ms_to_ticks(ms: float, tempo_bpm: float) -> int:
     return round(ms / 1000 * tempo_bpm / 60 * TICKS_PER_BEAT)
 
 
+def _normalize_hits(
+    hits: list[float | RhythmHit],
+) -> list[tuple[float, int | None, float | None]]:
+    """Sort hits into ``(beat, velocity-or-None, gate-or-None)`` tuples."""
+    entries: list[tuple[float, int | None, float | None]] = []
+    for hit in hits:
+        if isinstance(hit, RhythmHit):
+            entries.append((hit.beat, hit.velocity, hit.gate))
+        else:
+            entries.append((float(hit), None, None))
+    return sorted(entries, key=lambda entry: entry[0])
+
+
 def render_pattern(
-    bass: int | None, upper: list[int], start: int, length: int, rhythm: Rhythm, tempo_bpm: float
-) -> list[NoteEvent]:
+    bass: int | None,
+    upper: list[int],
+    start: int,
+    length: int,
+    rhythm: Rhythm,
+    tempo_bpm: float,
+    hits: list[float | RhythmHit] | None = None,
+) -> tuple[list[NoteEvent], list[str]]:
+    """Notes for one chord window; returns ``(events, warnings)``.
+
+    ``hits`` (a chord's own pattern) replaces ``rhythm.hits`` when given. Each hit spans the
+    gap to the next hit (the chord end for the last one) times its gate — the rhythm's gate or
+    the hit's own. Hits at or past the chord end are skipped with a warning instead of failing
+    the whole write.
+    """
     vel = rhythm.velocity
     step = max(1, round(rhythm.subdivision * TICKS_PER_BEAT))
     all_notes = ([bass] if bass is not None else []) + upper
@@ -122,24 +148,32 @@ def render_pattern(
             t += step
             index += 1
 
-    if rhythm.hits is not None:
-        positions = sorted(rhythm.hits)
+    active_hits = rhythm.hits if hits is None else hits
+    if active_hits is not None:
         length_beats = length / TICKS_PER_BEAT
-        for index, position in enumerate(positions):
-            if position >= length_beats:
-                raise ValueError(
-                    f"A rhythm hit at beat {position:g} is past the chord length ({length_beats:g} beats)."
+        warnings: list[str] = []
+        kept: list[tuple[float, int | None, float | None]] = []
+        for beat, hit_vel, hit_gate in _normalize_hits(active_hits):
+            if beat >= length_beats:
+                warnings.append(
+                    f"A hit at beat {beat:g} is past the chord length ({length_beats:g} beats) "
+                    "and was skipped."
                 )
-            t = start + round(position * TICKS_PER_BEAT)
+                continue
+            kept.append((beat, hit_vel, hit_gate))
+        for index, (beat, hit_vel, hit_gate) in enumerate(kept):
+            t = start + round(beat * TICKS_PER_BEAT)
             end = (
-                start + round(positions[index + 1] * TICKS_PER_BEAT)
-                if index + 1 < len(positions)
+                start + round(kept[index + 1][0] * TICKS_PER_BEAT)
+                if index + 1 < len(kept)
                 else start + length
             )
             span = max(1, end - t)
-            dur = max(1, round(span * rhythm.gate))
-            events += [NoteEvent(t, dur, n, vel) for n in all_notes]
-        return events
+            gate = hit_gate if hit_gate is not None else rhythm.gate
+            dur = max(1, round(span * gate))
+            velocity = hit_vel if hit_vel is not None else vel
+            events += [NoteEvent(t, dur, n, velocity) for n in all_notes]
+        return events, warnings
 
     if rhythm.pattern == "block":
         dur = max(1, round(length * rhythm.gate))
@@ -171,7 +205,7 @@ def render_pattern(
             events.append(NoteEvent(start, max(1, round(length * rhythm.gate)), bass, vel))
         for idx, (t, span) in enumerate(steps()):
             events.append(NoteEvent(t, max(1, round(span * rhythm.gate)), sequence[idx % len(sequence)], vel))
-    return events
+    return events, []
 
 
 def _humanize_events(
@@ -244,7 +278,7 @@ def humanize_notes(
 
 def write_progression(
     path: Path,
-    chords: list[tuple[Chord, float]],
+    chords: list[tuple[Chord, float] | tuple[Chord, float, list[float | RhythmHit] | None]],
     *,
     tempo_bpm: float,
     time_signature: tuple[int, int],
@@ -257,19 +291,26 @@ def write_progression(
 ) -> dict:
     if midi_type not in (0, 1):
         raise ValueError("midi_type must be 0 or 1.")
-    sequence = chords * repeat
-    voiced = voice_progression([c for c, _ in sequence], voicing)
+    sequence: list[tuple[Chord, float, list[float | RhythmHit] | None]] = []
+    for entry in chords * repeat:
+        chord, beats, *extra = entry
+        sequence.append((chord, beats, extra[0] if extra else None))
+    voiced = voice_progression([c for c, _, _ in sequence], voicing)
 
     note_events: list[NoteEvent] = []
     markers: list[tuple[int, str]] = []
     summary = []
+    warnings: list[str] = []
     humanize_settings = rhythm.humanize
     humanize_rng = random.Random(humanize_settings.seed) if humanize_settings else None
     tick = 0
-    for (chord, beats), (bass, upper) in zip(sequence, voiced, strict=True):
+    for (chord, beats, chord_hits), (bass, upper) in zip(sequence, voiced, strict=True):
         length = round(beats * TICKS_PER_BEAT)
         markers.append((tick, chord.symbol))
-        chord_events = render_pattern(bass, upper, tick, length, rhythm, tempo_bpm)
+        chord_events, hit_warnings = render_pattern(
+            bass, upper, tick, length, rhythm, tempo_bpm, hits=chord_hits
+        )
+        warnings += hit_warnings
         if humanize_rng is not None and humanize_settings is not None:
             _humanize_events(chord_events, humanize_settings, tempo_bpm, humanize_rng, tick, tick + length)
         note_events += chord_events
@@ -347,6 +388,7 @@ def write_progression(
         "bars": round(total_beats / (time_signature[0] * 4 / time_signature[1]), 2),
         "duration_seconds": round(total_beats * 60 / tempo_bpm, 2),
         "chords": summary,
+        "warnings": warnings or None,
     }
 
 

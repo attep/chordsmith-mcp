@@ -14,7 +14,7 @@ from typing import Literal
 
 from chordsmith.models import SongSection
 
-Form = Literal["pop", "rock", "ballad", "jazz", "blues", "edm", "cinematic"]
+Form = Literal["pop", "rock", "metal", "ballad", "jazz", "blues", "edm", "cinematic"]
 
 
 def _flat(bpm: float, *entries: tuple[str, int]) -> list[SongSection]:
@@ -44,6 +44,17 @@ SONG_FORMS: dict[str, list[SongSection]] = {
         ("Chorus 2", 8),
         ("Solo", 8),
         ("Chorus 3", 8),
+        ("Outro", 4),
+    ),
+    "metal": _flat(
+        150,
+        ("Intro", 4),
+        ("Riff", 8),
+        ("Verse 1", 8),
+        ("Chorus 1", 8),
+        ("Breakdown", 8),
+        ("Solo", 8),
+        ("Chorus 2", 8),
         ("Outro", 4),
     ),
     "ballad": _flat(

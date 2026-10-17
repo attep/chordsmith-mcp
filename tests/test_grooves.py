@@ -86,6 +86,26 @@ def test_bass_rejects_unknown_styles():
         bassline_notes("slap", [(0.0, 4.0, parse_chord("C"))])
 
 
+def test_follow_style_locks_to_onsets():
+    windows = [(0.0, 4.0, parse_chord("Am"))]
+    notes = bassline_notes("follow", windows, onsets=[(0.0, 100), (0.75, 70), (2.5, 110)])
+    assert [(pitch, start) for pitch, start, _, _ in notes] == [(45, 0.0), (45, 0.75), (45, 2.5)]
+    assert [velocity for *_, velocity in notes] == [100, 70, 110]
+    assert notes[0][2] == pytest.approx(0.75 * 0.9)  # length to the next onset x gate
+    assert notes[2][2] == pytest.approx(1.5 * 0.9)  # last onset stretches to the chord end
+
+
+def test_follow_style_holds_the_root_without_onsets():
+    windows = [(0.0, 4.0, parse_chord("C")), (4.0, 4.0, parse_chord("G"))]
+    notes = bassline_notes("follow", windows, onsets=[(0.0, 90)])
+    assert [(pitch, start) for pitch, start, _, _ in notes] == [(36, 0.0), (43, 4.0)]
+
+
+def test_follow_style_needs_onsets():
+    with pytest.raises(MusicTheoryError, match="onsets"):
+        bassline_notes("follow", [(0.0, 4.0, parse_chord("C"))])
+
+
 # ------------------------------------------------------------------ tools
 
 
@@ -117,6 +137,38 @@ async def test_add_bassline_falls_back_to_analysis(store):
     assert not result.isError, result.content[0].text
     assert result.structuredContent["chord_source"] == "analysis"
     assert result.structuredContent["chords"][:2] == ["C", "F"]
+
+
+async def test_add_bassline_follow_style(store):
+    await _call("create_chord_progression", {"chords": ["Am", "F"], "filename": "song"})
+    await _call(
+        "add_track",
+        {
+            "filename": "song.mid",
+            "track_name": "Gtr",
+            "notes": [
+                {"pitch": "A2", "start_beat": 0, "beats": 0.5, "velocity": 100},
+                {"pitch": "A2", "start_beat": 1.5, "beats": 0.5, "velocity": 80},
+            ],
+        },
+    )
+    result = await _call(
+        "add_bassline", {"filename": "song_Gtr.mid", "style": "follow", "rhythm_track": "Gtr"}
+    )
+    assert not result.isError, result.content[0].text
+    data = result.structuredContent
+    assert data["rhythm_track"] == "Gtr"
+    assert data["notes_added"] == 3  # two onsets in Am, then F holds its root
+    midi = mido.MidiFile(store.root / "song_Gtr_Bass.mid")
+    bass = [t for t in midi.tracks if any(m.type == "track_name" and m.name == "Bass" for m in t)]
+    ons = [(m.note, m.velocity) for m in bass[0] if m.type == "note_on"]
+    assert ons == [(45, 100), (45, 80), (41, 90)]  # A2 twice at the Gtr velocities, F2 default
+
+
+async def test_add_bassline_follow_without_rhythm_track_is_rejected(store):
+    await _call("create_chord_progression", {"chords": ["C"], "filename": "song"})
+    result = await _call("add_bassline", {"filename": "song.mid", "style": "follow"})
+    assert result.isError and "rhythm_track" in result.content[0].text
 
 
 async def test_add_drums_covers_the_bars(store):

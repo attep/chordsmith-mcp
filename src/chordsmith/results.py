@@ -29,6 +29,7 @@ class ProgressionResult(TypedDict):
     bars: float
     duration_seconds: float
     chords: list[ChordSummary]
+    warnings: list[str] | None
 
 
 class RomanProgressionResult(ProgressionResult):
@@ -172,6 +173,7 @@ class BasslineResult(TypedDict):
     track_name: str
     channel: int
     style: str
+    rhythm_track: str | None
     chord_source: str
     chords: list[str]
     octave: int
@@ -309,6 +311,7 @@ class RenderAudioResult(_FileIdentity, DeliveryFields, total=False):
     failed: list[FailedTrack] | None
     stems: list[StemEntry] | None
     master: MasterReport | None
+    warnings: list[str] | None
 
 
 class RenderJobTrack(TypedDict):
@@ -715,6 +718,8 @@ class JobResult(_JobBase, total=False):
     duration_seconds: float | None
     start_offset_seconds: float | None
     mapping_id: str | None
+    lyrics: list[str] | None
+    wordless: bool | None
     query_voice_id: str | None
     mode: str | None
     frames: int | None

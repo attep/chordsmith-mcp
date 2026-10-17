@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from chordsmith.theory import Chord, MusicTheoryError
 
 DRUM_STEP_BEATS = 0.25  # one sixteenth note
-BASS_STYLES = ("root", "root_fifth", "eighth_pulse", "octave", "walking")
+BASS_STYLES = ("root", "root_fifth", "eighth_pulse", "octave", "walking", "follow")
 
 
 @dataclass(frozen=True)
@@ -187,22 +187,36 @@ def bassline_notes(
     subdivision: float = 0.5,
     gate: float = 0.9,
     velocity: int = 90,
+    onsets: list[tuple[float, int]] | None = None,
 ) -> list[tuple[int, float, float, int]]:
     """Generate one bass note per slot as (pitch, start_beat, beats, velocity).
 
     ``chords`` are ``(start_beat, length_beats, chord)`` windows in order; the last window may
-    end before the song does (a tail rest is fine).
+    end before the song does (a tail rest is fine). ``onsets`` (``(beat, velocity)`` pairs of
+    another track) drives the ``follow`` style only: the bass root lands at each onset inside a
+    chord window and copies its velocity, and a window with no onsets holds the root.
     """
     if style not in BASS_STYLES:
         raise MusicTheoryError(f"Unknown bass style '{style}'. Styles: {', '.join(BASS_STYLES)}.")
     if not chords:
         raise MusicTheoryError("No chords to build a bass line from.")
+    if style == "follow" and not onsets:
+        raise MusicTheoryError("The 'follow' style needs the rhythm track's note onsets.")
     notes: list[tuple[int, float, float, int]] = []
     for index, (start, length, chord) in enumerate(chords):
         root = _pitch_of(chord.root, octave)
         next_root = _pitch_of(chords[index + 1][2].root, octave) if index + 1 < len(chords) else root + 7
         approach = next_root - 1 if next_root - 1 != root else next_root - 2
-        if style == "root":
+        if style == "follow":
+            trailing = start + length
+            follow_onsets = onsets or []
+            inside = [entry for entry in follow_onsets if start <= entry[0] < trailing]
+            if not inside:
+                notes.append((root, start, max(0.25, length * gate), velocity))
+            for offset, (beat, onset_velocity) in enumerate(inside):
+                end = inside[offset + 1][0] if offset + 1 < len(inside) else trailing
+                notes.append((root, beat, max(0.1, (end - beat) * gate), onset_velocity))
+        elif style == "root":
             notes.append((root, start, max(0.25, length * gate), velocity))
         elif style in ("root_fifth", "eighth_pulse", "octave"):
             step = subdivision

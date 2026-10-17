@@ -36,7 +36,10 @@ backing. Two engines are supported:
    sustained pitch).
 3. `render_singing` starts a background job and returns immediately; `get_singing_job` reports
    `queued`, `running`, `done` (with the vocal file) or `failed` (with the error), plus
-   `progress` while it runs. Repeating the same request reuses the finished job instead of
+   `progress` while it runs. The job record carries its mapping's `lyrics`, so a report read
+   later still says what was sung, and `get_vocal_mapping` re-reads a stored mapping (lyrics,
+   phonemes, timings) while it lives. Repeating the same request reuses the finished job
+   instead of
    rendering twice. **Long scores render safely**: DiffSinger runs in a worker process and
    renders phrase-sized chunks split at rests (the model's memory grows with the square of the
    score's length, so a whole three-minute song cannot render in one pass), then stitches them
@@ -92,8 +95,9 @@ Then, in your AI app:
 | `list_singing_voices` | Voices with language, licence note and supported soft controls |
 | `prepare_vocal_score` | Melody MIDI track → vocal score (score id, notes, rests, frames; `legato` closes small gaps) |
 | `map_vocal_lyrics` | Score → lyrics mapping (wordless or kana), with warnings |
+| `get_vocal_mapping` | Re-read a stored mapping (same per-note plan), e.g. to recover lyrics after a lost reply |
 | `render_singing` | Mapping + voice → background job (job id) |
-| `get_singing_job` | Job status; when done, the vocal file, sample rate, length, offset |
+| `get_singing_job` | Job status; when done, the vocal file, sample rate, length, offset — and the job echoes its `lyrics` |
 | `mix_song_with_vocals` | Backing without the guide + vocal → mix with levels and clipping check |
 | `mix_song_with_vocals_job` | Starts a mix as a background job (same options; progress + result via `get_mix_job`) |
 | `get_mix_job` / `list_mix_jobs` | Mix job status, per-track progress and the result; recent jobs |
@@ -137,11 +141,12 @@ export CHORDSMITH_DIFFSINGER_VOICE="/path/to/voicebank"     # one bank or a fold
 Then:
 
 > Prepare a vocal score from my file (Melody track), map the lyrics "so- di- um gold" in English,
-> render it with diffsinger:hanami/nectar and mix it with the backing.
+> render it with diffsinger:hoshino_hanami/nectar and mix it with the backing.
 
-Voices: `diffsinger:hanami/root`, `diffsinger:hanami/fragrance` and `diffsinger:hanami/nectar`
-(the soft one). `list_singing_voices` reports the credit line and the licence layers with every
-voice.
+Voices: `diffsinger:hoshino_hanami/root`, `diffsinger:hoshino_hanami/fragrance` and
+`diffsinger:hoshino_hanami/nectar` (the soft one) — those are the ids `list_singing_voices`
+reports; short forms like `hanami/nectar` resolve too, and `list_singing_voices` reports the
+credit line and the licence layers with every voice.
 
 Character and range: **root** is the brightest and holds up best on loud material, **nectar** is
 the soft one, **fragrance** sits between. The tested clean range is **F4–Eb5**; C4 worked in one

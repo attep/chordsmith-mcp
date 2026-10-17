@@ -57,7 +57,7 @@ src/chordsmith/
   harmony.py          Deterministic analysis for explain_progression (key detection, cadences)
   midi_writer.py      Voicing, rhythm patterns (swing/humanize), writing, adding tracks, transposing
   grooves.py          Named drum patterns and chord-driven bass lines (add_drums/add_bassline)
-  forms.py            Song-form templates (pop, rock, ballad, jazz AABA, blues, edm, cinematic)
+  forms.py            Song-form templates (pop, rock, metal, ballad, jazz AABA, blues, edm, cinematic)
   analysis.py         Simple chord detection and Roman numerals for analyze_midi
   sections.py         Song sections: tempo/meter map in the conductor plus the sidecar
   renderers.py        Render engines and per-track instrument specs (FluidSynth, sfizz, VST)

@@ -8,8 +8,8 @@ running 0.3 dB under its ceiling, and the same measurements and warnings the mix
 
 from __future__ import annotations
 
+import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 from chordsmith import audio, singing
@@ -19,23 +19,30 @@ LIMITER_MARGIN_DB = singing.LIMITER_MARGIN_DB
 
 
 def _apply_filters(source: Path, filter_text: str) -> None:
-    """Run one ffmpeg filter pass over ``source`` in place (via a scratch file)."""
+    """Run one ffmpeg filter pass over ``source`` in place (via a scratch file).
+
+    The scratch file sits **next to** the target: the output folder can be a different
+    filesystem than the system temp dir (Docker mounts ``/data`` separately), and renaming
+    across devices fails with EXDEV — the mastered file would never land.
+    """
     ffmpeg = audio.find_ffmpeg()
     if ffmpeg is None:
         raise audio.AudioError(
             "Mastering needs ffmpeg; install it or drop the 'master' options (the Docker image includes it)."
         )
-    with tempfile.TemporaryDirectory() as scratch:
-        target = Path(scratch) / "mastered.wav"
+    scratch = source.with_name(source.stem + ".master.tmp" + source.suffix)
+    try:
         process = subprocess.run(
-            [ffmpeg, "-y", "-loglevel", "error", "-i", str(source), "-af", filter_text, str(target)],
+            [ffmpeg, "-y", "-loglevel", "error", "-i", str(source), "-af", filter_text, str(scratch)],
             capture_output=True,
             text=True,
         )
-        if process.returncode != 0 or not target.is_file():
+        if process.returncode != 0 or not scratch.is_file():
             tail = (process.stderr or "").strip()[-300:]
             raise audio.AudioError("ffmpeg mastering failed" + (f": {tail}" if tail else "."))
-        target.replace(source)
+        os.replace(scratch, source)
+    finally:
+        scratch.unlink(missing_ok=True)
 
 
 def apply_master(path: Path, master: MasterSettings) -> dict:

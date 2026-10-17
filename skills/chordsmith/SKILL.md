@@ -41,9 +41,9 @@ say so.
    - `automation`: linear CC ramps, e.g. CC11 expression or CC7 fade.
    - `instrument`: a GM program number (e.g. 48 strings); `channel` 10 for drums.
 3. **Sections** (verse/chorus songs): `set_song_sections` writes names, bars, quarter-note BPM and
-   meter into the conductor; a `form` template (`pop`, `rock`, `ballad`, `jazz`, `blues`, `edm`,
-   `cinematic`) lays out a whole structure in one call. Later notes can use section-relative
-   positions.
+   meter into the conductor; a `form` template (`pop`, `rock`, `metal`, `ballad`, `jazz`,
+   `blues`, `edm`, `cinematic`) lays out a whole structure in one call. Later notes can use
+   section-relative positions.
 4. **Instruments**: `set_track_instrument` for soundfont/GM program/bank, `gain_db`, `mute`,
    effect sends (CC91/CC93) and per-section overrides; `list_instruments` shows each track's
    `effective` resolution and the preset catalog; `bake_instruments` writes the settings into the
@@ -65,8 +65,9 @@ say so.
 2. `map_vocal_lyrics` — `language: "en"` for DiffSinger English (hyphen-joined syllables like
    `"so- di- um gold"`), wordless otherwise (VOICEVOX hums `"う"`); `words` overrides individual
    words; `language: "phonemes"` takes exact phonemes.
-3. `render_singing` — pick `voice_id` from `list_singing_voices` (`voicevox:<id>` or
-   `diffsinger:hanami/<mode>`), then poll `get_singing_job`. A `seed` in `settings` makes
+3. `render_singing` — pick `voice_id` from `list_singing_voices` (`voicevox:<id>`, or
+   `diffsinger:<bank>[/<variant>]`), then poll `get_singing_job`; `get_vocal_mapping` re-reads a
+   stored mapping (lyrics, phonemes, timings) if a reply was lost. A `seed` in `settings` makes
    DiffSinger renders byte-identical; repeating an identical request reuses the finished job.
 4. `mix_song_with_vocals` — renders the backing without the guide track, measures both stems over
    the sung parts and places the vocal `vocal_level_db` (default 6) above the band **as heard**.
@@ -91,8 +92,8 @@ say so.
   `render_audio`, `render_audio_job`, `get_render_job`, `list_render_jobs`,
   `generate_plugin_states`
 - **Singing**: `list_singing_voices`, `prepare_vocal_score`, `map_vocal_lyrics`,
-  `render_singing`, `get_singing_job`, `list_singing_jobs`, `mix_song_with_vocals`,
-  `export_vocal_song`
+  `get_vocal_mapping`, `render_singing`, `get_singing_job`, `list_singing_jobs`,
+  `mix_song_with_vocals`, `export_vocal_song`
 - **Analysis**: `analyze_midi` (chords, key and Roman numerals per bar), `explain_progression`
   (deterministic numerals/functions/cadences/suggestions for a chord list)
 
@@ -165,7 +166,7 @@ say so.
 - **Voices**: VOICEVOX sings Japanese kana or a hum; its whisper styles are Japanese-only and
   mostly air (they drift off pitch). English and exact phonemes need DiffSinger voicebanks the
   user provides — several may be configured at once (`./voicebank` is scanned); ids are
-  `diffsinger:<bank>[/<variant>]` (short words like `hanami/nectar` still resolve) and
+  `diffsinger:<bank>[/<variant>]` (short forms still resolve) and
   `list_singing_voices` shows each bank's variants, languages and licence. Pass `voice_id` to
   `map_vocal_lyrics` so phonemes validate against the target bank (sets differ: TIGER has `aa`,
   no bare `a`). DiffSinger soft controls: `velocity`, `gender` (0 = the bank's own character),
@@ -184,8 +185,8 @@ say so.
 
 - Verse/chorus songs: 8-bar sections, a rest at phrase ends (breaths), cymbals kept out from under
   the vocal (or `ducking: true`).
-- Soft singing: the softest variant of the configured voicebank (e.g. Hanami's `nectar` when
-  `diffsinger:hanami/*` is installed), `gender: 0`, `seed` fixed for fair A/B comparisons.
+- Soft singing: the softest variant of the chosen voicebank (ask `list_singing_voices` what is
+  installed), `gender: 0`, `seed` fixed for fair A/B comparisons.
 - For a lullaby-quiet mix: `loudness_target_lufs` around −18 and a reverb `returns` room of a few
   seconds; keep `vocal_level_db` modest (0–3) instead of pushing the voice forward.
 
