@@ -20,11 +20,11 @@ export const DEFAULT_SETTINGS: Settings = {
   pollMs: 1500,
 };
 
-const KEY = "chordsmith-manager.settings";
+export const SETTINGS_KEY = "chordsmith-manager.settings";
 
 export function loadSettings(): Settings {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
   } catch {
     // corrupt storage: fall back to the defaults
@@ -33,7 +33,7 @@ export function loadSettings(): Settings {
 }
 
 export function saveSettings(settings: Settings): void {
-  localStorage.setItem(KEY, JSON.stringify(settings));
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
 export function serverEndpoint(settings: Settings, path: string): string {

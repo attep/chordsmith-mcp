@@ -10,6 +10,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
 long-running servers.
 
+### Fixed
+
+- **Faster instrument and plugin listing**: the SFZ and VST3 folder scans stop as soon as they
+  hold the number of entries the listing shows, and never descend into a `.vst3` bundle (one
+  plugin per bundle), so folders with thousands of files no longer add seconds to
+  `list_instruments` and plugin name resolution; Windows-style bundles that carry their own
+  `.vst3` file are also no longer listed twice.
+- **Manager UI token renewal**: the access-token cache now follows the rotated refresh token
+  instead of the used-up one, so a signed-in manager renews roughly once per access-token
+  lifetime rather than on every poll; MCP requests resolve the current bearer token per request
+  and retry once after a rejected one; a second browser tab adopts tokens rotated elsewhere
+  instead of being logged out; and saving Settings no longer restores a refresh token that a
+  background renewal already rotated.
+
 ## [0.33.0] - 2026-10-17
 
 Safer masters everywhere, expressive hit patterns, and a bass line that can follow any track.

@@ -51,6 +51,19 @@ export function saveTokenCache(cache: TokenCache, storage: Storage = localStorag
   storage.setItem(CACHE_KEY, JSON.stringify(cache));
 }
 
+/**
+ * The cache entry for a token that was just obtained. The server rotates the refresh token on
+ * every exchange, so the entry is keyed to the token the client now holds — keying it to the
+ * one that was just used would make the cache unmatchable and re-refresh on every request.
+ */
+export function tokenCacheEntry(fresh: FreshToken, currentRefreshToken: string): TokenCache {
+  return {
+    refreshKey: cacheKey(fresh.refreshToken ?? currentRefreshToken),
+    accessToken: fresh.accessToken,
+    expiresAt: fresh.expiresAt,
+  };
+}
+
 /** Drop the cached access token so the next request refreshes (used after a 401). */
 export function invalidateAccessToken(storage: Storage = localStorage): void {
   try {

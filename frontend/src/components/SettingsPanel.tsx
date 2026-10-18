@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useApp } from "../lib/context";
 import { DEFAULT_SETTINGS, type Settings } from "../lib/settings";
 
@@ -29,9 +29,15 @@ const FIELDS: { key: keyof Settings; label: string; hint: string; type?: string 
 export function SettingsPanel() {
   const { settings, updateSettings, reconnect } = useApp();
   const [draft, setDraft] = useState<Settings>(settings);
+  const mounted = useRef(settings);
 
   const save = () => {
-    updateSettings({ ...draft, pollMs: Number(draft.pollMs) || DEFAULT_SETTINGS.pollMs });
+    const next = { ...draft, pollMs: Number(draft.pollMs) || DEFAULT_SETTINGS.pollMs };
+    // A background renewal rotates the refresh token while this draft sits here: a token field
+    // the user did not touch keeps the live value instead of restoring a used-up token.
+    if (draft.refreshToken === mounted.current.refreshToken) next.refreshToken = settings.refreshToken;
+    if (draft.bearerToken === mounted.current.bearerToken) next.bearerToken = settings.bearerToken;
+    updateSettings(next);
     reconnect();
   };
 

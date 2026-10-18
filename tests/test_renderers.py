@@ -306,6 +306,45 @@ async def test_list_instruments_lists_sfz_libraries(store, tmp_path, monkeypatch
     assert listed["sfz_libraries"] == [{"name": "kit", "path": str(sfz)}]
 
 
+async def test_list_instruments_caps_sfz_libraries(store, tmp_path, monkeypatch):
+    for name in ("b", "a", "c"):
+        (tmp_path / f"{name}.sfz").write_text("<region>\n", encoding="utf-8")
+    monkeypatch.setenv("CHORDSMITH_SFZ_DIR", str(tmp_path))
+    monkeypatch.setattr(renderers, "MAX_SFZ_LIBRARIES", 2)
+    listed = (await _call("list_instruments", {})).structuredContent
+    assert [entry["name"] for entry in listed["sfz_libraries"]] == ["a", "b"]
+
+
+async def test_list_instruments_lists_vst_bundles_once(store, tmp_path, monkeypatch):
+    # a Windows-style bundle holds a same-named .vst3 file inside its Contents tree
+    inner = tmp_path / "Synth.vst3" / "Contents" / "x86_64-win"
+    inner.mkdir(parents=True)
+    (inner / "Synth.vst3").write_bytes(b"")
+    monkeypatch.setenv("CHORDSMITH_VST_DIR", str(tmp_path))
+    listed = (await _call("list_instruments", {})).structuredContent
+    assert listed["vst_plugins"] == [{"name": "Synth", "path": str(tmp_path / "Synth.vst3")}]
+
+
+def test_bounded_scan_walks_nested_dirs_and_never_descends_into_a_bundle(tmp_path):
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "plain.txt").write_text("", encoding="utf-8")
+    (tmp_path / "a" / "one.sfz").write_text("", encoding="utf-8")
+    (tmp_path / "b" / "two.sfz").write_text("", encoding="utf-8")
+
+    found = renderers._bounded_scan(tmp_path, ".sfz", 10)
+    assert [path.name for path in found] == ["one.sfz", "two.sfz"]
+    assert len(renderers._bounded_scan(tmp_path, ".sfz", 1)) == 1
+    assert renderers._bounded_scan(tmp_path / "missing", ".sfz", 10) == []
+
+    bundle = tmp_path / "Synth.vst3" / "Contents" / "x86_64-win"
+    bundle.mkdir(parents=True)
+    (bundle / "Synth.vst3").write_bytes(b"")
+    (tmp_path / "Flat.vst3").write_bytes(b"")
+    hits = renderers._bounded_scan(tmp_path, ".vst3", 10)
+    assert [(path.name, path.is_dir()) for path in hits] == [("Flat.vst3", False), ("Synth.vst3", True)]
+
+
 async def test_set_track_instrument_validates_against_the_soundfont(store, engine_available, tmp_path):
     song = await _make_band(store)
     kit = tmp_path / "kit.sf2"

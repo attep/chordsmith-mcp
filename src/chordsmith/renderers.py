@@ -1062,6 +1062,40 @@ def _resolve_plugin(plugin: str) -> str | None:
     return match["path"] if match else None
 
 
+def _bounded_scan(root: Path, suffix: str, limit: int) -> list[Path]:
+    """Matching paths under ``root``, at most ``limit``, in sorted order.
+
+    Directories are visited in sorted name order, so which entries survive a truncation is
+    deterministic. A matching entry is never descended into: a .vst3 bundle is one plugin (its
+    Contents tree can hold thousands of sample files, and a Windows-style bundle repeats its
+    own .vst3 file inside), and a folder whose name itself matches would only list its name.
+    """
+    found: list[Path] = []
+
+    def visit(directory: Path) -> None:
+        if len(found) >= limit:
+            return
+        try:
+            entries = sorted(directory.iterdir(), key=lambda item: item.name)
+        except OSError:
+            return
+        for entry in entries:
+            if len(found) >= limit:
+                return
+            if not entry.name.endswith(suffix):
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    visit(entry)
+                continue
+            found.append(entry)
+
+    visit(root)
+    return sorted(found)
+
+
 def _scan_vst_plugins(directory: str | None) -> list[dict[str, str]]:
     """The .vst3 plugins under a directory; with a bridge, its machine's plugins too."""
     local = _scan_vst_plugins_local(directory)
@@ -1076,16 +1110,10 @@ def _scan_vst_plugins_local(directory: str | None) -> list[dict[str, str]]:
     """The .vst3 plugins under this server's own folder (Windows bundles listed once)."""
     if not directory or not Path(directory).is_dir():
         return []
-    kept: list[Path] = []
-    for path in sorted(Path(directory).rglob("*.vst3")):
-        # A Windows VST3 bundle is a directory holding a same-named .vst3 file inside it
-        # (Contents\x86_64-win\X.vst3): keep the bundle, drop the file inside it.
-        if any(entry in path.parents for entry in kept):
-            continue
-        kept.append(path)
-        if len(kept) >= MAX_VST_PLUGINS:
-            break
-    return [{"name": path.stem, "path": str(path)} for path in kept]
+    return [
+        {"name": path.stem, "path": str(path)}
+        for path in _bounded_scan(Path(directory), ".vst3", MAX_VST_PLUGINS)
+    ]
 
 
 _PARAMETER_CACHE: dict[tuple[str, str], dict[str, int]] = {}
@@ -1636,14 +1664,14 @@ def register(mcp: FastMCP, store_provider) -> None:
         if sfz_dir and Path(sfz_dir).is_dir():
             libraries = [
                 {"name": path.stem, "path": str(path)}
-                for path in sorted(Path(sfz_dir).rglob("*.sfz"))[:MAX_SFZ_LIBRARIES]
+                for path in _bounded_scan(Path(sfz_dir), ".sfz", MAX_SFZ_LIBRARIES)
             ]
         vst_dir = os.environ.get("CHORDSMITH_VST_DIR")
         vst_plugins = None
         if vst_dir and Path(vst_dir).is_dir():
             vst_plugins = [
                 {"name": path.stem, "path": str(path)}
-                for path in sorted(Path(vst_dir).rglob("*.vst3"))[:MAX_VST_PLUGINS]
+                for path in _bounded_scan(Path(vst_dir), ".vst3", MAX_VST_PLUGINS)
             ]
         result: dict = {
             "engines": engines,

@@ -1,15 +1,15 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { extractJobIds, loadJobs, mergeJobs, saveJobs, type KnownJob } from "./jobs";
 import { McpConnection, resultData, type CallToolResult, type Tool } from "./mcp";
-import { loadSettings, saveSettings, type Settings } from "./settings";
+import { loadSettings, saveSettings, SETTINGS_KEY, type Settings } from "./settings";
 import {
-  cacheKey,
   cachedAccessToken,
   hasRefreshCredentials,
   invalidateAccessToken,
   isAuthError,
   refreshAccessToken,
   saveTokenCache,
+  tokenCacheEntry,
 } from "./token";
 
 export type ConnectionState = "connecting" | "connected" | "error";
@@ -60,14 +60,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!refreshInFlight.current) {
       refreshInFlight.current = refreshAccessToken(current)
         .then((fresh) => {
-          saveTokenCache({
-            refreshKey: cacheKey(current.refreshToken),
-            accessToken: fresh.accessToken,
-            expiresAt: fresh.expiresAt,
-          });
+          // The server rotates the pair on every exchange: the cached entry must be keyed to the
+          // refresh token the client now holds, or the cache can never match again and every
+          // later request re-refreshes (rotating the chain on every poll).
+          saveTokenCache(tokenCacheEntry(fresh, current.refreshToken));
           if (fresh.refreshToken && fresh.refreshToken !== settingsRef.current.refreshToken) {
             // the token endpoint rotates refresh tokens: keep the new one
             const next = { ...settingsRef.current, refreshToken: fresh.refreshToken };
+            settingsRef.current = next; // publish at once: a request may read it before the re-render
             saveSettings(next);
             setSettings(next);
           }
@@ -84,7 +84,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     setConnectionState("connecting");
     setConnectionError(null);
-    const open = async (force: boolean) => McpConnection.open(settings, await getToken(force));
+    // The connection resolves its bearer token per request, so background renewals need no
+    // reconnect; only the explicit retry below forces a fresh token before reopening.
+    const open = async (force: boolean) => {
+      if (force) await getToken(true);
+      return McpConnection.open(settings, getToken);
+    };
     open(false)
       .catch(async (error: unknown) => {
         // a 401 may just mean the cached access token died with a server restart: refresh + retry
@@ -120,7 +125,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
       connectionRef.current = null;
       if (current) void current.close();
     };
-  }, [settings.serverUrl, settings.mcpPath, settings.bearerToken, settings.clientId, settings.refreshToken, attempt, getToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [settings.serverUrl, settings.mcpPath, settings.bearerToken, settings.clientId, attempt, getToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    // A second tab rotates the shared refresh token and writes it back to localStorage; follow
+    // it instead of refreshing the used-up chain (which reads as a forced manual re-paste).
+    // Only the credentials are adopted - the other settings stay per-tab.
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== SETTINGS_KEY) return;
+      const stored = loadSettings();
+      const current = settingsRef.current;
+      if (stored.refreshToken === current.refreshToken && stored.bearerToken === current.bearerToken) return;
+      const next = {
+        ...current,
+        bearerToken: stored.bearerToken,
+        clientId: stored.clientId,
+        refreshToken: stored.refreshToken,
+      };
+      settingsRef.current = next; // publish at once: a request may read it before the re-render
+      setSettings(next);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => {
     if (!connection) return;

@@ -9,6 +9,7 @@ import {
   loadTokenCache,
   refreshAccessToken,
   saveTokenCache,
+  tokenCacheEntry,
   withAuthRetry,
   RENEW_MARGIN_MS,
 } from "./token";
@@ -100,6 +101,21 @@ describe("token cache", () => {
   it("treats missing credentials as no refresh support", () => {
     expect(hasRefreshCredentials({ ...SETTINGS, refreshToken: "" })).toBe(false);
     expect(hasRefreshCredentials({ ...SETTINGS, clientId: "" })).toBe(false);
+  });
+
+  it("follows the rotated refresh token so the cache keeps matching", () => {
+    const storage = memoryStorage();
+    const fresh = { accessToken: "at-2", expiresAt: Date.now() + 3600_000, refreshToken: "rt-rotated" };
+    saveTokenCache(tokenCacheEntry(fresh, SETTINGS.refreshToken), storage);
+    expect(cachedAccessToken({ ...SETTINGS, refreshToken: "rt-rotated" }, storage)).toBe("at-2");
+    expect(cachedAccessToken(SETTINGS, storage)).toBeNull(); // the used-up token must not match
+  });
+
+  it("keeps the current key when the server does not rotate", () => {
+    const storage = memoryStorage();
+    const fresh = { accessToken: "at-3", expiresAt: Date.now() + 3600_000 };
+    saveTokenCache(tokenCacheEntry(fresh, SETTINGS.refreshToken), storage);
+    expect(cachedAccessToken(SETTINGS, storage)).toBe("at-3");
   });
 });
 
