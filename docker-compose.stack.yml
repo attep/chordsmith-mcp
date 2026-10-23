@@ -1,0 +1,65 @@
+# The complete local stack behind a Cloudflare quick tunnel (random URL per start).
+#
+# This is the "runs on my machine" variant: plain HTTP on 127.0.0.1:18000, a quick tunnel for
+# outside clients, VOICEVOX for singing, and (on the host) the Windows VST bridge. The manager
+# UI stays in docker-compose.dev.yml and runs alongside it.
+#
+# Start it with scripts/start-stack.cmd. Do not `docker compose up` it directly: a quick tunnel
+# gets a new hostname on every start, and CHORDSMITH_PUBLIC_URL (OAuth metadata and token
+# audience) must follow it. The script reads the URL first, writes it to .env, then brings the
+# server up - and mints a manager token when the URL changed.
+#
+# Container names are explicit because the tunnel and the server address each other by name,
+# and because earlier local setups used `docker run` with exactly these names.
+
+name: chordsmith-stack
+
+services:
+  chordsmith:
+    build: .
+    image: chordsmith-mcp:latest
+    container_name: chordsmith
+    restart: unless-stopped
+    command: ["--transport", "streamable-http"]
+    env_file:
+      - .env
+    environment:
+      CHORDSMITH_HOST: "0.0.0.0"
+      CHORDSMITH_PORT: "8000"
+      CHORDSMITH_OUTPUT_DIR: /data
+      CHORDSMITH_STATE_DIR: /state
+      CHORDSMITH_SFZ_DIR: /sfz
+      CHORDSMITH_VST_DIR: /vst
+      CHORDSMITH_DIFFSINGER_VOICE: /voicebank
+      CHORDSMITH_VOICEVOX_URL: "http://voicevox:50021"
+    ports:
+      - "18000:8000"
+    volumes:
+      - ./data:/data
+      - ./state:/state
+      - ./voicebank:/voicebank:ro
+      - ./sfz:/sfz:ro
+      - ./vst:/vst:ro
+    networks:
+      - chordsmith-tunnel
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: chordsmith-cloudflared
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--url", "http://chordsmith:8000"]
+    networks:
+      - chordsmith-tunnel
+
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-ubuntu22.04-latest
+    container_name: voicevox
+    restart: unless-stopped
+    ports:
+      - "50021:50021"
+    networks:
+      - chordsmith-tunnel
+
+networks:
+  chordsmith-tunnel:
+    external: true

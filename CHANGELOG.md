@@ -10,6 +10,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Planned: quotas (bars, tracks, file size, storage, TTL) and a storage TTL cleanup for
 long-running servers.
 
+### Added
+
+- **One-command local stack**: `docker-compose.stack.yml` and `scripts/start-stack.cmd` bring up
+  the server, the Cloudflare quick tunnel, VOICEVOX and the manager UI; on every start the script
+  reads the tunnel's URL, updates `CHORDSMITH_PUBLIC_URL`, recreates the server when the URL
+  changed, and mints a matching monitor token. The VST bridge starter now reads its token from
+  `.env` when the environment does not provide one.
+
 ### Fixed
 
 - **Faster instrument and plugin listing**: the SFZ and VST3 folder scans stop as soon as they
