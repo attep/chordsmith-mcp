@@ -2535,14 +2535,42 @@ def remove_track(source: Path, target: Path, track_index: int) -> None:
 
 
 def extract_track(source: Path, target: Path, track_index: int) -> None:
-    """Write a copy of ``source`` with every note-free track (the conductor) and one note track (a stem)."""
+    """Write a copy of ``source`` with one note track and a conductor holding the tempo map.
+
+    Some exporters (MuseScore among them) keep the tempo and meter events in the first note
+    track instead of a note-free conductor. Keeping only note-free tracks as the conductor
+    dropped the map for every other stem, which then rendered at the MIDI default of 120 BPM
+    while the first stem stayed at the real tempo. Collect the meta events from every track.
+    """
     midi = mido.MidiFile(source)
-    keep = [
-        index
-        for index, track in enumerate(midi.tracks)
-        if index == track_index or not any(m.type == "note_on" and m.velocity > 0 for m in track)
-    ]
-    midi.tracks = [midi.tracks[index] for index in keep]
+    meta_types = ("set_tempo", "time_signature", "marker")
+    events: list[tuple[int, mido.MetaMessage]] = []
+    seen: set[tuple[int, tuple[int, ...]]] = set()
+    for track in midi.tracks:
+        tick = 0
+        for message in track:
+            tick += message.time
+            if message.is_meta and message.type in meta_types:
+                key = (tick, tuple(message.bytes()))
+                if key not in seen:
+                    seen.add(key)
+                    events.append((tick, message.copy(time=0)))
+    events.sort(key=lambda item: item[0])
+    conductor = mido.MidiTrack()
+    last = 0
+    for tick, message in events:
+        conductor.append(message.copy(time=tick - last))
+        last = tick
+    conductor.append(mido.MetaMessage("end_of_track", time=0))
+
+    stem = mido.MidiTrack()
+    for message in midi.tracks[track_index]:
+        if message.is_meta and message.type in meta_types:
+            continue
+        stem.append(message.copy())
+
+    midi.tracks = [conductor, stem]
+    midi.type = 1
     midi.save(target)
 
 

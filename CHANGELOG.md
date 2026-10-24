@@ -24,6 +24,11 @@ long-running servers.
 
 ### Fixed
 
+- **Stem renders keep the tempo map**: when a MIDI stores its tempo and meter events in a note
+  track (MuseScore exports do), splitting a song into stems dropped the map for every other
+  track; those stems rendered at the MIDI default 120 BPM while the first track kept the real
+  tempo, so a multi-track render drifted apart. Extracted stems now carry the tempo, meter and
+  section markers collected from every track.
 - **Faster instrument and plugin listing**: the SFZ and VST3 folder scans stop as soon as they
   hold the number of entries the listing shows, and never descend into a `.vst3` bundle (one
   plugin per bundle), so folders with thousands of files no longer add seconds to

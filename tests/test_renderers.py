@@ -427,6 +427,36 @@ async def test_list_instruments_inspects_a_given_soundfont(store, engine_availab
     assert broken.isError and "cannot be read" in broken.content[0].text
 
 
+def test_extract_track_keeps_a_tempo_map_held_in_a_note_track(tmp_path):
+    """MuseScore keeps tempo/meter in the first note track; a stem must still keep them."""
+    from chordsmith.singing import extract_track
+
+    midi = mido.MidiFile(type=1, ticks_per_beat=480)
+    guitar = mido.MidiTrack()
+    guitar.append(mido.MetaMessage("track_name", name="Guitar"))
+    guitar.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(100)))
+    guitar.append(mido.MetaMessage("time_signature", numerator=4, denominator=4))
+    guitar.append(mido.Message("note_on", note=60, velocity=100, time=0))
+    guitar.append(mido.Message("note_off", note=60, velocity=0, time=480))
+    bass = mido.MidiTrack()
+    bass.append(mido.MetaMessage("track_name", name="Bass"))
+    bass.append(mido.Message("note_on", note=36, velocity=100, time=480))
+    bass.append(mido.Message("note_off", note=36, velocity=0, time=480))
+    midi.tracks = [guitar, bass]
+    source = tmp_path / "song.mid"
+    midi.save(source)
+
+    stem = tmp_path / "stem.mid"
+    extract_track(source, stem, 1)
+
+    extracted = mido.MidiFile(stem)
+    tempos = [message.tempo for track in extracted.tracks for message in track if message.type == "set_tempo"]
+    assert tempos == [mido.bpm2tempo(100)]
+    assert len(extracted.tracks) == 2
+    # one beat of rest + one beat of note at 100 BPM = 1.2 s (120 BPM would be 1.0 s)
+    assert extracted.length == pytest.approx(1.2)
+
+
 async def test_override_program_rewrites_the_stem_midi(store, engine_available):
     from chordsmith.singing import extract_track
 
