@@ -10,6 +10,9 @@
 #   6. prints exactly what to paste into the UI.
 #
 # Double-click scripts\start-stack.cmd; run this file directly for the same without the pause.
+# Use -NoBrowser to skip opening the manager UI at the end.
+
+param([switch]$NoBrowser)
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
@@ -141,6 +144,21 @@ if ($mint) {
     if (-not $minted) { Write-Host 'WARNING: token minting failed; see the message above.' }
 }
 
+# The manager link carries the new URL and token, so nothing has to be copied out of the file.
+# (Only hand it over right after minting: once the UI renews, its stored token rotates and the
+# file's copy becomes stale.)
+$payload = $null
+if ($minted) {
+    $fresh = Get-Content $tokenPath -Raw | ConvertFrom-Json
+    $json = @{
+        u = $fresh.server_url
+        m = $fresh.mcp_path
+        c = $fresh.client_id
+        r = $fresh.refresh_token
+    } | ConvertTo-Json -Compress
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
 # 7. Summary -------------------------------------------------------------------
 Write-Host ''
 Write-Host 'ChordSmith is up:'
@@ -150,13 +168,41 @@ Write-Host '  voicevox    running'
 Write-Host '  containers  chordsmith, chordsmith-cloudflared, voicevox, chordsmith-frontend-1'
 Write-Host ''
 if ($minted) {
-    Write-Host 'The tunnel URL changed, so the manager needs the new token:'
-    Write-Host "  1. open $tokenPath"
-    Write-Host '  2. in the UI: Settings -> paste server_url, client ID and refresh token'
-    Write-Host '     (leave the Bearer token empty), then Save & reconnect.'
+    Write-Host 'The tunnel URL changed; a fresh manager token was minted.'
+    Write-Host "Fallback: the values are in $tokenPath (Settings -> server_url, client ID,"
+    Write-Host 'refresh token; leave the Bearer token empty).'
 } else {
     Write-Host 'Tunnel URL unchanged - the existing manager token still works.'
 }
 Write-Host ''
 Write-Host 'Windows VST bridge (for plugins): double-click scripts\start-bridge.cmd'
 Write-Host 'It reads CHORDSMITH_VST_BRIDGE_TOKEN from .env.'
+
+# 8. Open the manager (with the one-shot token link when a fresh token was minted) ----
+if (-not $NoBrowser) {
+    Write-Step 'opening the manager UI'
+    $ui = 'http://localhost:5173/'
+    $deadline = (Get-Date).AddSeconds(60)
+    while ($ui) {
+        try {
+            Invoke-WebRequest -Uri $ui -UseBasicParsing -TimeoutSec 2 | Out-Null
+            break
+        } catch {
+            if ((Get-Date) -gt $deadline) {
+                Write-Host 'UI did not answer; open http://localhost:5173 manually.'
+                $ui = $null
+                break
+            }
+            Start-Sleep -Seconds 2
+        }
+    }
+    if ($ui) {
+        $target = if ($payload) { "$ui#token=$payload" } else { $ui }
+        Start-Process $target | Out-Null
+        if ($payload) { Write-Host 'The manager was opened with the new URL and token.' }
+        else { Write-Host 'The manager was opened.' }
+    }
+}
+if ($NoBrowser -and $payload) {
+    Write-Host 'Fresh token not applied (-NoBrowser): paste the fallback values in Settings.'
+}

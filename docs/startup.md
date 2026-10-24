@@ -10,9 +10,11 @@ brings everything back and repairs the tunnel URL and manager token.
    automatic).
 2. Double-click **`scripts\start-stack.cmd`** (or run
    `powershell -ExecutionPolicy Bypass -File scripts\start-stack.ps1`).
-3. If it says the tunnel URL changed, open **`monitor-token.ui.json`** and paste `server_url`,
-   `client_id` and `refresh_token` into the UI's **Settings** — leave the Bearer token empty —
-   then **Save & reconnect**. If it says the URL is unchanged, nothing needs pasting.
+3. When the tunnel URL changed, `start-stack` mints a token and **opens the manager with it
+   already applied** (a one-shot `#token=` link the UI stores, then removes from the address
+   bar). If the browser does not open, or you use a different browser profile, paste
+   `server_url`, `client_id` and `refresh_token` from `monitor-token.ui.json` into **Settings**
+   (Bearer empty) and **Save & reconnect**.
 4. If you use Windows VST plugins, double-click **`scripts\start-bridge.cmd`** (a console window
    stays open while the bridge runs).
 
@@ -35,7 +37,10 @@ Assistant tab. Other containers on the machine are unrelated to ChordSmith.
 A quick tunnel asks Cloudflare for a new random hostname every time it starts. The server's
 `CHORDSMITH_PUBLIC_URL` — used for OAuth metadata and the token audience — must match it, so
 `start-stack` rewrites `.env` and recreates the server; tokens minted for the old hostname stop
-working. `start-stack` mints a new pair automatically in that case.
+working. `start-stack` mints a new pair automatically in that case and hands it to the manager through a
+one-shot startup link. The link carries the refresh token in the URL fragment: the fragment is
+never sent to a server and the UI removes it from the address bar immediately after storing the
+settings. Pass `-NoBrowser` to `start-stack.ps1` to skip opening the browser.
 
 **Permanent fix:** use a named Cloudflare tunnel (stable hostname) — see `docs/remote.md`. With a
 stable URL, tokens survive reboots, external clients keep the same connector URL, and

@@ -17,6 +17,10 @@ long-running servers.
   reads the tunnel's URL, updates `CHORDSMITH_PUBLIC_URL`, recreates the server when the URL
   changed, and mints a matching monitor token. The VST bridge starter now reads its token from
   `.env` when the environment does not provide one.
+- **Hands-off manager sign-in after a reboot**: when a new token is minted, `start-stack` opens
+  the manager with the tunnel URL and token in a one-shot `#token=` link; the UI stores the
+  settings before mounting and strips the fragment immediately, so no values need copying from
+  the token file.
 
 ### Fixed
 
